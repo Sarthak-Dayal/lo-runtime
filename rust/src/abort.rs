@@ -6,9 +6,9 @@
 //! accompanying stderr is present on both targets, in the same format, for the
 //! harness to match on (delta D-B3).
 
-/// Host stderr-write import (`runtime-abi.md` §3.7): `host.write_stderr(ptr, len)`
-/// writes `len` bytes of linear memory at `ptr` to the process's stderr. The WASM
-/// abort path emits the §3.8 message through it before trapping (delta D-B3).
+// Host stderr-write import (`runtime-abi.md` §3.7): `host.write_stderr(ptr, len)`
+// writes `len` bytes of linear memory at `ptr` to the process's stderr. The WASM
+// abort path emits the §3.8 message through it before trapping.
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "host")]
 extern "C" {
