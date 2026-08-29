@@ -57,7 +57,9 @@ lo-runtime/
 │   └── expected/        # expected outputs (language-agnostic)
 ├── rust/                # Rust skeleton (Cargo)
 ├── zig/                 # Zig skeleton (build.zig)
-└── cpp/                 # C++ skeleton (CMake)
+├── cpp/                 # C++ skeleton (CMake)
+└── tools/
+    └── wasmrun/         # WASM host harness (course toolchain), see below
 ```
 
 ## Picking a skeleton
@@ -78,6 +80,21 @@ team wants to write a garbage collector and string routines in.
 
 If your team has no strong preference, Rust is the most-trodden path for this
 kind of runtime work and has the gentlest WASM setup.
+
+## The `wasmrun` host harness
+
+[`tools/wasmrun/`](tools/wasmrun/) is a standalone crate providing `wasmrun`,
+the WASM host harness for the course toolchain: it supplies the runtime's
+`host` I/O imports (not WASI) via the [wasmtime](https://wasmtime.dev/)
+embedding API and runs a linked LO module, per the P1 handout. Build and
+install it with:
+
+```
+cargo install --path tools/wasmrun
+```
+
+You shouldn't normally need to do this yourself — the course Dockerfile
+installs `wasmrun` automatically as part of the standard build environment.
 
 ## Getting started
 

@@ -1,0 +1,17 @@
+[package]
+name = "wasmrun"
+description = "WASM host harness for the CS 378H course toolchain — supplies the runtime's `host` I/O imports and runs a linked LO module"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "wasmrun"
+path = "src/main.rs"
+
+# The one place a WASM engine is needed. The runtime's WASM I/O is a set of
+# custom `host` imports (not WASI), so running a linked module needs the
+# embedding API to supply them — hence wasmtime as a library, not the CLI.
+[dependencies]
+wasmtime = { version = "33", default-features = false, features = ["cranelift", "runtime"] }
+anyhow = "1"
