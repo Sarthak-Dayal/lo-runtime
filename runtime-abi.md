@@ -1,25 +1,10 @@
-<!--
-  ============================================================================
-  VENDORED COPY — DO NOT EDIT HERE.
-  Canonical source: runtime-abi.md in the (private) planning repo.
-  This file is a snapshot, refreshed by re-vendoring whenever the canonical ABI
-  changes. Re-vendor into BOTH consumers: this file (lo-runtime/runtime-abi.md)
-  and lo-compiler/vendor/spec/runtime-abi.md. Edits made directly here will be
-  overwritten by the next re-vendor.
-  Last re-vendored: 2026-06-03 from planning/runtime-abi.md
-    (latest: §3.7 eof()-guard guidance clarified — robust for line/read_string
-     loops, not token read_int/read_bool loops on trailing whitespace.
-     Earlier this date: WS-11 Phase-B deltas D-B1/D-B3 + §4.4 rewording.)
-  ============================================================================
--->
-
 # CS 378H — LO Runtime ABI Specification
 
 **Fall 2026.**
 
-This document specifies the runtime application binary interface that LO-toolchain teams program against in P3. The ABI is the contract between code emitted by your compiler — both WASM and native — and the runtime library that implements allocation, garbage collection, string operations, type checking, and I/O.
+This document specifies the runtime application binary interface that LO-toolchain teams program against in P3. The ABI is the contract between code emitted by a team's compiler — both WASM and native — and the runtime library that implements allocation, garbage collection, string operations, type checking, and I/O.
 
-The instructor provides three reference skeletons — one each in Rust, Zig, and modern C++ — that share this ABI. Each compiles cleanly with stubbed entry points (`unimplemented!()`, `unreachable`, or equivalent); your job in P3 is to implement the bodies. Teams pick whichever skeleton matches their chosen runtime language.
+The instructor provides three reference skeletons — one each in Rust, Zig, and modern C++ — that share this ABI. Each compiles cleanly with stubbed entry points (`unimplemented!()`, `unreachable`, or equivalent); the P3 task is to implement the bodies. Teams pick whichever skeleton matches their chosen runtime language.
 
 ---
 
@@ -29,7 +14,7 @@ The instructor provides three reference skeletons — one each in Rust, Zig, and
 - Function names are unmangled; symbols are exactly as written below.
 - Pointer sizes follow the target: 64 bits on `x86_64-linux`; 32 bits on `wasm32-unknown-unknown`. Struct sizes given below assume 64-bit pointers. WASM teams adjust pointer-sized fields accordingly. The course targets x86-64 only; see `architecture-reference.md`.
 - Integer types follow C99 conventions: `u32`, `i32`, `u64`, `i64`.
-- The runtime is single-threaded; concurrency is out of scope unless your LO-5 brings it in.
+- The runtime is single-threaded; concurrency is out of scope unless a team's LO-5 brings it in.
 - Every runtime entry point is a *safepoint*: it may trigger GC. Codegen must ensure all live pointer roots are reflected on the shadow stack before any runtime call.
 
 ---
@@ -46,7 +31,7 @@ Object {
 }
 ```
 
-Total: 16 bytes on 64-bit, 12 bytes on WASM. Fields follow the header; their offsets come from the class descriptor.
+Total: 16 bytes on 64-bit, 12 bytes on WASM. Fields follow the header; their offsets are compile-time constants of the class layout (the descriptor records `instance_size` and the collector's `pointer_offsets`, not a per-field table).
 
 ### 2.1 ClassDescriptor
 
@@ -132,7 +117,7 @@ Roots are tracked via a linked list of stack-allocated frames. Codegen lays out 
 struct ShadowFrame {
     parent:    *mut ShadowFrame,
     num_roots: u32,
-    roots:     [*mut Object; N],   // N varies per function
+    roots:     [*mut Object; num_roots],
 }
 
 extern "C" fn lo_push_frame(frame: *mut ShadowFrame)
@@ -144,8 +129,8 @@ Codegen pattern at function entry:
 ```
 let frame: ShadowFrame = ShadowFrame {
     parent:    /* runtime fills in current */ null,
-    num_roots: <N for this function>,
-    roots:     [null; N],
+    num_roots: <num_roots for this function>,
+    roots:     [null; num_roots],
 };
 lo_push_frame(&frame);
 ```
@@ -156,7 +141,7 @@ Codegen pattern at function exit (immediately before return):
 lo_pop_frame();
 ```
 
-At each safepoint (just before any call that may trigger GC — which includes all `lo_*` calls), codegen updates `frame.roots[i]` for each live pointer-typed local. The runtime maintains a thread-local `current_frame` pointer; `lo_push_frame` swaps it with the new frame's parent slot, and `lo_pop_frame` restores.
+At each safepoint (just before any call that may trigger GC — which includes all `lo_*` calls), codegen updates `frame.roots[i]` for each live pointer-typed local. The runtime maintains a single `current_frame` pointer (LO is single-threaded, so one suffices); `lo_push_frame` swaps it with the new frame's parent slot, and `lo_pop_frame` restores.
 
 ### 3.4 GC operations
 
@@ -165,7 +150,7 @@ extern "C" fn lo_gc_collect()
 extern "C" fn lo_gc_write_barrier(obj: *mut Object, field_offset: u32, value: *mut Object)
 ```
 
-`lo_gc_collect` forces a collection. The runtime walks the shadow-stack chain from `current_frame` to determine the root set, scans the heap, and reclaims unreachable objects. The semantics — semispace, generational, mark-compact — are determined by the GC algorithm your team selects from the P3 menu. Codegen calls `lo_gc_collect` explicitly only in tests; production code triggers collection through `lo_alloc`'s OOM path.
+`lo_gc_collect` forces a collection. The runtime walks the shadow-stack chain from `current_frame` to determine the root set, scans the heap, and reclaims unreachable objects. The semantics — semispace, generational, mark-compact — are determined by the GC algorithm the team selects from the P3 menu. Codegen calls `lo_gc_collect` explicitly only in tests; production code triggers collection through `lo_alloc`'s OOM path.
 
 `lo_gc_write_barrier` is called by codegen at every pointer store: any time a heap object's pointer field is updated to reference another heap object. Behavior depends on the chosen collector:
 
@@ -202,7 +187,7 @@ extern "C" fn lo_runtime_init()
 extern "C" fn lo_runtime_shutdown()
 ```
 
-`lo_runtime_init` must be called before any other entry point. It initializes the heap, the shadow-stack root, and internal state. (`LO_EMPTY_STRING` is a `.rodata` static and needs no initialization — see §2.3.) Codegen emits a call at the top of `main` (native) or in the WASM module's `start` function.
+`lo_runtime_init` must be called before any other entry point. It initializes the heap, the shadow-stack root, and internal state. (`LO_EMPTY_STRING` is a `.rodata` static and needs no initialization — see §2.3.) Codegen emits a call at the top of `main` (native); on WASM, `lo_entry` calls it before constructing `Main` — the linked module has no `start` section (`wasm-ld --no-entry`; see §4.2).
 
 `lo_runtime_shutdown` is optional on native (the OS reclaims memory), useful in tests to validate no-leak invariants.
 
@@ -233,7 +218,7 @@ Read semantics:
 - `lo_read_int` reads the next integer token from stdin, skipping leading whitespace. Aborts with `lo_read_int: malformed token` and exit status 110 on bad input, or `lo_read_int: end of input` and exit status 111 on EOF before any integer characters.
 - `lo_read_bool` reads the next whitespace-delimited token and accepts `true` or `false`. Aborts with `lo_read_bool: invalid token` and exit status 112 on anything else.
 - `lo_read_string` reads up to the next newline; the newline is consumed but excluded from the returned `StringObject`. Returns the empty string on immediate end-of-input — use `lo_eof` to disambiguate end-of-input from a blank line.
-- `lo_eof` returns `true` iff stdin is at end-of-input without consuming any bytes. It is a robust loop guard for **line-oriented** input: `while ( ! eof() ) { s = read_string(); … }` terminates cleanly, because `read_string` consumes its trailing newline, so after the last line the stream is at end-of-input. For **token** input (`lo_read_int` / `lo_read_bool`), `eof()` is **not** a robust guard on its own: it consumes no bytes and the token reads skip leading whitespace, so any trailing whitespace (e.g. a final newline) leaves `eof()` reporting not-at-end after the last token — `while ( ! eof() ) { read_int(); }` then reads once more and aborts with exit 111. Token-reading loops should read an explicit count first (read `n`, then read `n` values) or consume input of known exact length.
+- `lo_eof` returns `true` iff stdin is at end-of-input without consuming any bytes. It is a robust loop guard for **line-oriented** input: `while ( ! eof() ) { s = read_string(); … }` terminates cleanly, because `read_string` consumes its trailing newline, so after the last line the stream is at end-of-input. For **token** input (`lo_read_int` / `lo_read_bool`), `eof()` is **not** a robust guard on its own: it consumes no bytes and the token reads skip leading whitespace, so any trailing whitespace (e.g., a final newline) leaves `eof()` reporting not-at-end after the last token — `while ( ! eof() ) { read_int(); }` then reads once more and aborts with exit 111. Token-reading loops should read an explicit count first (read `n`, then read `n` values) or consume input of known exact length.
 
 The I/O surface is the lowering target for the synthetic `Input` and `Output` standard-preamble classes documented in `lo-3-reference.md` §4.6, accessed by user code through the three pre-bound names `in`, `out`, `err`. The preamble classes and pre-bound names are codegen-side recognition patterns, not runtime concepts; the ABI only exposes the entry points and lets codegen do the binding.
 
@@ -261,7 +246,7 @@ A summary of all native exit codes emitted by the runtime, for cross-reference:
 | 120 | `string_repeat` negative count | `lo_string_repeat` (§3.2) |
 | 137 | Heap exhausted | `lo_alloc` (§3.1) |
 
-WASM equivalents are `unreachable` traps, each **preceded by the runtime emitting the documented message** through the host stderr-write import (§3.7) — so the accompanying stderr message is present, in the same format as native, for the harness to match on. *(Earlier the WASM abort path discarded the message and trapped silently; restored 2026-06-03 per delta D-B3, for parity with native and so that distinguishing abort kinds does not depend on link-surviving symbol names in a backtrace.)*
+WASM equivalents are `unreachable` traps, each **preceded by the runtime emitting the documented message** through the host stderr-write import (§3.7) — so the accompanying stderr message is present, in the same format as native, for the harness to match on. <!-- Earlier the WASM abort path discarded the message and trapped silently; restored 2026-06-03 per delta D-B3, for parity with native and so that distinguishing abort kinds does not depend on link-surviving symbol names in a backtrace. -->
 
 ---
 
@@ -272,13 +257,13 @@ WASM equivalents are `unreachable` traps, each **preceded by the runtime emittin
 Each skeleton compiles to one native artifact plus one WASM artifact:
 
 - A static library (`liblo_runtime.a` or platform-equivalent) for native AOT linkage on `x86_64-linux-gnu`.
-- A WASM **static library** (an archive of relocatable `wasm32-unknown-unknown` objects, e.g. `liblo_runtime.a` under the wasm target directory) that the student's WASM object is linked against into a single module. *(Prior to 2026-06-03 this was a separately-instantiated `lo_runtime.wasm` module; §4.2 explains why the single-linked-module model replaced it.)*
+- A WASM **static library** (an archive of relocatable `wasm32-unknown-unknown` objects, e.g., `liblo_runtime.a` under the wasm target directory) that the student's WASM object is linked against into a single module. <!-- Prior to 2026-06-03 this was a separately-instantiated `lo_runtime.wasm` module; §4.2 explains why the single-linked-module model replaced it. -->
 
-Build commands and per-language tooling — Cargo for Rust, `build.zig` for Zig, CMake for C++ — are documented in each skeleton's own `README.md`. The artifacts produced are interchangeable: you can link against `liblo_runtime.a` from any of the three skeletons and the result behaves identically.
+Build commands and per-language tooling — Cargo for Rust, `build.zig` for Zig, CMake for C++ — are documented in each skeleton's own `README.md`. The artifacts produced are interchangeable: a compiler can link against `liblo_runtime.a` from any of the three skeletons and the result behaves identically.
 
 ### 4.2 Linkage mechanics
 
-**Native.** The student's compiler emits assembly with unresolved references to `lo_alloc`, `lo_string_concat`, etc. The system assembler turns the assembly into an object file; the system linker resolves the references against `liblo_runtime.a`. Emit standard PLT/GOT relocations.
+**Native.** The student's compiler emits assembly with unresolved references to `lo_alloc`, `lo_string_concat`, etc. The system assembler turns the assembly into an object file; the system linker resolves the references against `liblo_runtime.a`. Because the runtime is linked **statically**, every reference resolves to a direct `call` at link time — the standard `R_X86_64_PLT32` relocation the assembler emits for `call lo_alloc` relaxes to a direct call against a static definition, and no PLT or GOT indirection exists at runtime.
 
 **WASM.** The student's compiler emits the program as a *relocatable* WASM object (the LLVM `wasm32-unknown-unknown` object format) with unresolved references to `lo_alloc`, `lo_string_concat`, etc. That object is linked against the runtime WASM static library (§4.1) with `wasm-ld` (`rust-lld -flavor wasm`) into a **single module with one linear memory**:
 
@@ -288,7 +273,7 @@ wasm-ld --no-entry --export=lo_entry --allow-undefined student.o liblo_runtime.a
 
 A single linked module is required because object pointers are `i32` offsets into linear memory: the student's static data (class descriptors, string literals) and the runtime's static data, shadow-stack region, and heap must share one memory, and the linker is what lays them out contiguously without collision. The runtime's `host` I/O functions (§3.7) remain imports, supplied by the host at instantiation; the linked module exports `memory` and the synthesized entry `lo_entry` (`() -> i32`, returning the program's exit status).
 
-*(This replaces the pre-2026-06-03 two-module import model — where the student module declared `(import "lo_runtime" …)` functions and the host instantiated the runtime module first, then the student module with the runtime's exports as the import object. That model was infeasible: two separately-instantiated modules get separate linear memories with no way to share pointers or coordinate static-data / stack / heap layout within one memory. Surfaced by WS-11 Phase B, delta D-B1; DC-confirmed 2026-06-03.)*
+<!-- This replaces the pre-2026-06-03 two-module import model — where the student module declared `(import "lo_runtime" …)` functions and the host instantiated the runtime module first, then the student module with the runtime's exports as the import object. That model was infeasible: two separately-instantiated modules get separate linear memories with no way to share pointers or coordinate static-data / stack / heap layout within one memory. Surfaced by WS-11 Phase B, delta D-B1; DC-confirmed 2026-06-03. -->
 
 ### 4.3 Skeleton repository structure
 
@@ -349,7 +334,7 @@ Tests live at the repo root because they are LO programs and language-agnostic. 
 
 The stubs are real enough that the skeleton compiles, links, and runs. Programs that don't use strings — and, in LO-4, don't use casts — run end-to-end against the unmodified skeleton, since allocation is backed by the reference collector. As teams implement the remaining pieces, more test programs pass.
 
-*(Note on the reference apparatus: the instructor's grading runtime additionally carries reference implementations of the five string operations and the cast/`instanceof` checks, which are **not** shipped in this skeleton precisely because implementing them is the student's task — for strings, the whole task. They live in the private grading apparatus, not here. Cheney is the deliberate exception: it ships as a reference because the P3 GC task is to build a *different* collector, so the reference does not pre-empt the assignment. See planning WS-14.)*
+<!-- Note on the reference apparatus: the instructor's grading runtime additionally carries reference implementations of the five string operations and the cast/`instanceof` checks, which are **not** shipped in this skeleton precisely because implementing them is the student's task — for strings, the whole task. They live in the private grading apparatus, not here. Cheney is the deliberate exception: it ships as a reference because the P3 GC task is to build a *different* collector, so the reference does not pre-empt the assignment. See planning WS-14. -->
 
 ### 4.5 Cross-skeleton conformance
 
@@ -359,7 +344,7 @@ The three skeletons are kept in sync by the shared test suite. The instructor's 
 
 ## 5. LO-5 extensions
 
-LO-5 features that grow the ABI must document the additions in the team's FSD (section 6, "Implementation impact, per component"). Common extension shapes:
+LO-5 features that grow the ABI must document the additions in the team's FSD (§6, "Implementation impact, per component"). Common extension shapes:
 
 - **Closures.** New entry point for closure allocation; environment records become a new GC root kind. Likely additions: `lo_closure_alloc(...)` and a closure-class descriptor.
 - **Try / catch.** Adds a personality function and unwinder hooks. Native uses `_Unwind_RaiseException` and friends. WASM does not have native exception support in the baseline; teams typically use a custom propagation mechanism through the runtime.
