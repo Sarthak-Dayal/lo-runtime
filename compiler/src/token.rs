@@ -1,0 +1,57 @@
+#[derive(Debug, Clone, PartialEq)]
+pub struct Token {
+    pub kind: TokenKind,
+    pub line: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TokenKind {
+    Ident(String),
+    Num(i32),
+    Str(String),
+
+    KwInt,
+    KwBool,
+    KwString,
+    KwVoid,
+    KwClass,
+    KwExtends,
+    KwThis,
+    KwSuper,
+    KwNull,
+    KwNew,
+    KwReturn,
+    KwIf,
+    KwElse,
+    KwWhile,
+    KwBreak,
+    KwTrue,
+    KwFalse,
+    KwInstanceof,
+
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    Semicolon,
+    Comma,
+    Dot,
+    Question,
+    Colon,
+    Equals,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+    Amp,
+    Pipe,
+    Lt,
+    Gt,
+    Tilde,
+    Bang,
+
+    Eof,
+}
