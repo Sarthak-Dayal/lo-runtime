@@ -293,3 +293,358 @@ impl<'a> Lexer<'a> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::token::TokenKind::*;
+
+    fn kinds(source: &str) -> Vec<TokenKind> {
+        tokenize(source)
+            .unwrap_or_else(|e| panic!("unexpected lex error on {source:?}: {e:?}"))
+            .into_iter()
+            .map(|t| t.kind)
+            .collect()
+    }
+
+    fn lines(source: &str) -> Vec<u32> {
+        tokenize(source)
+            .unwrap_or_else(|e| panic!("unexpected lex error on {source:?}: {e:?}"))
+            .into_iter()
+            .map(|t| t.line)
+            .collect()
+    }
+
+    // --- Acceptance table from lexer_implementation.md ---
+
+    #[test]
+    fn empty_input_is_just_eof() {
+        assert_eq!(kinds(""), vec![Eof]);
+        assert_eq!(lines(""), vec![1]);
+    }
+
+    #[test]
+    fn assignment_statement() {
+        assert_eq!(
+            kinds("radius = data;"),
+            vec![
+                Ident("radius".into()),
+                Equals,
+                Ident("data".into()),
+                Semicolon,
+                Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn declaration_statement() {
+        assert_eq!(
+            kinds("int radius;"),
+            vec![KwInt, Ident("radius".into()), Semicolon, Eof]
+        );
+    }
+
+    #[test]
+    fn integer_literal() {
+        assert_eq!(kinds("42"), vec![Num(42), Eof]);
+    }
+
+    #[test]
+    fn string_literal() {
+        assert_eq!(kinds("\"hello\""), vec![Str("hello".into()), Eof]);
+    }
+
+    #[test]
+    fn string_with_newline_escape_stays_on_one_line() {
+        let toks = tokenize("\"a\\nb\"").unwrap();
+        assert_eq!(toks[0].kind, Str("a\nb".into()));
+        assert_eq!(toks[0].line, 1);
+        assert_eq!(toks[1].kind, Eof);
+    }
+
+    #[test]
+    fn line_comment_then_next_line() {
+        let src = "// comment\nint x;";
+        assert_eq!(kinds(src), vec![KwInt, Ident("x".into()), Semicolon, Eof]);
+        assert_eq!(lines(src), vec![2, 2, 2, 2]);
+    }
+
+    #[test]
+    fn identifier_allows_trailing_apostrophe() {
+        assert_eq!(kinds("x'"), vec![Ident("x'".into()), Eof]);
+    }
+
+    #[test]
+    fn single_char_bitwise_and() {
+        assert_eq!(
+            kinds("(1 & 0)"),
+            vec![LParen, Num(1), Amp, Num(0), RParen, Eof]
+        );
+    }
+
+    #[test]
+    fn unicode_escape_hello() {
+        assert_eq!(
+            kinds("\"\\u{48}\\u{65}\\u{6C}\\u{6C}\\u{6F}\""),
+            vec![Str("Hello".into()), Eof]
+        );
+    }
+
+    #[test]
+    fn unicode_escape_surrogate_is_rejected() {
+        let err = tokenize("\"\\u{D800}\"").unwrap_err();
+        assert_eq!(
+            err,
+            LexError {
+                kind: LexErrorKind::InvalidUnicodeEscape,
+                line: 1
+            }
+        );
+    }
+
+    #[test]
+    fn integer_literal_overflow() {
+        let err = tokenize("99999999999").unwrap_err();
+        assert_eq!(
+            err,
+            LexError {
+                kind: LexErrorKind::IntegerLiteralOverflow("99999999999".into()),
+                line: 1
+            }
+        );
+    }
+
+    #[test]
+    fn unterminated_string() {
+        let err = tokenize("\"abc").unwrap_err();
+        assert_eq!(
+            err,
+            LexError {
+                kind: LexErrorKind::UnterminatedString,
+                line: 1
+            }
+        );
+    }
+
+    #[test]
+    fn unexpected_char() {
+        let err = tokenize("@").unwrap_err();
+        assert_eq!(
+            err,
+            LexError {
+                kind: LexErrorKind::UnexpectedChar('@'),
+                line: 1
+            }
+        );
+    }
+
+    // --- Additional coverage beyond the acceptance table ---
+
+    #[test]
+    fn all_keywords_recognized() {
+        let src = "int bool String void class extends this super null new \
+                    return if else while break true false instanceof";
+        assert_eq!(
+            kinds(src),
+            vec![
+                KwInt,
+                KwBool,
+                KwString,
+                KwVoid,
+                KwClass,
+                KwExtends,
+                KwThis,
+                KwSuper,
+                KwNull,
+                KwNew,
+                KwReturn,
+                KwIf,
+                KwElse,
+                KwWhile,
+                KwBreak,
+                KwTrue,
+                KwFalse,
+                KwInstanceof,
+                Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn reserved_names_lex_as_plain_idents() {
+        for name in ["in", "out", "err", "Main", "Input", "Output"] {
+            assert_eq!(kinds(name), vec![Ident(name.into()), Eof], "for {name}");
+        }
+    }
+
+    #[test]
+    fn all_single_char_punctuation() {
+        assert_eq!(
+            kinds("(){}[];,.?:=+-*/%&|<>~!"),
+            vec![
+                LParen, RParen, LBrace, RBrace, LBracket, RBracket, Semicolon, Comma, Dot,
+                Question, Colon, Equals, Plus, Minus, Star, Slash, Percent, Amp, Pipe, Lt, Gt,
+                Tilde, Bang, Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn no_double_char_operators_exist() {
+        // `==` lexes as two separate Equals tokens, not one operator.
+        assert_eq!(kinds("=="), vec![Equals, Equals, Eof]);
+        // `&&` lexes as two separate Amp tokens.
+        assert_eq!(kinds("&&"), vec![Amp, Amp, Eof]);
+        // `||` lexes as two separate Pipe tokens.
+        assert_eq!(kinds("||"), vec![Pipe, Pipe, Eof]);
+    }
+
+    #[test]
+    fn division_operator_not_confused_with_comment() {
+        assert_eq!(
+            kinds("a / b"),
+            vec![Ident("a".into()), Slash, Ident("b".into()), Eof]
+        );
+    }
+
+    #[test]
+    fn line_comment_at_end_of_file_with_no_trailing_newline() {
+        assert_eq!(
+            kinds("int x; // trailing"),
+            vec![KwInt, Ident("x".into()), Semicolon, Eof]
+        );
+    }
+
+    #[test]
+    fn slash_star_is_not_a_block_comment() {
+        // Per lexer_implementation.md: block comments are not implemented.
+        // `/*` lexes as Slash, Star (two tokens), not a comment opener.
+        assert_eq!(
+            kinds("/* not a comment */"),
+            vec![
+                Slash,
+                Star,
+                Ident("not".into()),
+                Ident("a".into()),
+                Ident("comment".into()),
+                Star,
+                Slash,
+                Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn line_numbers_advance_across_blank_lines_and_comments() {
+        let src = "int a;\n\n// comment\nint b;";
+        assert_eq!(lines(src), vec![1, 1, 1, 4, 4, 4, 4]);
+    }
+
+    #[test]
+    fn raw_newline_inside_string_advances_line_but_token_keeps_start_line() {
+        let src = "\"line1\nline2\"\nint x;";
+        let toks = tokenize(src).unwrap();
+        assert_eq!(toks[0].kind, Str("line1\nline2".into()));
+        assert_eq!(toks[0].line, 1);
+        assert_eq!(toks[1].kind, KwInt);
+        assert_eq!(toks[1].line, 3);
+    }
+
+    #[test]
+    fn all_basic_escapes() {
+        assert_eq!(
+            kinds(r#""\"\\\n\t\r""#),
+            vec![Str("\"\\\n\t\r".into()), Eof]
+        );
+    }
+
+    #[test]
+    fn invalid_escape_char() {
+        let err = tokenize("\"\\q\"").unwrap_err();
+        assert_eq!(
+            err,
+            LexError {
+                kind: LexErrorKind::InvalidEscape('q'),
+                line: 1
+            }
+        );
+    }
+
+    #[test]
+    fn unicode_escape_above_max_scalar_is_rejected() {
+        let err = tokenize("\"\\u{110000}\"").unwrap_err();
+        assert_eq!(
+            err,
+            LexError {
+                kind: LexErrorKind::InvalidUnicodeEscape,
+                line: 1
+            }
+        );
+    }
+
+    #[test]
+    fn unicode_escape_missing_brace_forms_rejected() {
+        assert_eq!(
+            tokenize("\"\\u48\"").unwrap_err().kind,
+            LexErrorKind::InvalidUnicodeEscape
+        );
+        assert_eq!(
+            tokenize("\"\\u{48\"").unwrap_err().kind,
+            LexErrorKind::InvalidUnicodeEscape
+        );
+        assert_eq!(
+            tokenize("\"\\u{}\"").unwrap_err().kind,
+            LexErrorKind::InvalidUnicodeEscape
+        );
+    }
+
+    #[test]
+    fn unterminated_string_via_escape_at_eof() {
+        let err = tokenize("\"abc\\").unwrap_err();
+        assert_eq!(
+            err,
+            LexError {
+                kind: LexErrorKind::UnterminatedString,
+                line: 1
+            }
+        );
+    }
+
+    #[test]
+    fn max_i32_literal_accepted_but_one_more_overflows() {
+        assert_eq!(kinds("2147483647"), vec![Num(2147483647), Eof]);
+        assert!(tokenize("2147483648").is_err());
+    }
+
+    #[test]
+    fn identifier_with_digits_and_underscore() {
+        assert_eq!(kinds("a1_b2"), vec![Ident("a1_b2".into()), Eof]);
+    }
+
+    #[test]
+    fn string_keyword_vs_string_ident_case_sensitive() {
+        assert_eq!(kinds("String"), vec![KwString, Eof]);
+        assert_eq!(kinds("string"), vec![Ident("string".into()), Eof]);
+    }
+
+    #[test]
+    fn full_class_snippet() {
+        let src = "class Foo extends Bar {\n    int x;\n}\n";
+        assert_eq!(
+            kinds(src),
+            vec![
+                KwClass,
+                Ident("Foo".into()),
+                KwExtends,
+                Ident("Bar".into()),
+                LBrace,
+                KwInt,
+                Ident("x".into()),
+                Semicolon,
+                RBrace,
+                Eof,
+            ]
+        );
+    }
+}
