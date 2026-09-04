@@ -1,6 +1,7 @@
 # Rust
 /rust/target/
 /tools/wasmrun/target/
+/compiler/target/
 **/*.rs.bk
 
 # Zig
