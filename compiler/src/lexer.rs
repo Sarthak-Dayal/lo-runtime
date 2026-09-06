@@ -83,18 +83,9 @@ impl<'a> Lexer<'a> {
                 '~' => TokenKind::Tilde,
                 '!' => TokenKind::Bang,
 
-                '"' => {
-                    tokens.push(self.scan_string(line)?);
-                    continue;
-                }
-                '0'..='9' => {
-                    tokens.push(self.scan_number(c, line)?);
-                    continue;
-                }
-                c if c.is_ascii_alphabetic() => {
-                    tokens.push(self.scan_ident_or_keyword(c, line));
-                    continue;
-                }
+                '"' => self.scan_string(line)?,
+                '0'..='9' => self.scan_number(c, line)?,
+                c if c.is_ascii_alphabetic() => self.scan_ident_or_keyword(c),
 
                 other => {
                     return Err(LexError::new(LexErrorKind::UnexpectedChar(other), line));
@@ -137,7 +128,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn scan_number(&mut self, first: char, line: u32) -> Result<Token, LexError> {
+    fn scan_number(&mut self, first: char, line: u32) -> Result<TokenKind, LexError> {
         let mut text = String::new();
         text.push(first);
         while let Some(&c) = self.chars.peek() {
@@ -148,19 +139,12 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        match text.parse::<i32>() {
-            Ok(n) => Ok(Token {
-                kind: TokenKind::Num(n),
-                line,
-            }),
-            Err(_) => Err(LexError::new(
-                LexErrorKind::IntegerLiteralOverflow(text),
-                line,
-            )),
-        }
+        text.parse::<i32>()
+            .map(TokenKind::Num)
+            .map_err(|_| LexError::new(LexErrorKind::IntegerLiteralOverflow(text), line))
     }
 
-    fn scan_ident_or_keyword(&mut self, first: char, line: u32) -> Token {
+    fn scan_ident_or_keyword(&mut self, first: char) -> TokenKind {
         let mut text = String::new();
         text.push(first);
         while let Some(&c) = self.chars.peek() {
@@ -172,7 +156,7 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        let kind = match text.as_str() {
+        match text.as_str() {
             "int" => TokenKind::KwInt,
             "bool" => TokenKind::KwBool,
             "String" => TokenKind::KwString,
@@ -192,25 +176,18 @@ impl<'a> Lexer<'a> {
             "false" => TokenKind::KwFalse,
             "instanceof" => TokenKind::KwInstanceof,
             _ => TokenKind::Ident(text),
-        };
-
-        Token { kind, line }
+        }
     }
 
     /// Called with the opening `"` already consumed.
-    fn scan_string(&mut self, line: u32) -> Result<Token, LexError> {
+    fn scan_string(&mut self, line: u32) -> Result<TokenKind, LexError> {
         let mut value = String::new();
         loop {
             match self.chars.next() {
                 None | Some('\n') => {
                     return Err(LexError::new(LexErrorKind::UnterminatedString, line))
                 }
-                Some('"') => {
-                    return Ok(Token {
-                        kind: TokenKind::Str(value),
-                        line,
-                    })
-                }
+                Some('"') => return Ok(TokenKind::Str(value)),
                 Some('\\') => {
                     let resolved = self.scan_escape(line)?;
                     value.push(resolved);
