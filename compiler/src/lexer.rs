@@ -169,7 +169,7 @@ impl<'a> Lexer<'a> {
         let mut text = String::new();
         text.push(first);
         while let Some(&c) = self.chars.peek() {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '\'' {
+            if c.is_ascii_alphanumeric() || c == '_' {
                 text.push(c);
                 self.chars.next();
             } else {
@@ -371,8 +371,15 @@ mod tests {
     }
 
     #[test]
-    fn identifier_allows_trailing_apostrophe() {
-        assert_eq!(kinds("x'"), vec![Ident("x'".into()), Eof]);
+    fn apostrophe_is_not_part_of_an_identifier() {
+        let err = tokenize("x'").unwrap_err();
+        assert_eq!(
+            err,
+            LexError {
+                kind: LexErrorKind::UnexpectedChar('\''),
+                line: 1
+            }
+        );
     }
 
     #[test]
