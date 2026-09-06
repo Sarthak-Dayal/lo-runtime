@@ -17,8 +17,6 @@ pub enum LexErrorKind {
     IntegerLiteralOverflow(String),
 }
 
-/// Entry point. Tokenizes the whole source string. Always ends the returned
-/// vector with exactly one `Eof` token. Fails on the first error (no recovery).
 pub fn tokenize(source: &str) -> Result<Vec<Token>, LexError> {
     Lexer::new(source).run()
 }
@@ -104,8 +102,6 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Consumes whitespace and `//` line comments. Stops the instant it sees a
-    /// character that starts a real token (including a lone `/`).
     fn skip_whitespace_and_comments(&mut self) {
         loop {
             match self.chars.peek() {
@@ -117,24 +113,20 @@ impl<'a> Lexer<'a> {
                     self.line += 1;
                 }
                 Some('/') => {
-                    // Peek a second character ahead without consuming from the
-                    // real iterator, since Peekable only exposes one char of
-                    // lookahead. A cloned iterator is free to advance and discard.
+                    // Peekable only exposes one char of lookahead; clone to check the next one.
                     let mut ahead = self.chars.clone();
                     ahead.next();
                     if ahead.peek() == Some(&'/') {
-                        self.chars.next(); // first '/'
-                        self.chars.next(); // second '/'
+                        self.chars.next();
+                        self.chars.next();
                         while let Some(&next) = self.chars.peek() {
                             if next == '\n' {
                                 break;
                             }
                             self.chars.next();
                         }
-                        // leave the '\n' itself for this same loop to consume
-                        // next iteration, so the line counter increments exactly once
                     } else {
-                        return; // a real division-operator token starts here
+                        return;
                     }
                 }
                 _ => return,
@@ -311,8 +303,6 @@ mod tests {
             .collect()
     }
 
-    // --- Acceptance table from lexer_implementation.md ---
-
     #[test]
     fn empty_input_is_just_eof() {
         assert_eq!(kinds(""), vec![Eof]);
@@ -442,8 +432,6 @@ mod tests {
         );
     }
 
-    // --- Additional coverage beyond the acceptance table ---
-
     #[test]
     fn all_keywords_recognized() {
         let src = "int bool String void class extends this super null new \
@@ -495,11 +483,8 @@ mod tests {
 
     #[test]
     fn no_double_char_operators_exist() {
-        // `==` lexes as two separate Equals tokens, not one operator.
         assert_eq!(kinds("=="), vec![Equals, Equals, Eof]);
-        // `&&` lexes as two separate Amp tokens.
         assert_eq!(kinds("&&"), vec![Amp, Amp, Eof]);
-        // `||` lexes as two separate Pipe tokens.
         assert_eq!(kinds("||"), vec![Pipe, Pipe, Eof]);
     }
 
@@ -521,8 +506,6 @@ mod tests {
 
     #[test]
     fn slash_star_is_not_a_block_comment() {
-        // Per lexer_implementation.md: block comments are not implemented.
-        // `/*` lexes as Slash, Star (two tokens), not a comment opener.
         assert_eq!(
             kinds("/* not a comment */"),
             vec![
