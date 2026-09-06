@@ -113,7 +113,7 @@ impl<'a> Lexer<'a> {
                     self.line += 1;
                 }
                 Some('/') => {
-                    // Peekable only exposes one char of lookahead; clone to check the next one.
+                    // Distinguish a `//` comment from a division operator by checking the next char.
                     let mut ahead = self.chars.clone();
                     ahead.next();
                     if ahead.peek() == Some(&'/') {
