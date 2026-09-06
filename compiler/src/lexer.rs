@@ -17,6 +17,12 @@ pub enum LexErrorKind {
     IntegerLiteralOverflow(String),
 }
 
+impl LexError {
+    fn new(kind: LexErrorKind, line: u32) -> Self {
+        LexError { kind, line }
+    }
+}
+
 pub fn tokenize(source: &str) -> Result<Vec<Token>, LexError> {
     Lexer::new(source).run()
 }
@@ -91,10 +97,7 @@ impl<'a> Lexer<'a> {
                 }
 
                 other => {
-                    return Err(LexError {
-                        kind: LexErrorKind::UnexpectedChar(other),
-                        line,
-                    });
+                    return Err(LexError::new(LexErrorKind::UnexpectedChar(other), line));
                 }
             };
 
@@ -150,10 +153,10 @@ impl<'a> Lexer<'a> {
                 kind: TokenKind::Num(n),
                 line,
             }),
-            Err(_) => Err(LexError {
-                kind: LexErrorKind::IntegerLiteralOverflow(text),
+            Err(_) => Err(LexError::new(
+                LexErrorKind::IntegerLiteralOverflow(text),
                 line,
-            }),
+            )),
         }
     }
 
@@ -200,10 +203,7 @@ impl<'a> Lexer<'a> {
         loop {
             match self.chars.next() {
                 None | Some('\n') => {
-                    return Err(LexError {
-                        kind: LexErrorKind::UnterminatedString,
-                        line,
-                    })
+                    return Err(LexError::new(LexErrorKind::UnterminatedString, line))
                 }
                 Some('"') => {
                     return Ok(Token {
@@ -229,24 +229,15 @@ impl<'a> Lexer<'a> {
             Some('t') => Ok('\t'),
             Some('r') => Ok('\r'),
             Some('u') => self.scan_unicode_escape(line),
-            Some(other) => Err(LexError {
-                kind: LexErrorKind::InvalidEscape(other),
-                line,
-            }),
-            None => Err(LexError {
-                kind: LexErrorKind::UnterminatedString,
-                line,
-            }),
+            Some(other) => Err(LexError::new(LexErrorKind::InvalidEscape(other), line)),
+            None => Err(LexError::new(LexErrorKind::UnterminatedString, line)),
         }
     }
 
     /// Called with `\u` already consumed. Expects `{`, one or more hex digits, `}`.
     fn scan_unicode_escape(&mut self, line: u32) -> Result<char, LexError> {
         if self.chars.next() != Some('{') {
-            return Err(LexError {
-                kind: LexErrorKind::InvalidUnicodeEscape,
-                line,
-            });
+            return Err(LexError::new(LexErrorKind::InvalidUnicodeEscape, line));
         }
 
         let mut hex = String::new();
@@ -254,31 +245,18 @@ impl<'a> Lexer<'a> {
             match self.chars.next() {
                 Some('}') => break,
                 Some(c) if c.is_ascii_hexdigit() => hex.push(c),
-                _ => {
-                    return Err(LexError {
-                        kind: LexErrorKind::InvalidUnicodeEscape,
-                        line,
-                    })
-                }
+                _ => return Err(LexError::new(LexErrorKind::InvalidUnicodeEscape, line)),
             }
         }
 
         if hex.is_empty() {
-            return Err(LexError {
-                kind: LexErrorKind::InvalidUnicodeEscape,
-                line,
-            });
+            return Err(LexError::new(LexErrorKind::InvalidUnicodeEscape, line));
         }
 
-        let value = u32::from_str_radix(&hex, 16).map_err(|_| LexError {
-            kind: LexErrorKind::InvalidUnicodeEscape,
-            line,
-        })?;
+        let value = u32::from_str_radix(&hex, 16)
+            .map_err(|_| LexError::new(LexErrorKind::InvalidUnicodeEscape, line))?;
 
-        char::from_u32(value).ok_or(LexError {
-            kind: LexErrorKind::InvalidUnicodeEscape,
-            line,
-        })
+        char::from_u32(value).ok_or(LexError::new(LexErrorKind::InvalidUnicodeEscape, line))
     }
 }
 
