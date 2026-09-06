@@ -207,7 +207,7 @@ impl<'a> Lexer<'a> {
         let mut value = String::new();
         loop {
             match self.chars.next() {
-                None => {
+                None | Some('\n') => {
                     return Err(LexError {
                         kind: LexErrorKind::UnterminatedString,
                         line,
@@ -218,10 +218,6 @@ impl<'a> Lexer<'a> {
                         kind: TokenKind::Str(value),
                         line,
                     })
-                }
-                Some('\n') => {
-                    self.line += 1;
-                    value.push('\n');
                 }
                 Some('\\') => {
                     let resolved = self.scan_escape(line)?;
@@ -549,13 +545,15 @@ mod tests {
     }
 
     #[test]
-    fn raw_newline_inside_string_advances_line_but_token_keeps_start_line() {
-        let src = "\"line1\nline2\"\nint x;";
-        let toks = tokenize(src).unwrap();
-        assert_eq!(toks[0].kind, Str("line1\nline2".into()));
-        assert_eq!(toks[0].line, 1);
-        assert_eq!(toks[1].kind, KwInt);
-        assert_eq!(toks[1].line, 3);
+    fn raw_newline_inside_string_is_unterminated() {
+        let err = tokenize("\"line1\nline2\"").unwrap_err();
+        assert_eq!(
+            err,
+            LexError {
+                kind: LexErrorKind::UnterminatedString,
+                line: 1
+            }
+        );
     }
 
     #[test]
