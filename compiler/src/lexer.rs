@@ -179,7 +179,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Called with the opening `"` already consumed.
+    // Called with the opening `"` already consumed.
     fn scan_string(&mut self, line: u32) -> Result<TokenKind, LexError> {
         let mut value = String::new();
         loop {
@@ -197,7 +197,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Called with the backslash already consumed.
+    // Called with the backslash already consumed.
     fn scan_escape(&mut self, line: u32) -> Result<char, LexError> {
         match self.chars.next() {
             Some('"') => Ok('"'),
@@ -211,7 +211,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Called with `\u` already consumed. Expects `{`, one or more hex digits, `}`.
+    // Called with `\u` already consumed. Expects `{`, one or more hex digits, `}`.
     fn scan_unicode_escape(&mut self, line: u32) -> Result<char, LexError> {
         if self.chars.next() != Some('{') {
             return Err(LexError::new(LexErrorKind::InvalidUnicodeEscape, line));
