@@ -96,7 +96,7 @@ impl<'a> Parser<'a> {
         let constructors = if self.check(&TokenKind::LBracket) {
             self.advance();
             if self.check(&TokenKind::RBracket) {
-                return Err(err(
+                return Err(new_parse_error(
                     ErrorCode::EMalformedClassDecl,
                     self.peek().line,
                     "empty [ ] constructor section",
@@ -121,7 +121,7 @@ impl<'a> Parser<'a> {
 
         // `[` here means the constructor section came after the methods
         if self.check(&TokenKind::LBracket) {
-            return Err(err(
+            return Err(new_parse_error(
                 ErrorCode::EMalformedClassDecl,
                 self.peek().line,
                 "constructor [ ] section must come before the method body, not after",
@@ -169,7 +169,7 @@ impl<'a> Parser<'a> {
         let line = self.peek().line;
         let constructor_name = self.expect_ident_name()?;
         if constructor_name != class_name {
-            return Err(err(
+            return Err(new_parse_error(
                 ErrorCode::EMalformedConstructor,
                 line,
                 format!(
@@ -179,7 +179,7 @@ impl<'a> Parser<'a> {
             ));
         }
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
-        let params = self.parse_paren_list_or_empty(Self::parse_params)?;
+        let params = self.parse_optional_list(Self::parse_params)?;
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
 
         let (delegation, body) = self.parse_constructor_body_scope(class_name)?;
@@ -196,7 +196,7 @@ impl<'a> Parser<'a> {
         let return_type = self.parse_type()?;
         let name = self.expect_ident_name()?;
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
-        let params = self.parse_paren_list_or_empty(Self::parse_params)?;
+        let params = self.parse_optional_list(Self::parse_params)?;
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
         let body_scope = self.parse_method_body_scope(class_name)?;
         Ok(MethodDecl {
@@ -304,7 +304,7 @@ impl<'a> Parser<'a> {
         }
         self.advance(); // this/super
         self.advance(); // (
-        let args = self.parse_paren_list_or_empty(Self::parse_args)?;
+        let args = self.parse_optional_list(Self::parse_args)?;
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
         self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?;
         Ok(Some(if is_this {
@@ -327,7 +327,7 @@ impl<'a> Parser<'a> {
             stmts.push(self.parse_stmt(ctx)?);
         }
         if arity == StmtArity::OneOrMore && stmts.is_empty() {
-            return Err(err(
+            return Err(new_parse_error(
                 ErrorCode::EParsePhaseOther,
                 self.peek().line,
                 "expected at least one statement",
@@ -348,7 +348,7 @@ impl<'a> Parser<'a> {
                     .iter()
                     .any(|existing| existing.names.contains(&name));
             if is_duplicate {
-                return Err(err(
+                return Err(new_parse_error(
                     ErrorCode::EDuplicateLocal,
                     line,
                     format!("duplicate local '{}'", name),
@@ -391,7 +391,11 @@ impl<'a> Parser<'a> {
                 _ => ErrorCode::EDelegationNotFirstStatement,
             }
         };
-        Some(err(code, line, "misplaced constructor this()/super() call"))
+        Some(new_parse_error(
+            code,
+            line,
+            "misplaced constructor this()/super() call",
+        ))
     }
 
     fn parse_stmt(&mut self, ctx: &mut ParseContext) -> Result<Stmt, ParseError> {
@@ -430,7 +434,7 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::KwThis | TokenKind::KwSuper | TokenKind::LParen => self.parse_call_stmt(),
-            other => Err(err(
+            other => Err(new_parse_error(
                 ErrorCode::EParsePhaseOther,
                 line,
                 format!("unexpected token starting statement: {:?}", other),
@@ -502,7 +506,7 @@ impl<'a> Parser<'a> {
                 let inner = self.parse_parenthesized_content()?;
                 Ok(Receiver::Computed(Box::new(inner), line))
             }
-            other => Err(err(
+            other => Err(new_parse_error(
                 ErrorCode::EParsePhaseOther,
                 line,
                 format!(
@@ -560,8 +564,15 @@ impl<'a> Parser<'a> {
                     self.parse_method_call_suffix(Receiver::Super(line), line)?,
                 ))
             }
-            TokenKind::LParen => self.parse_paren_expr(),
-            other => Err(err(
+            TokenKind::LParen => {
+                let value = self.parse_parenthesized_content()?;
+                self.var_or_call(
+                    Receiver::Computed(Box::new(value.clone()), line),
+                    value,
+                    line,
+                )
+            }
+            other => Err(new_parse_error(
                 ErrorCode::EParsePhaseOther,
                 line,
                 format!("unexpected token starting expression: {:?}", other),
@@ -587,7 +598,7 @@ impl<'a> Parser<'a> {
         self.advance(); // new
         let name = self.expect_ident_name()?;
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
-        let args = self.parse_paren_list_or_empty(Self::parse_args)?;
+        let args = self.parse_optional_list(Self::parse_args)?;
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
         Ok(Expr::New(name, args, line))
     }
@@ -600,7 +611,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::Dot, ErrorCode::EParsePhaseOther)?;
         let name = self.expect_ident_name()?;
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
-        let args = self.parse_paren_list_or_empty(Self::parse_args)?;
+        let args = self.parse_optional_list(Self::parse_args)?;
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
         Ok(MethodCall {
             receiver,
@@ -608,19 +619,6 @@ impl<'a> Parser<'a> {
             args,
             line,
         })
-    }
-
-    fn parse_paren_expr(&mut self) -> Result<Expr, ParseError> {
-        let line = self.peek().line;
-        let value = self.parse_parenthesized_content()?;
-        if self.check(&TokenKind::Dot) {
-            Ok(Expr::Call(self.parse_method_call_suffix(
-                Receiver::Computed(Box::new(value), line),
-                line,
-            )?))
-        } else {
-            Ok(value)
-        }
     }
 
     fn parse_parenthesized_content(&mut self) -> Result<Expr, ParseError> {
@@ -691,7 +689,7 @@ impl<'a> Parser<'a> {
                     self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
                     Ok(Expr::Binary(Box::new(first), op, Box::new(right), line))
                 } else {
-                    Err(err(
+                    Err(new_parse_error(
                         ErrorCode::EParsePhaseOther,
                         self.peek().line,
                         format!(
@@ -719,7 +717,7 @@ impl<'a> Parser<'a> {
                 self.advance(); // closes outer (
                 match ty {
                     Type::Class(name) => Ok(Expr::Var(name, outer_line)),
-                    _ => Err(err(
+                    _ => Err(new_parse_error(
                         ErrorCode::EParsePhaseOther,
                         outer_line,
                         "a primitive type in parens with nothing following is not a valid expression",
@@ -776,7 +774,7 @@ impl<'a> Parser<'a> {
         if self.check(&kind) {
             Ok(self.advance())
         } else {
-            Err(err(
+            Err(new_parse_error(
                 code,
                 self.peek().line,
                 format!("expected {:?}, found {:?}", kind, self.peek().kind),
@@ -791,12 +789,12 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(name)
             }
-            kind if Self::is_keyword(&kind) => Err(err(
+            kind if Self::is_keyword(&kind) => Err(new_parse_error(
                 ErrorCode::EReservedKeywordAsIdentifier,
                 line,
                 format!("expected an identifier, found reserved keyword {:?}", kind),
             )),
-            other => Err(err(
+            other => Err(new_parse_error(
                 ErrorCode::EParsePhaseOther,
                 line,
                 format!("expected an identifier, found {:?}", other),
@@ -873,7 +871,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_paren_list_or_empty<T>(
+    fn parse_optional_list<T>(
         &mut self,
         parse_list: fn(&mut Self) -> Result<Vec<T>, ParseError>,
     ) -> Result<Vec<T>, ParseError> {
@@ -885,7 +883,7 @@ impl<'a> Parser<'a> {
     }
 }
 
-fn err(code: ErrorCode, line: u32, message: impl Into<String>) -> ParseError {
+fn new_parse_error(code: ErrorCode, line: u32, message: impl Into<String>) -> ParseError {
     ParseError {
         code,
         line,
@@ -897,7 +895,7 @@ fn err(code: ErrorCode, line: u32, message: impl Into<String>) -> ParseError {
 fn reinterpret_as_expr(ty: Type, line: u32) -> Result<Expr, ParseError> {
     match ty {
         Type::Class(name) => Ok(Expr::Var(name, line)),
-        _ => Err(err(
+        _ => Err(new_parse_error(
             ErrorCode::EParsePhaseOther,
             line,
             "unexpected token following a primitive type in parens",
