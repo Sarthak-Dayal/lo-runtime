@@ -34,12 +34,6 @@ impl ErrorCode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum CallKeyword {
-    This,
-    Super,
-}
-
 /// Threaded through parse_stmt / parse_nested_block / parse_var_decl. Built fresh for
 /// each method/constructor body by parse_method_body_scope / parse_constructor_body_scope.
 struct ParseContext<'p> {
@@ -50,9 +44,10 @@ struct ParseContext<'p> {
     /// false when recursing into any if/while block, at any depth, and never set
     /// back to true again for that subtree — see parse_nested_block.
     at_constructor_top_level: bool,
-    /// Whichever call keyword parse_other_constructor_call recorded at the
-    /// very start of the constructor body, if any. Read-only from here on.
-    recorded_call_keyword: Option<CallKeyword>,
+    /// The constructor's recorded delegation call, if any: Some(true) for a
+    /// this(...) delegation, Some(false) for super(...), None if no
+    /// delegation appeared. Read-only from here on.
+    recorded_call_is_this: Option<bool>,
 }
 
 pub fn parse_program(tokens: &[Token]) -> Result<Program, ParseError> {
@@ -76,13 +71,16 @@ impl<'a> Parser<'a> {
         &self.tokens[self.pos]
     }
 
-    /// Safe near the end of input: Eof is always the last token, and pos never
-    /// advances past it, so this never actually indexes out of bounds in practice —
-    /// the fallback only matters if that invariant is ever violated.
+    /// Every call site only reaches `peek2`/`peek3` after already confirming
+    /// the current token isn't `Eof` (which is always the last token), so
+    /// `pos + 1`/`pos + 2` are always in bounds — an out-of-bounds panic here
+    /// means that invariant broke, which should fail loudly, not be masked.
     fn peek2(&self) -> &Token {
-        self.tokens
-            .get(self.pos + 1)
-            .unwrap_or_else(|| self.tokens.last().unwrap())
+        &self.tokens[self.pos + 1]
+    }
+
+    fn peek3(&self) -> &Token {
+        &self.tokens[self.pos + 2]
     }
 
     fn check(&self, kind: &TokenKind) -> bool {
@@ -360,7 +358,7 @@ impl<'a> Parser<'a> {
             locals: &mut locals,
             in_constructor: false,
             at_constructor_top_level: false,
-            recorded_call_keyword: None,
+            recorded_call_is_this: None,
         };
         let stmts = self.parse_locals_then_stmts(&mut ctx, 1)?; // Stmt+
         self.expect(TokenKind::RBrace, ErrorCode::EParsePhaseOther)?;
@@ -384,10 +382,9 @@ impl<'a> Parser<'a> {
             locals: &mut locals,
             in_constructor: true,
             at_constructor_top_level: true,
-            recorded_call_keyword: other_call.as_ref().map(|d| match d {
-                OtherConstructorCall::ThisCall(..) => CallKeyword::This,
-                OtherConstructorCall::SuperCall(..) => CallKeyword::Super,
-            }),
+            recorded_call_is_this: other_call
+                .as_ref()
+                .map(|d| matches!(d, OtherConstructorCall::ThisCall(..))),
         };
         let stmts = self.parse_locals_then_stmts(&mut ctx, 0)?; // Stmt*
         self.expect(TokenKind::RBrace, ErrorCode::EParsePhaseOther)?;
@@ -510,13 +507,9 @@ impl<'a> Parser<'a> {
                 let code = if !ctx.at_constructor_top_level {
                     ErrorCode::EDelegationNotFirstStatement
                 } else {
-                    match ctx.recorded_call_keyword {
-                        Some(CallKeyword::This) if is_super => {
-                            ErrorCode::EDelegationBothSuperAndThis
-                        }
-                        Some(CallKeyword::Super) if is_this => {
-                            ErrorCode::EDelegationBothSuperAndThis
-                        }
+                    match ctx.recorded_call_is_this {
+                        Some(true) if is_super => ErrorCode::EDelegationBothSuperAndThis,
+                        Some(false) if is_this => ErrorCode::EDelegationBothSuperAndThis,
                         _ => ErrorCode::EDelegationNotFirstStatement,
                     }
                 };
@@ -598,7 +591,7 @@ impl<'a> Parser<'a> {
             locals: &mut *ctx.locals, // reborrow — same Vec, not a new one
             in_constructor: ctx.in_constructor,
             at_constructor_top_level: false, // always false once nested, permanently for this subtree
-            recorded_call_keyword: ctx.recorded_call_keyword,
+            recorded_call_is_this: ctx.recorded_call_is_this,
         };
         let stmts = self.parse_locals_then_stmts(&mut nested_ctx, 1)?; // Stmt+
         self.expect(TokenKind::RBrace, ErrorCode::EParsePhaseOther)?;
@@ -840,11 +833,7 @@ impl<'a> Parser<'a> {
         }
         match &self.peek2().kind {
             TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid => true,
-            TokenKind::Ident(_) => self
-                .tokens
-                .get(self.pos + 2)
-                .map(|t| t.kind == TokenKind::RParen)
-                .unwrap_or(false),
+            TokenKind::Ident(_) => self.peek3().kind == TokenKind::RParen,
             _ => false,
         }
     }
