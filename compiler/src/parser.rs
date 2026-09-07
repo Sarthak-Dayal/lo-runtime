@@ -40,8 +40,6 @@ enum DelegationKeyword {
     Super,
 }
 
-// A method/if/while body is Stmt+ (at least one); a constructor body is
-// Stmt* (zero allowed, e.g. a constructor that's only a delegation call).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum StmtArity {
     ZeroOrMore,
@@ -51,7 +49,7 @@ enum StmtArity {
 #[derive(Debug, Clone, Copy)]
 struct ConstructorContext {
     at_top_level: bool, // false once nested in any if/while
-    recorded_delegation: Option<DelegationKeyword>,
+    delegation: Option<DelegationKeyword>,
 }
 
 struct ParseContext<'p> {
@@ -75,144 +73,6 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn peek(&self) -> &Token {
-        &self.tokens[self.pos]
-    }
-
-    fn peek2(&self) -> &Token {
-        debug_assert!(self.peek().kind != TokenKind::Eof);
-        &self.tokens[self.pos + 1]
-    }
-
-    fn peek3(&self) -> &Token {
-        debug_assert!(self.peek().kind != TokenKind::Eof);
-        &self.tokens[self.pos + 2]
-    }
-
-    fn check(&self, kind: &TokenKind) -> bool {
-        &self.peek().kind == kind
-    }
-
-    fn advance(&mut self) -> Token {
-        let tok = self.tokens[self.pos].clone();
-        if self.pos + 1 < self.tokens.len() {
-            self.pos += 1;
-        }
-        tok
-    }
-
-    fn expect(&mut self, kind: TokenKind, code: ErrorCode) -> Result<Token, ParseError> {
-        if self.check(&kind) {
-            Ok(self.advance())
-        } else {
-            Err(err(
-                code,
-                self.peek().line,
-                format!("expected {:?}, found {:?}", kind, self.peek().kind),
-            ))
-        }
-    }
-
-    fn expect_ident_name(&mut self) -> Result<String, ParseError> {
-        let line = self.peek().line;
-        match self.peek().kind.clone() {
-            TokenKind::Ident(name) => {
-                self.advance();
-                Ok(name)
-            }
-            kind if Self::is_keyword(&kind) => Err(err(
-                ErrorCode::EReservedKeywordAsIdentifier,
-                line,
-                format!("expected an identifier, found reserved keyword {:?}", kind),
-            )),
-            other => Err(err(
-                ErrorCode::EParsePhaseOther,
-                line,
-                format!("expected an identifier, found {:?}", other),
-            )),
-        }
-    }
-
-    fn is_keyword(kind: &TokenKind) -> bool {
-        matches!(
-            kind,
-            TokenKind::KwInt
-                | TokenKind::KwBool
-                | TokenKind::KwString
-                | TokenKind::KwVoid
-                | TokenKind::KwClass
-                | TokenKind::KwExtends
-                | TokenKind::KwThis
-                | TokenKind::KwSuper
-                | TokenKind::KwNull
-                | TokenKind::KwNew
-                | TokenKind::KwReturn
-                | TokenKind::KwIf
-                | TokenKind::KwElse
-                | TokenKind::KwWhile
-                | TokenKind::KwBreak
-                | TokenKind::KwTrue
-                | TokenKind::KwFalse
-                | TokenKind::KwInstanceof
-        )
-    }
-
-    fn binary_op_for(kind: &TokenKind) -> Option<BinaryOp> {
-        match kind {
-            TokenKind::Plus => Some(BinaryOp::Add),
-            TokenKind::Minus => Some(BinaryOp::Sub),
-            TokenKind::Star => Some(BinaryOp::Mul),
-            TokenKind::Slash => Some(BinaryOp::Div),
-            TokenKind::Percent => Some(BinaryOp::Mod),
-            TokenKind::Amp => Some(BinaryOp::And),
-            TokenKind::Pipe => Some(BinaryOp::Or),
-            TokenKind::Lt => Some(BinaryOp::Lt),
-            TokenKind::Gt => Some(BinaryOp::Gt),
-            TokenKind::Equals => Some(BinaryOp::Eq),
-            _ => None,
-        }
-    }
-
-    fn try_parse_primitive_type(&mut self) -> Option<Type> {
-        let ty = match &self.peek().kind {
-            TokenKind::KwInt => Type::Int,
-            TokenKind::KwBool => Type::Bool,
-            TokenKind::KwString => Type::String,
-            TokenKind::KwVoid => Type::Void,
-            _ => return None,
-        };
-        self.advance();
-        Some(ty)
-    }
-
-    fn parse_type(&mut self) -> Result<Type, ParseError> {
-        if let Some(ty) = self.try_parse_primitive_type() {
-            return Ok(ty);
-        }
-        let name = self.expect_ident_name()?;
-        Ok(Type::Class(name))
-    }
-
-    // "Foo x" (VarDecl) vs "x = " (assign) vs "x." (call)
-    fn is_start_of_var_decl(&self) -> bool {
-        match &self.peek().kind {
-            TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid => true,
-            TokenKind::Ident(_) => matches!(self.peek2().kind, TokenKind::Ident(_)),
-            _ => false,
-        }
-    }
-
-    fn parse_paren_list_or_empty<T>(
-        &mut self,
-        parse_list: fn(&mut Self) -> Result<Vec<T>, ParseError>,
-    ) -> Result<Vec<T>, ParseError> {
-        if self.check(&TokenKind::RParen) {
-            Ok(Vec::new())
-        } else {
-            parse_list(self)
-        }
-    }
-
     // ================================
     // Class declarations
     // ================================
@@ -412,7 +272,7 @@ impl<'a> Parser<'a> {
             locals: &mut locals,
             constructor: Some(ConstructorContext {
                 at_top_level: true,
-                recorded_delegation: delegation.as_ref().map(|d| match d {
+                delegation: delegation.as_ref().map(|d| match d {
                     ConstructorDelegation::ThisCall(..) => DelegationKeyword::This,
                     ConstructorDelegation::SuperCall(..) => DelegationKeyword::Super,
                 }),
@@ -525,7 +385,7 @@ impl<'a> Parser<'a> {
         let code = if !constructor.at_top_level {
             ErrorCode::EDelegationNotFirstStatement
         } else {
-            match constructor.recorded_delegation {
+            match constructor.delegation {
                 Some(DelegationKeyword::This) if is_super => ErrorCode::EDelegationBothSuperAndThis,
                 Some(DelegationKeyword::Super) if is_this => ErrorCode::EDelegationBothSuperAndThis,
                 _ => ErrorCode::EDelegationNotFirstStatement,
@@ -607,7 +467,7 @@ impl<'a> Parser<'a> {
             locals: &mut *ctx.locals, // reborrow, not a new Vec
             constructor: ctx.constructor.map(|c| ConstructorContext {
                 at_top_level: false,
-                recorded_delegation: c.recorded_delegation,
+                delegation: c.delegation,
             }),
         };
         let stmts = self.parse_locals_then_stmts(&mut nested_ctx, StmtArity::OneOrMore)?;
@@ -879,6 +739,148 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
                 Ok(Expr::Cast(ty, Box::new(operand), outer_line))
             }
+        }
+    }
+
+    // ================================
+    // Token-level helpers
+    // ================================
+
+    fn peek(&self) -> &Token {
+        &self.tokens[self.pos]
+    }
+
+    fn peek2(&self) -> &Token {
+        debug_assert!(self.peek().kind != TokenKind::Eof);
+        &self.tokens[self.pos + 1]
+    }
+
+    fn peek3(&self) -> &Token {
+        debug_assert!(self.peek().kind != TokenKind::Eof);
+        &self.tokens[self.pos + 2]
+    }
+
+    fn check(&self, kind: &TokenKind) -> bool {
+        &self.peek().kind == kind
+    }
+
+    fn advance(&mut self) -> Token {
+        let tok = self.tokens[self.pos].clone();
+        if self.pos + 1 < self.tokens.len() {
+            self.pos += 1;
+        }
+        tok
+    }
+
+    fn expect(&mut self, kind: TokenKind, code: ErrorCode) -> Result<Token, ParseError> {
+        if self.check(&kind) {
+            Ok(self.advance())
+        } else {
+            Err(err(
+                code,
+                self.peek().line,
+                format!("expected {:?}, found {:?}", kind, self.peek().kind),
+            ))
+        }
+    }
+
+    fn expect_ident_name(&mut self) -> Result<String, ParseError> {
+        let line = self.peek().line;
+        match self.peek().kind.clone() {
+            TokenKind::Ident(name) => {
+                self.advance();
+                Ok(name)
+            }
+            kind if Self::is_keyword(&kind) => Err(err(
+                ErrorCode::EReservedKeywordAsIdentifier,
+                line,
+                format!("expected an identifier, found reserved keyword {:?}", kind),
+            )),
+            other => Err(err(
+                ErrorCode::EParsePhaseOther,
+                line,
+                format!("expected an identifier, found {:?}", other),
+            )),
+        }
+    }
+
+    fn is_keyword(kind: &TokenKind) -> bool {
+        matches!(
+            kind,
+            TokenKind::KwInt
+                | TokenKind::KwBool
+                | TokenKind::KwString
+                | TokenKind::KwVoid
+                | TokenKind::KwClass
+                | TokenKind::KwExtends
+                | TokenKind::KwThis
+                | TokenKind::KwSuper
+                | TokenKind::KwNull
+                | TokenKind::KwNew
+                | TokenKind::KwReturn
+                | TokenKind::KwIf
+                | TokenKind::KwElse
+                | TokenKind::KwWhile
+                | TokenKind::KwBreak
+                | TokenKind::KwTrue
+                | TokenKind::KwFalse
+                | TokenKind::KwInstanceof
+        )
+    }
+
+    fn binary_op_for(kind: &TokenKind) -> Option<BinaryOp> {
+        match kind {
+            TokenKind::Plus => Some(BinaryOp::Add),
+            TokenKind::Minus => Some(BinaryOp::Sub),
+            TokenKind::Star => Some(BinaryOp::Mul),
+            TokenKind::Slash => Some(BinaryOp::Div),
+            TokenKind::Percent => Some(BinaryOp::Mod),
+            TokenKind::Amp => Some(BinaryOp::And),
+            TokenKind::Pipe => Some(BinaryOp::Or),
+            TokenKind::Lt => Some(BinaryOp::Lt),
+            TokenKind::Gt => Some(BinaryOp::Gt),
+            TokenKind::Equals => Some(BinaryOp::Eq),
+            _ => None,
+        }
+    }
+
+    fn try_parse_primitive_type(&mut self) -> Option<Type> {
+        let ty = match &self.peek().kind {
+            TokenKind::KwInt => Type::Int,
+            TokenKind::KwBool => Type::Bool,
+            TokenKind::KwString => Type::String,
+            TokenKind::KwVoid => Type::Void,
+            _ => return None,
+        };
+        self.advance();
+        Some(ty)
+    }
+
+    fn parse_type(&mut self) -> Result<Type, ParseError> {
+        if let Some(ty) = self.try_parse_primitive_type() {
+            return Ok(ty);
+        }
+        let name = self.expect_ident_name()?;
+        Ok(Type::Class(name))
+    }
+
+    // "Foo x" (VarDecl) vs "x = " (assign) vs "x." (call)
+    fn is_start_of_var_decl(&self) -> bool {
+        match &self.peek().kind {
+            TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid => true,
+            TokenKind::Ident(_) => matches!(self.peek2().kind, TokenKind::Ident(_)),
+            _ => false,
+        }
+    }
+
+    fn parse_paren_list_or_empty<T>(
+        &mut self,
+        parse_list: fn(&mut Self) -> Result<Vec<T>, ParseError>,
+    ) -> Result<Vec<T>, ParseError> {
+        if self.check(&TokenKind::RParen) {
+            Ok(Vec::new())
+        } else {
+            parse_list(self)
         }
     }
 }
