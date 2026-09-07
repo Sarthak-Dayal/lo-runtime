@@ -78,6 +78,8 @@ impl<'a> Parser<'a> {
         &self.tokens[self.pos]
     }
 
+    // Only ever called after the caller has confirmed the current token
+    // isn't Eof, so pos+1/pos+2 are always in bounds.
     fn peek2(&self) -> &Token {
         &self.tokens[self.pos + 1]
     }
@@ -102,11 +104,11 @@ impl<'a> Parser<'a> {
         if self.check(&kind) {
             Ok(self.advance())
         } else {
-            Err(ParseError {
+            Err(err(
                 code,
-                line: self.peek().line,
-                message: format!("expected {:?}, found {:?}", kind, self.peek().kind),
-            })
+                self.peek().line,
+                format!("expected {:?}, found {:?}", kind, self.peek().kind),
+            ))
         }
     }
 
@@ -117,17 +119,41 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(name)
             }
-            kind if is_keyword(&kind) => Err(ParseError {
-                code: ErrorCode::EReservedKeywordAsIdentifier,
+            kind if Self::is_keyword(&kind) => Err(err(
+                ErrorCode::EReservedKeywordAsIdentifier,
                 line,
-                message: format!("expected an identifier, found reserved keyword {:?}", kind),
-            }),
-            other => Err(ParseError {
-                code: ErrorCode::EParsePhaseOther,
+                format!("expected an identifier, found reserved keyword {:?}", kind),
+            )),
+            other => Err(err(
+                ErrorCode::EParsePhaseOther,
                 line,
-                message: format!("expected an identifier, found {:?}", other),
-            }),
+                format!("expected an identifier, found {:?}", other),
+            )),
         }
+    }
+
+    fn is_keyword(kind: &TokenKind) -> bool {
+        matches!(
+            kind,
+            TokenKind::KwInt
+                | TokenKind::KwBool
+                | TokenKind::KwString
+                | TokenKind::KwVoid
+                | TokenKind::KwClass
+                | TokenKind::KwExtends
+                | TokenKind::KwThis
+                | TokenKind::KwSuper
+                | TokenKind::KwNull
+                | TokenKind::KwNew
+                | TokenKind::KwReturn
+                | TokenKind::KwIf
+                | TokenKind::KwElse
+                | TokenKind::KwWhile
+                | TokenKind::KwBreak
+                | TokenKind::KwTrue
+                | TokenKind::KwFalse
+                | TokenKind::KwInstanceof
+        )
     }
 
     fn binop_for(kind: &TokenKind) -> Option<BinaryOp> {
@@ -211,11 +237,11 @@ impl<'a> Parser<'a> {
         let constructors = if self.check(&TokenKind::LBracket) {
             self.advance();
             if self.check(&TokenKind::RBracket) {
-                return Err(ParseError {
-                    code: ErrorCode::EMalformedClassDecl,
-                    line: self.peek().line,
-                    message: "empty [ ] constructor section".into(),
-                });
+                return Err(err(
+                    ErrorCode::EMalformedClassDecl,
+                    self.peek().line,
+                    "empty [ ] constructor section",
+                ));
             }
             let mut constructors = Vec::new();
             while !self.check(&TokenKind::RBracket) {
@@ -238,12 +264,11 @@ impl<'a> Parser<'a> {
         // the methods instead of before — E_MALFORMED_CLASS_DECL's "wrong
         // order" case.
         if self.check(&TokenKind::LBracket) {
-            return Err(ParseError {
-                code: ErrorCode::EMalformedClassDecl,
-                line: self.peek().line,
-                message: "constructor [ ] section must come before the method body, not after"
-                    .into(),
-            });
+            return Err(err(
+                ErrorCode::EMalformedClassDecl,
+                self.peek().line,
+                "constructor [ ] section must come before the method body, not after",
+            ));
         }
 
         Ok(ClassDecl {
@@ -256,8 +281,8 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // Field-parens is VarDecl*, not Formals — flattens grouped names like
-    // `int x, y;` into one Param per name. No duplicate-name check here:
+    // Flattens grouped names like `int x, y;` into one Param per name. No
+    // duplicate-name check here:
     // E_DUPLICATE_FIELD is checked later, not by the parser.
     fn parse_field_list(&mut self) -> Result<Vec<Param>, ParseError> {
         let mut fields = Vec::new();
@@ -287,14 +312,14 @@ impl<'a> Parser<'a> {
         let line = self.peek().line;
         let constructor_name = self.expect_ident_name()?;
         if constructor_name != class_name {
-            return Err(ParseError {
-                code: ErrorCode::EMalformedConstructor,
+            return Err(err(
+                ErrorCode::EMalformedConstructor,
                 line,
-                message: format!(
+                format!(
                     "constructor name '{}' does not match class name '{}'",
                     constructor_name, class_name
                 ),
-            });
+            ));
         }
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
         let params = self.parse_paren_list_or_empty(Self::parse_params)?;
@@ -355,7 +380,7 @@ impl<'a> Parser<'a> {
         Ok(args)
     }
 
-    // ---- bodies: method vs. constructor are genuinely different productions ----
+    // ---- bodies ----
 
     fn parse_method_body_scope(&mut self, class_name: &str) -> Result<BodyScope, ParseError> {
         let line = self.peek().line;
@@ -446,11 +471,11 @@ impl<'a> Parser<'a> {
             stmts.push(self.parse_stmt(ctx)?);
         }
         if stmts.len() < min_stmts {
-            return Err(ParseError {
-                code: ErrorCode::EParsePhaseOther,
-                line: self.peek().line,
-                message: "expected at least one statement".into(),
-            });
+            return Err(err(
+                ErrorCode::EParsePhaseOther,
+                self.peek().line,
+                "expected at least one statement",
+            ));
         }
         Ok(stmts)
     }
@@ -470,11 +495,11 @@ impl<'a> Parser<'a> {
                     .iter()
                     .any(|existing| existing.names.contains(&name));
             if is_duplicate {
-                return Err(ParseError {
-                    code: ErrorCode::EDuplicateLocal,
+                return Err(err(
+                    ErrorCode::EDuplicateLocal,
                     line,
-                    message: format!("duplicate local '{}'", name),
-                });
+                    format!("duplicate local '{}'", name),
+                ));
             }
             names.push(name);
             if self.check(&TokenKind::Comma) {
@@ -494,39 +519,38 @@ impl<'a> Parser<'a> {
 
     // ---- Stmt ----
 
-    fn parse_stmt(&mut self, ctx: &mut ParseContext) -> Result<Stmt, ParseError> {
+    // A bare this(/super( fragment is a misplaced delegation unless it's
+    // exactly the constructor's first statement. Position is checked before
+    // keyword: nesting always wins over a keyword-mismatch classification,
+    // even when a fragment is technically both.
+    fn check_misplaced_delegation(&self, ctx: &ParseContext) -> Option<ParseError> {
+        if !ctx.in_constructor {
+            return None;
+        }
         let line = self.peek().line;
-
-        // A bare this(/super( fragment here is a misplaced delegation unless
-        // it's exactly the constructor's first statement. Position is
-        // checked before keyword: nesting always wins over a
-        // keyword-mismatch classification, even when a fragment is
-        // technically both.
-        if ctx.in_constructor {
-            let is_this = self.check(&TokenKind::KwThis);
-            let is_super = self.check(&TokenKind::KwSuper);
-            if (is_this || is_super) && self.peek2().kind == TokenKind::LParen {
-                let code = if !ctx.at_constructor_top_level {
-                    ErrorCode::EDelegationNotFirstStatement
-                } else {
-                    match ctx.recorded_delegation {
-                        Some(DelegationKeyword::This) if is_super => {
-                            ErrorCode::EDelegationBothSuperAndThis
-                        }
-                        Some(DelegationKeyword::Super) if is_this => {
-                            ErrorCode::EDelegationBothSuperAndThis
-                        }
-                        _ => ErrorCode::EDelegationNotFirstStatement,
-                    }
-                };
-                return Err(ParseError {
-                    code,
-                    line,
-                    message: "misplaced constructor this()/super() call".into(),
-                });
+        let is_this = self.check(&TokenKind::KwThis);
+        let is_super = self.check(&TokenKind::KwSuper);
+        if !(is_this || is_super) || self.peek2().kind != TokenKind::LParen {
+            return None;
+        }
+        let code = if !ctx.at_constructor_top_level {
+            ErrorCode::EDelegationNotFirstStatement
+        } else {
+            match ctx.recorded_delegation {
+                Some(DelegationKeyword::This) if is_super => ErrorCode::EDelegationBothSuperAndThis,
+                Some(DelegationKeyword::Super) if is_this => ErrorCode::EDelegationBothSuperAndThis,
+                _ => ErrorCode::EDelegationNotFirstStatement,
             }
+        };
+        Some(err(code, line, "misplaced constructor this()/super() call"))
+    }
+
+    fn parse_stmt(&mut self, ctx: &mut ParseContext) -> Result<Stmt, ParseError> {
+        if let Some(delegation_err) = self.check_misplaced_delegation(ctx) {
+            return Err(delegation_err);
         }
 
+        let line = self.peek().line;
         match self.peek().kind.clone() {
             TokenKind::KwReturn => {
                 self.advance();
@@ -557,11 +581,11 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::KwThis | TokenKind::KwSuper | TokenKind::LParen => self.parse_call_stmt(),
-            other => Err(ParseError {
-                code: ErrorCode::EParsePhaseOther,
+            other => Err(err(
+                ErrorCode::EParsePhaseOther,
                 line,
-                message: format!("unexpected token starting statement: {:?}", other),
-            }),
+                format!("unexpected token starting statement: {:?}", other),
+            )),
         }
     }
 
@@ -630,14 +654,14 @@ impl<'a> Parser<'a> {
                 let inner = self.parse_parenthesized_content()?;
                 Ok(Receiver::Computed(Box::new(inner), line))
             }
-            other => Err(ParseError {
-                code: ErrorCode::EParsePhaseOther,
+            other => Err(err(
+                ErrorCode::EParsePhaseOther,
                 line,
-                message: format!(
+                format!(
                     "expected a receiver (identifier, this, super, or parenthesized expression), found {:?}",
                     other
                 ),
-            }),
+            )),
         }
     }
 
@@ -669,23 +693,15 @@ impl<'a> Parser<'a> {
             TokenKind::KwNew => self.parse_new_expr(),
             TokenKind::Ident(_) => {
                 let name = self.expect_ident_name()?;
-                if self.check(&TokenKind::Dot) {
-                    Ok(Expr::Call(
-                        self.finish_call_tail(Receiver::Var(name, line), line)?,
-                    ))
-                } else {
-                    Ok(Expr::Var(name, line))
-                }
+                self.var_or_call(
+                    Receiver::Var(name.clone(), line),
+                    Expr::Var(name, line),
+                    line,
+                )
             }
             TokenKind::KwThis => {
                 self.advance();
-                if self.check(&TokenKind::Dot) {
-                    Ok(Expr::Call(
-                        self.finish_call_tail(Receiver::This(line), line)?,
-                    ))
-                } else {
-                    Ok(Expr::This(line))
-                }
+                self.var_or_call(Receiver::This(line), Expr::This(line), line)
             }
             // Bare `super` is never a legal Expr on its own (no such production) —
             // it only ever appears as a receiver, always followed by `.`.
@@ -696,11 +712,27 @@ impl<'a> Parser<'a> {
                 ))
             }
             TokenKind::LParen => self.parse_paren_expr(),
-            other => Err(ParseError {
-                code: ErrorCode::EParsePhaseOther,
+            other => Err(err(
+                ErrorCode::EParsePhaseOther,
                 line,
-                message: format!("unexpected token starting expression: {:?}", other),
-            }),
+                format!("unexpected token starting expression: {:?}", other),
+            )),
+        }
+    }
+
+    // If a `.` follows, `receiver` was actually a call; otherwise `bare` is
+    // the whole expression. Shared by the Ident and this-keyword cases in
+    // parse_expr, which differ only in what `receiver`/`bare` are.
+    fn var_or_call(
+        &mut self,
+        receiver: Receiver,
+        bare: Expr,
+        line: u32,
+    ) -> Result<Expr, ParseError> {
+        if self.check(&TokenKind::Dot) {
+            Ok(Expr::Call(self.finish_call_tail(receiver, line)?))
+        } else {
+            Ok(bare)
         }
     }
 
@@ -820,21 +852,23 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
                 Ok(Expr::InstanceOf(Box::new(first), class_name, line))
             }
-            kind if Self::binop_for(&kind).is_some() => {
-                let op = Self::binop_for(&kind).unwrap();
-                self.advance();
-                let right = self.parse_expr()?;
-                self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
-                Ok(Expr::Binary(Box::new(first), op, Box::new(right), line))
+            other => {
+                if let Some(op) = Self::binop_for(&other) {
+                    self.advance();
+                    let right = self.parse_expr()?;
+                    self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
+                    Ok(Expr::Binary(Box::new(first), op, Box::new(right), line))
+                } else {
+                    Err(err(
+                        ErrorCode::EParsePhaseOther,
+                        self.peek().line,
+                        format!(
+                            "expected ?, instanceof, an operator, or ) here, found {:?}",
+                            other
+                        ),
+                    ))
+                }
             }
-            other => Err(ParseError {
-                code: ErrorCode::EParsePhaseOther,
-                line: self.peek().line,
-                message: format!(
-                    "expected ?, instanceof, an operator, or ) here, found {:?}",
-                    other
-                ),
-            }),
         }
     }
 
@@ -856,18 +890,17 @@ impl<'a> Parser<'a> {
                 self.advance(); // closes outer (
                 match ty {
                     Type::Class(name) => Ok(Expr::Var(name, outer_line)),
-                    _ => Err(ParseError {
-                        code: ErrorCode::EParsePhaseOther,
-                        line: outer_line,
-                        message: "a primitive type in parens with nothing following is not a valid expression".into(),
-                    }),
+                    _ => Err(err(
+                        ErrorCode::EParsePhaseOther,
+                        outer_line,
+                        "a primitive type in parens with nothing following is not a valid expression",
+                    )),
                 }
             }
-            TokenKind::Question | TokenKind::KwInstanceof => {
-                let as_expr = reinterpret_as_expr(ty, outer_line)?;
-                self.parse_paren_operator_tail(as_expr, outer_line)
-            }
-            kind if Self::binop_for(&kind).is_some() => {
+            kind if kind == TokenKind::Question
+                || kind == TokenKind::KwInstanceof
+                || Self::binop_for(&kind).is_some() =>
+            {
                 let as_expr = reinterpret_as_expr(ty, outer_line)?;
                 self.parse_paren_operator_tail(as_expr, outer_line)
             }
@@ -881,15 +914,23 @@ impl<'a> Parser<'a> {
     }
 }
 
+fn err(code: ErrorCode, line: u32, message: impl Into<String>) -> ParseError {
+    ParseError {
+        code,
+        line,
+        message: message.into(),
+    }
+}
+
 // A primitive type reaching here (e.g. `((int) + y)`) is never a valid value.
 fn reinterpret_as_expr(ty: Type, line: u32) -> Result<Expr, ParseError> {
     match ty {
         Type::Class(name) => Ok(Expr::Var(name, line)),
-        _ => Err(ParseError {
-            code: ErrorCode::EParsePhaseOther,
+        _ => Err(err(
+            ErrorCode::EParsePhaseOther,
             line,
-            message: "unexpected token following a primitive type in parens".into(),
-        }),
+            "unexpected token following a primitive type in parens",
+        )),
     }
 }
 
@@ -898,30 +939,6 @@ impl<'a> Parser<'a> {
     fn for_test(tokens: &'a [Token]) -> Self {
         Parser { tokens, pos: 0 }
     }
-}
-
-fn is_keyword(kind: &TokenKind) -> bool {
-    matches!(
-        kind,
-        TokenKind::KwInt
-            | TokenKind::KwBool
-            | TokenKind::KwString
-            | TokenKind::KwVoid
-            | TokenKind::KwClass
-            | TokenKind::KwExtends
-            | TokenKind::KwThis
-            | TokenKind::KwSuper
-            | TokenKind::KwNull
-            | TokenKind::KwNew
-            | TokenKind::KwReturn
-            | TokenKind::KwIf
-            | TokenKind::KwElse
-            | TokenKind::KwWhile
-            | TokenKind::KwBreak
-            | TokenKind::KwTrue
-            | TokenKind::KwFalse
-            | TokenKind::KwInstanceof
-    )
 }
 
 #[cfg(test)]
