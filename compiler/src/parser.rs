@@ -795,7 +795,7 @@ impl<'a> Parser<'a> {
             self.advance();
             return Ok(first); // plain paren-wrap (P28), unwrapped
         }
-        self.finish_paren_after(first, line)
+        self.parse_paren_operator_tail(first, line)
     }
 
     /// Lookahead-only (consumes nothing): true iff the current token is '(' AND what
@@ -828,17 +828,17 @@ impl<'a> Parser<'a> {
     /// Shared tail for "parsed one Expr inside parens, now decide ternary vs. binop
     /// vs. instanceof" — used by both parse_paren_expr's general case and
     /// parse_cast_or_nested_paren's "was a genuine value" branches.
-    fn finish_paren_after(&mut self, first: Expr, line: u32) -> Result<Expr, ParseError> {
+    fn parse_paren_operator_tail(&mut self, first: Expr, line: u32) -> Result<Expr, ParseError> {
         match self.peek().kind.clone() {
             TokenKind::Question => {
                 self.advance();
-                let then_e = self.parse_expr()?;
+                let if_e = self.parse_expr()?;
                 self.expect(TokenKind::Colon, ErrorCode::EParsePhaseOther)?;
                 let else_e = self.parse_expr()?;
                 self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
                 Ok(Expr::Ternary(
                     Box::new(first),
-                    Box::new(then_e),
+                    Box::new(if_e),
                     Box::new(else_e),
                     line,
                 ))
@@ -897,11 +897,11 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Question | TokenKind::KwInstanceof => {
                 let as_expr = reinterpret_as_expr(ty, outer_line)?;
-                self.finish_paren_after(as_expr, outer_line)
+                self.parse_paren_operator_tail(as_expr, outer_line)
             }
             kind if Self::binop_for(&kind).is_some() => {
                 let as_expr = reinterpret_as_expr(ty, outer_line)?;
-                self.finish_paren_after(as_expr, outer_line)
+                self.parse_paren_operator_tail(as_expr, outer_line)
             }
             _ => {
                 // A new expression starts here with no operator bridging it to the
