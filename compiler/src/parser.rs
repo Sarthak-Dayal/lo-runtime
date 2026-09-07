@@ -40,12 +40,24 @@ enum DelegationKeyword {
     Super,
 }
 
+// A method/if/while body is Stmt+ (at least one); a constructor body is
+// Stmt* (zero allowed, e.g. a constructor that's only a delegation call).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum StmtArity {
+    ZeroOrMore,
+    OneOrMore,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ConstructorContext {
+    at_top_level: bool, // false once nested in any if/while
+    recorded_delegation: Option<DelegationKeyword>,
+}
+
 struct ParseContext<'p> {
     class_name: &'p str,
     locals: &'p mut Vec<VarDecl>,
-    in_constructor: bool,
-    at_constructor_top_level: bool, // false once nested in any if/while
-    recorded_delegation: Option<DelegationKeyword>,
+    constructor: Option<ConstructorContext>,
 }
 
 pub fn parse_program(tokens: &[Token]) -> Result<Program, ParseError> {
@@ -63,18 +75,17 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    // ---- core primitives ----
-
     fn peek(&self) -> &Token {
         &self.tokens[self.pos]
     }
 
-    // caller must confirm current token isn't Eof first
     fn peek2(&self) -> &Token {
+        debug_assert!(self.peek().kind != TokenKind::Eof);
         &self.tokens[self.pos + 1]
     }
 
     fn peek3(&self) -> &Token {
+        debug_assert!(self.peek().kind != TokenKind::Eof);
         &self.tokens[self.pos + 2]
     }
 
@@ -146,7 +157,7 @@ impl<'a> Parser<'a> {
         )
     }
 
-    fn binop_for(kind: &TokenKind) -> Option<BinaryOp> {
+    fn binary_op_for(kind: &TokenKind) -> Option<BinaryOp> {
         match kind {
             TokenKind::Plus => Some(BinaryOp::Add),
             TokenKind::Minus => Some(BinaryOp::Sub),
@@ -183,7 +194,7 @@ impl<'a> Parser<'a> {
     }
 
     // "Foo x" (VarDecl) vs "x = " (assign) vs "x." (call)
-    fn starts_var_decl(&self) -> bool {
+    fn is_start_of_var_decl(&self) -> bool {
         match &self.peek().kind {
             TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid => true,
             TokenKind::Ident(_) => matches!(self.peek2().kind, TokenKind::Ident(_)),
@@ -202,7 +213,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // ---- Program / ClassDecl ----
+    // ================================
+    // Class declarations
+    // ================================
 
     fn parse_class_decl(&mut self) -> Result<ClassDecl, ParseError> {
         let line = self.peek().line;
@@ -265,7 +278,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // VarDecl*, not Formals: `int x, y;` flattens to two Params
+    // each name in "int x, y;" gets its own Param
     fn parse_field_list(&mut self) -> Result<Vec<Param>, ParseError> {
         let mut fields = Vec::new();
         while !self.check(&TokenKind::RParen) {
@@ -288,7 +301,9 @@ impl<'a> Parser<'a> {
         Ok(fields)
     }
 
-    // ---- ConstructorDecl / MethodDecl ----
+    // ================================
+    // Constructors and methods
+    // ================================
 
     fn parse_constructor_decl(&mut self, class_name: &str) -> Result<ConstructorDecl, ParseError> {
         let line = self.peek().line;
@@ -362,7 +377,9 @@ impl<'a> Parser<'a> {
         Ok(args)
     }
 
-    // ---- bodies ----
+    // ================================
+    // Method and constructor bodies
+    // ================================
 
     fn parse_method_body_scope(&mut self, class_name: &str) -> Result<BodyScope, ParseError> {
         let line = self.peek().line;
@@ -371,11 +388,9 @@ impl<'a> Parser<'a> {
         let mut ctx = ParseContext {
             class_name,
             locals: &mut locals,
-            in_constructor: false,
-            at_constructor_top_level: false,
-            recorded_delegation: None,
+            constructor: None,
         };
-        let stmts = self.parse_locals_then_stmts(&mut ctx, 1)?; // Stmt+
+        let stmts = self.parse_locals_then_stmts(&mut ctx, StmtArity::OneOrMore)?;
         self.expect(TokenKind::RBrace, ErrorCode::EParsePhaseOther)?;
         Ok(BodyScope {
             locals,
@@ -395,14 +410,15 @@ impl<'a> Parser<'a> {
         let mut ctx = ParseContext {
             class_name,
             locals: &mut locals,
-            in_constructor: true,
-            at_constructor_top_level: true,
-            recorded_delegation: delegation.as_ref().map(|d| match d {
-                ConstructorDelegation::ThisCall(..) => DelegationKeyword::This,
-                ConstructorDelegation::SuperCall(..) => DelegationKeyword::Super,
+            constructor: Some(ConstructorContext {
+                at_top_level: true,
+                recorded_delegation: delegation.as_ref().map(|d| match d {
+                    ConstructorDelegation::ThisCall(..) => DelegationKeyword::This,
+                    ConstructorDelegation::SuperCall(..) => DelegationKeyword::Super,
+                }),
             }),
         };
-        let stmts = self.parse_locals_then_stmts(&mut ctx, 0)?; // Stmt*
+        let stmts = self.parse_locals_then_stmts(&mut ctx, StmtArity::ZeroOrMore)?;
         self.expect(TokenKind::RBrace, ErrorCode::EParsePhaseOther)?;
         Ok((
             delegation,
@@ -441,16 +457,16 @@ impl<'a> Parser<'a> {
     fn parse_locals_then_stmts(
         &mut self,
         ctx: &mut ParseContext,
-        min_stmts: usize,
+        arity: StmtArity,
     ) -> Result<Vec<Stmt>, ParseError> {
-        while self.starts_var_decl() {
+        while self.is_start_of_var_decl() {
             self.parse_var_decl(ctx)?;
         }
         let mut stmts = Vec::new();
         while !self.check(&TokenKind::RBrace) {
             stmts.push(self.parse_stmt(ctx)?);
         }
-        if stmts.len() < min_stmts {
+        if arity == StmtArity::OneOrMore && stmts.is_empty() {
             return Err(err(
                 ErrorCode::EParsePhaseOther,
                 self.peek().line,
@@ -494,22 +510,22 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    // ---- Stmt ----
+    // ================================
+    // Statements
+    // ================================
 
     fn check_misplaced_delegation(&self, ctx: &ParseContext) -> Option<ParseError> {
-        if !ctx.in_constructor {
-            return None;
-        }
+        let constructor = ctx.constructor?;
         let line = self.peek().line;
         let is_this = self.check(&TokenKind::KwThis);
         let is_super = self.check(&TokenKind::KwSuper);
         if !(is_this || is_super) || self.peek2().kind != TokenKind::LParen {
             return None;
         }
-        let code = if !ctx.at_constructor_top_level {
+        let code = if !constructor.at_top_level {
             ErrorCode::EDelegationNotFirstStatement
         } else {
-            match ctx.recorded_delegation {
+            match constructor.recorded_delegation {
                 Some(DelegationKeyword::This) if is_super => ErrorCode::EDelegationBothSuperAndThis,
                 Some(DelegationKeyword::Super) if is_this => ErrorCode::EDelegationBothSuperAndThis,
                 _ => ErrorCode::EDelegationNotFirstStatement,
@@ -589,11 +605,12 @@ impl<'a> Parser<'a> {
         let mut nested_ctx = ParseContext {
             class_name: ctx.class_name,
             locals: &mut *ctx.locals, // reborrow, not a new Vec
-            in_constructor: ctx.in_constructor,
-            at_constructor_top_level: false,
-            recorded_delegation: ctx.recorded_delegation,
+            constructor: ctx.constructor.map(|c| ConstructorContext {
+                at_top_level: false,
+                recorded_delegation: c.recorded_delegation,
+            }),
         };
-        let stmts = self.parse_locals_then_stmts(&mut nested_ctx, 1)?; // Stmt+
+        let stmts = self.parse_locals_then_stmts(&mut nested_ctx, StmtArity::OneOrMore)?;
         self.expect(TokenKind::RBrace, ErrorCode::EParsePhaseOther)?;
         Ok(stmts)
     }
@@ -601,7 +618,7 @@ impl<'a> Parser<'a> {
     fn parse_call_stmt(&mut self) -> Result<Stmt, ParseError> {
         let line = self.peek().line;
         let receiver = self.parse_receiver()?;
-        let call = self.finish_call_tail(receiver, line)?;
+        let call = self.parse_method_call_suffix(receiver, line)?;
         self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?;
         Ok(Stmt::CallStmt(call))
     }
@@ -636,7 +653,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // ---- Expr ----
+    // ================================
+    // Expressions
+    // ================================
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
         let line = self.peek().line;
@@ -678,7 +697,7 @@ impl<'a> Parser<'a> {
             TokenKind::KwSuper => {
                 self.advance();
                 Ok(Expr::Call(
-                    self.finish_call_tail(Receiver::Super(line), line)?,
+                    self.parse_method_call_suffix(Receiver::Super(line), line)?,
                 ))
             }
             TokenKind::LParen => self.parse_paren_expr(),
@@ -697,7 +716,7 @@ impl<'a> Parser<'a> {
         line: u32,
     ) -> Result<Expr, ParseError> {
         if self.check(&TokenKind::Dot) {
-            Ok(Expr::Call(self.finish_call_tail(receiver, line)?))
+            Ok(Expr::Call(self.parse_method_call_suffix(receiver, line)?))
         } else {
             Ok(bare)
         }
@@ -713,8 +732,7 @@ impl<'a> Parser<'a> {
         Ok(Expr::New(name, args, line))
     }
 
-    // Caller must not have consumed the '.' yet.
-    fn finish_call_tail(
+    fn parse_method_call_suffix(
         &mut self,
         receiver: Receiver,
         line: u32,
@@ -736,7 +754,7 @@ impl<'a> Parser<'a> {
         let line = self.peek().line;
         let value = self.parse_parenthesized_content()?;
         if self.check(&TokenKind::Dot) {
-            Ok(Expr::Call(self.finish_call_tail(
+            Ok(Expr::Call(self.parse_method_call_suffix(
                 Receiver::Computed(Box::new(value), line),
                 line,
             )?))
@@ -761,7 +779,8 @@ impl<'a> Parser<'a> {
             return Ok(Expr::Unary(op, Box::new(operand), line));
         }
 
-        if self.try_peek_type_in_parens() {
+        // only a cast needs this lookahead; everything else below is plain recursive descent
+        if self.is_cast_type_ahead() {
             return self.parse_cast_or_nested_paren(line);
         }
 
@@ -770,10 +789,10 @@ impl<'a> Parser<'a> {
             self.advance();
             return Ok(first); // plain paren-wrap, unwrapped
         }
-        self.parse_paren_operator_tail(first, line)
+        self.parse_operator_suffix(first, line)
     }
 
-    fn try_peek_type_in_parens(&self) -> bool {
+    fn is_cast_type_ahead(&self) -> bool {
         if !self.check(&TokenKind::LParen) {
             return false;
         }
@@ -784,7 +803,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_paren_operator_tail(&mut self, first: Expr, line: u32) -> Result<Expr, ParseError> {
+    fn parse_operator_suffix(&mut self, first: Expr, line: u32) -> Result<Expr, ParseError> {
         match self.peek().kind.clone() {
             TokenKind::Question => {
                 self.advance();
@@ -806,7 +825,7 @@ impl<'a> Parser<'a> {
                 Ok(Expr::InstanceOf(Box::new(first), class_name, line))
             }
             other => {
-                if let Some(op) = Self::binop_for(&other) {
+                if let Some(op) = Self::binary_op_for(&other) {
                     self.advance();
                     let right = self.parse_expr()?;
                     self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
@@ -849,10 +868,10 @@ impl<'a> Parser<'a> {
             }
             kind if kind == TokenKind::Question
                 || kind == TokenKind::KwInstanceof
-                || Self::binop_for(&kind).is_some() =>
+                || Self::binary_op_for(&kind).is_some() =>
             {
                 let as_expr = reinterpret_as_expr(ty, outer_line)?;
-                self.parse_paren_operator_tail(as_expr, outer_line)
+                self.parse_operator_suffix(as_expr, outer_line)
             }
             _ => {
                 // No operator followed — this is a cast; parse the operand.
@@ -1034,6 +1053,14 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_local_between_sibling_if_else_arms() {
+        let e = program_err(
+            "class Foo () { void m() { if (c) { int x; x = 1; } else { int x; x = 2; } } }",
+        );
+        assert_eq!(e.code, ErrorCode::EDuplicateLocal);
+    }
+
+    #[test]
     fn duplicate_local_across_sibling_loops() {
         let e = program_err(
             "class Foo () { void m() { while (a) { int x; x = 1; } while (b) { int x; x = 2; } } }",
@@ -1102,6 +1129,28 @@ mod tests {
                 Box::new(Expr::Cast(
                     Type::Class("Dog".into()),
                     Box::new(Expr::Var("obj".into(), 1)),
+                    1
+                )),
+                1
+            )
+        );
+    }
+
+    #[test]
+    fn casts_nest_to_arbitrary_depth() {
+        // three levels deep, not just two — the lookahead check only ever
+        // resolves one `((` at a time; deeper nesting falls out of recursion
+        assert_eq!(
+            expr("((A)((B)((C)obj)))"),
+            Expr::Cast(
+                Type::Class("A".into()),
+                Box::new(Expr::Cast(
+                    Type::Class("B".into()),
+                    Box::new(Expr::Cast(
+                        Type::Class("C".into()),
+                        Box::new(Expr::Var("obj".into(), 1)),
+                        1
+                    )),
                     1
                 )),
                 1

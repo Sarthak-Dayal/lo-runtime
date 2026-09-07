@@ -18,8 +18,6 @@ pub enum LexErrorKind {
 }
 
 impl LexErrorKind {
-    /// The only lex-phase kind with its own code in error-codes.md;
-    /// everything else falls under that phase's sentinel.
     pub fn as_str(&self) -> &'static str {
         match self {
             LexErrorKind::InvalidUnicodeEscape => "E_INVALID_UNICODE_ESCAPE",
