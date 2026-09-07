@@ -952,6 +952,13 @@ fn reinterpret_as_expr(ty: Type, line: u32) -> Result<Expr, ParseError> {
     }
 }
 
+#[cfg(test)]
+impl<'a> Parser<'a> {
+    fn for_test(tokens: &'a [Token]) -> Self {
+        Parser { tokens, pos: 0 }
+    }
+}
+
 fn is_keyword(kind: &TokenKind) -> bool {
     matches!(
         kind,
@@ -974,4 +981,295 @@ fn is_keyword(kind: &TokenKind) -> bool {
             | TokenKind::KwFalse
             | TokenKind::KwInstanceof
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::tokenize;
+
+    fn toks(source: &str) -> Vec<Token> {
+        tokenize(source).unwrap_or_else(|e| panic!("unexpected lex error on {source:?}: {e:?}"))
+    }
+
+    fn program(source: &str) -> Program {
+        parse_program(&toks(source))
+            .unwrap_or_else(|e| panic!("unexpected parse error on {source:?}: {e:?}"))
+    }
+
+    fn program_err(source: &str) -> ParseError {
+        parse_program(&toks(source)).expect_err(&format!("expected parse error on {source:?}"))
+    }
+
+    fn method_stmts(p: &Program, class_idx: usize, method_idx: usize) -> &[Stmt] {
+        match &p.classes[class_idx].methods[method_idx].body {
+            MethodBody::User(scope) => &scope.stmts,
+            MethodBody::Io(_) => panic!("expected a user-defined method body"),
+        }
+    }
+
+    fn expr(source: &str) -> Expr {
+        let tokens = toks(source);
+        let mut parser = Parser::for_test(&tokens);
+        parser
+            .parse_expr()
+            .unwrap_or_else(|e| panic!("unexpected parse error on {source:?}: {e:?}"))
+    }
+
+    #[test]
+    fn empty_class() {
+        let p = program("class Empty () { }");
+        assert_eq!(
+            p,
+            Program {
+                classes: vec![ClassDecl {
+                    name: "Empty".into(),
+                    extends: None,
+                    fields: vec![],
+                    constructors: vec![],
+                    methods: vec![],
+                    line: 1,
+                }]
+            }
+        );
+    }
+
+    #[test]
+    fn grouped_field_names_flatten_to_one_param_each() {
+        let p = program("class Foo (int x, y;) { }");
+        assert_eq!(
+            p.classes[0].fields,
+            vec![
+                Param {
+                    declared_type: Type::Int,
+                    name: "x".into(),
+                    line: 1
+                },
+                Param {
+                    declared_type: Type::Int,
+                    name: "y".into(),
+                    line: 1
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn constructor_with_no_delegation() {
+        let p = program("class Foo (int x;) [ Foo(int n) { x = n; } ] { }");
+        let ctor = &p.classes[0].constructors[0];
+        assert_eq!(ctor.other_constructor_call, None);
+        assert_eq!(
+            ctor.body.stmts,
+            vec![Stmt::Assign("x".into(), Expr::Var("n".into(), 1), 1)]
+        );
+    }
+
+    #[test]
+    fn empty_bracket_section_is_malformed() {
+        let e = program_err("class Foo () [ ] { }");
+        assert_eq!(e.code, ErrorCode::EMalformedClassDecl);
+    }
+
+    #[test]
+    fn super_call_recorded() {
+        let p = program("class Dog extends Animal (int n;) [ Dog(int n) { super(n); } ] { }");
+        let ctor = &p.classes[0].constructors[0];
+        assert_eq!(
+            ctor.other_constructor_call,
+            Some(OtherConstructorCall::SuperCall(
+                vec![Expr::Var("n".into(), 1)],
+                1
+            ))
+        );
+    }
+
+    #[test]
+    fn delegation_both_super_and_this() {
+        let e = program_err("class Dog extends Animal () [ Dog() { this(5); super(1); } ] { }");
+        assert_eq!(e.code, ErrorCode::EDelegationBothSuperAndThis);
+    }
+
+    #[test]
+    fn delegation_repeated_same_keyword() {
+        let e = program_err("class Dog extends Animal () [ Dog() { this(5); this(6); } ] { }");
+        assert_eq!(e.code, ErrorCode::EDelegationNotFirstStatement);
+    }
+
+    #[test]
+    fn delegation_not_first_statement_no_prior_call() {
+        let e = program_err("class Dog extends Animal () [ Dog() { x = 1; super(1); } ] { }");
+        assert_eq!(e.code, ErrorCode::EDelegationNotFirstStatement);
+    }
+
+    #[test]
+    fn nested_delegation_beats_keyword_mismatch() {
+        // this(5) is nested inside the if, so position wins: NotFirstStatement,
+        // not BothSuperAndThis, even though it's also an opposite-keyword case.
+        let e = program_err(
+            "class Dog extends Animal () [ Dog() { super(1); if (true) { this(5); } else { ; } } ] { }",
+        );
+        assert_eq!(e.code, ErrorCode::EDelegationNotFirstStatement);
+    }
+
+    #[test]
+    fn duplicate_local_across_if_else_arms() {
+        let e = program_err("class Foo () { void m() { int x; if (c) { int x; } else { ; } } }");
+        assert_eq!(e.code, ErrorCode::EDuplicateLocal);
+    }
+
+    #[test]
+    fn duplicate_local_across_sibling_loops() {
+        let e = program_err(
+            "class Foo () { void m() { while (a) { int x; x = 1; } while (b) { int x; x = 2; } } }",
+        );
+        assert_eq!(e.code, ErrorCode::EDuplicateLocal);
+    }
+
+    #[test]
+    fn duplicate_local_within_one_declaration() {
+        let e = program_err("class Foo () { void m() { int x, x; } }");
+        assert_eq!(e.code, ErrorCode::EDuplicateLocal);
+    }
+
+    #[test]
+    fn cast_expression() {
+        assert_eq!(
+            expr("((Circle) obj)"),
+            Expr::Cast(
+                Type::Class("Circle".into()),
+                Box::new(Expr::Var("obj".into(), 1)),
+                1
+            )
+        );
+    }
+
+    #[test]
+    fn double_paren_identifier_is_not_a_cast() {
+        assert_eq!(expr("((x))"), Expr::Var("x".into(), 1));
+    }
+
+    #[test]
+    fn double_paren_identifier_then_binop() {
+        assert_eq!(
+            expr("((x) + y)"),
+            Expr::Bin(
+                Box::new(Expr::Var("x".into(), 1)),
+                BinOp::Add,
+                Box::new(Expr::Var("y".into(), 1)),
+                1
+            )
+        );
+    }
+
+    #[test]
+    fn primitive_cast_parses_fine_checker_rejects_later() {
+        assert_eq!(
+            expr("((int) n)"),
+            Expr::Cast(Type::Int, Box::new(Expr::Var("n".into(), 1)), 1)
+        );
+    }
+
+    #[test]
+    fn double_paren_identifier_then_instanceof() {
+        assert_eq!(
+            expr("((x) instanceof Circle)"),
+            Expr::InstanceOf(Box::new(Expr::Var("x".into(), 1)), "Circle".into(), 1)
+        );
+    }
+
+    #[test]
+    fn nested_casts() {
+        assert_eq!(
+            expr("((Animal)((Dog)obj))"),
+            Expr::Cast(
+                Type::Class("Animal".into()),
+                Box::new(Expr::Cast(
+                    Type::Class("Dog".into()),
+                    Box::new(Expr::Var("obj".into(), 1)),
+                    1
+                )),
+                1
+            )
+        );
+    }
+
+    #[test]
+    fn cast_combined_with_instanceof_needs_three_parens() {
+        assert_eq!(
+            expr("(((Dog) x) instanceof Animal)"),
+            Expr::InstanceOf(
+                Box::new(Expr::Cast(
+                    Type::Class("Dog".into()),
+                    Box::new(Expr::Var("x".into(), 1)),
+                    1
+                )),
+                "Animal".into(),
+                1
+            )
+        );
+    }
+
+    #[test]
+    fn direct_call_chaining_without_parens_is_illegal() {
+        let e = program_err("class Foo () { void m() { a.foo().bar(); } }");
+        assert_eq!(e.code, ErrorCode::EParsePhaseOther);
+    }
+
+    #[test]
+    fn call_chaining_with_parens_is_legal() {
+        let p = program("class Foo () { void m() { (a.foo()).bar(); } }");
+        let Stmt::CallStmt(call) = &method_stmts(&p, 0, 0)[0] else {
+            panic!("expected a call statement");
+        };
+        assert_eq!(call.name, "bar");
+        assert!(
+            matches!(&call.receiver, Receiver::Computed(inner, _) if matches!(**inner, Expr::Call(_)))
+        );
+    }
+
+    #[test]
+    fn cast_receiver_then_call() {
+        let p = program("class Foo () { void m() { ((Cat) a).purr(); } }");
+        let Stmt::CallStmt(call) = &method_stmts(&p, 0, 0)[0] else {
+            panic!("expected a call statement");
+        };
+        assert_eq!(call.name, "purr");
+        assert!(matches!(
+            &call.receiver,
+            Receiver::Computed(inner, _) if matches!(**inner, Expr::Cast(Type::Class(ref c), _, _) if c == "Cat")
+        ));
+    }
+
+    #[test]
+    fn computed_receiver_from_new_in_assignment() {
+        let p = program("class Foo () { void m() { x = (new Circle(5)).area(); } }");
+        let Stmt::Assign(name, Expr::Call(call), _) = &method_stmts(&p, 0, 0)[0] else {
+            panic!("expected an assignment to a call expression");
+        };
+        assert_eq!(name, "x");
+        assert_eq!(call.name, "area");
+        assert!(
+            matches!(&call.receiver, Receiver::Computed(inner, _) if matches!(**inner, Expr::New(ref n, _, _) if n == "Circle"))
+        );
+    }
+
+    #[test]
+    fn wrong_order_bracket_section_after_methods() {
+        let e =
+            program_err("class Foo (int x;) { int m() { return x; } } [ Foo(int n) { x = n; } ]");
+        assert_eq!(e.code, ErrorCode::EMalformedClassDecl);
+    }
+
+    #[test]
+    fn string_keyword_rejected_as_identifier() {
+        let e = program_err("class C extends String () { }");
+        assert_eq!(e.code, ErrorCode::EReservedKeywordAsIdentifier);
+    }
+
+    #[test]
+    fn constructor_name_must_match_class_name() {
+        let e = program_err("class Foo (int x;) [ Bar(int x) { } ] { }");
+        assert_eq!(e.code, ErrorCode::EMalformedConstructor);
+    }
 }
