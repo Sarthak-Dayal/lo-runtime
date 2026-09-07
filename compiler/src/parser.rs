@@ -974,6 +974,14 @@ mod tests {
             .unwrap_or_else(|e| panic!("unexpected parse error on {source:?}: {e:?}"))
     }
 
+    fn expr_err(source: &str) -> ParseError {
+        let tokens = toks(source);
+        let mut parser = Parser::for_test(&tokens);
+        parser
+            .parse_expr()
+            .expect_err(&format!("expected parse error on {source:?}"))
+    }
+
     #[test]
     fn empty_class() {
         let p = program("class Empty () { }");
@@ -1237,5 +1245,242 @@ mod tests {
         assert_eq!(p.classes[0].methods.len(), 2);
         assert_eq!(p.classes[0].methods[0].name, "a");
         assert_eq!(p.classes[0].methods[1].name, "b");
+    }
+
+    #[test]
+    fn locals_hoisted_flat_regardless_of_nesting() {
+        let p = program(
+            "class Foo () { void m() { int x; if (c) { int y; y = 1; } else { ; } x = 1; } }",
+        );
+        let MethodBody::UserDefined(scope) = &p.classes[0].methods[0].body else {
+            panic!("expected a user-defined method body");
+        };
+        assert_eq!(
+            scope.locals,
+            vec![
+                VarDecl {
+                    declared_type: Type::Int,
+                    names: vec!["x".into()],
+                    line: 1
+                },
+                VarDecl {
+                    declared_type: Type::Int,
+                    names: vec!["y".into()],
+                    line: 1
+                },
+            ]
+        );
+        assert_eq!(scope.stmts.len(), 2);
+    }
+
+    #[test]
+    fn empty_constructor_body_is_legal() {
+        let p = program("class Foo () [ Foo() { } ] { }");
+        let ctor = &p.classes[0].constructors[0];
+        assert_eq!(ctor.other_constructor_call, None);
+        assert_eq!(ctor.body.stmts, vec![]);
+    }
+
+    #[test]
+    fn empty_method_body_is_illegal() {
+        let e = program_err("class Foo () { void m() { } }");
+        assert_eq!(e.code, ErrorCode::EParsePhaseOther);
+    }
+
+    #[test]
+    fn ternary_expression() {
+        assert_eq!(
+            expr("(c ? 1 : 2)"),
+            Expr::Ternary(
+                Box::new(Expr::Var("c".into(), 1)),
+                Box::new(Expr::Num(1, 1)),
+                Box::new(Expr::Num(2, 1)),
+                1
+            )
+        );
+    }
+
+    #[test]
+    fn unary_operators() {
+        assert_eq!(
+            expr("(~x)"),
+            Expr::Unary(UnaryOp::Neg, Box::new(Expr::Var("x".into(), 1)), 1)
+        );
+        assert_eq!(
+            expr("(!x)"),
+            Expr::Unary(UnaryOp::Not, Box::new(Expr::Var("x".into(), 1)), 1)
+        );
+    }
+
+    #[test]
+    fn delegation_followed_by_ordinary_call_is_legal() {
+        let p = program("class Dog extends Animal () [ Dog() { super(1); this.setup(); } ] { }");
+        let ctor = &p.classes[0].constructors[0];
+        assert_eq!(
+            ctor.other_constructor_call,
+            Some(OtherConstructorCall::SuperCall(vec![Expr::Num(1, 1)], 1))
+        );
+        let Stmt::CallStmt(call) = &ctor.body.stmts[0] else {
+            panic!("expected a call statement");
+        };
+        assert_eq!(call.name, "setup");
+        assert!(matches!(call.receiver, Receiver::This(_)));
+    }
+
+    #[test]
+    fn delegation_both_super_and_this_reverse_order() {
+        let e = program_err("class Dog extends Animal () [ Dog() { super(1); this(5); } ] { }");
+        assert_eq!(e.code, ErrorCode::EDelegationBothSuperAndThis);
+    }
+
+    #[test]
+    fn this_call_recorded() {
+        let p = program("class Foo (int x;) [ Foo() { this(5); } ] { }");
+        let ctor = &p.classes[0].constructors[0];
+        assert_eq!(
+            ctor.other_constructor_call,
+            Some(OtherConstructorCall::ThisCall(vec![Expr::Num(5, 1)], 1))
+        );
+    }
+
+    #[test]
+    fn return_statement() {
+        let p = program("class Foo () { int m() { return 1; } }");
+        assert_eq!(
+            method_stmts(&p, 0, 0).to_vec(),
+            vec![Stmt::Return(Expr::Num(1, 1), 1)]
+        );
+    }
+
+    #[test]
+    fn break_statement_inside_while() {
+        let p = program("class Foo () { void m() { while (true) { break; } } }");
+        assert_eq!(
+            method_stmts(&p, 0, 0).to_vec(),
+            vec![Stmt::While(Expr::Bool(true, 1), vec![Stmt::Break(1)], 1)]
+        );
+    }
+
+    #[test]
+    fn if_statement_shape() {
+        let p = program("class Foo () { void m() { if (c) { x = 1; } else { y = 2; } } }");
+        assert_eq!(
+            method_stmts(&p, 0, 0).to_vec(),
+            vec![Stmt::If(
+                Expr::Var("c".into(), 1),
+                vec![Stmt::Assign("x".into(), Expr::Num(1, 1), 1)],
+                vec![Stmt::Assign("y".into(), Expr::Num(2, 1), 1)],
+                1
+            )]
+        );
+    }
+
+    #[test]
+    fn program_with_multiple_classes() {
+        let p = program("class A () { } class B () { }");
+        assert_eq!(p.classes.len(), 2);
+        assert_eq!(p.classes[0].name, "A");
+        assert_eq!(p.classes[1].name, "B");
+    }
+
+    #[test]
+    fn missing_field_parens_is_malformed() {
+        let e = program_err("class Foo { }");
+        assert_eq!(e.code, ErrorCode::EMalformedClassDecl);
+    }
+
+    #[test]
+    fn bare_literals() {
+        assert_eq!(expr("5"), Expr::Num(5, 1));
+        assert_eq!(expr("true"), Expr::Bool(true, 1));
+        assert_eq!(expr("false"), Expr::Bool(false, 1));
+        assert_eq!(expr("\"hi\""), Expr::Str("hi".into(), 1));
+        assert_eq!(expr("null"), Expr::Null(1));
+    }
+
+    #[test]
+    fn new_expression_with_multiple_args() {
+        assert_eq!(
+            expr("new Circle(5, 6)"),
+            Expr::New("Circle".into(), vec![Expr::Num(5, 1), Expr::Num(6, 1)], 1)
+        );
+    }
+
+    #[test]
+    fn primitive_type_alone_in_double_parens_is_invalid() {
+        assert_eq!(expr_err("((int))").code, ErrorCode::EParsePhaseOther);
+    }
+
+    #[test]
+    fn primitive_type_before_instanceof_is_invalid() {
+        assert_eq!(
+            expr_err("((int) instanceof Foo)").code,
+            ErrorCode::EParsePhaseOther
+        );
+    }
+
+    #[test]
+    fn multiple_var_decls_in_field_list() {
+        let p = program("class Fiver (int a, b; bool x, y; String str;) { }");
+        assert_eq!(
+            p.classes[0].fields,
+            vec![
+                Param {
+                    declared_type: Type::Int,
+                    name: "a".into(),
+                    line: 1
+                },
+                Param {
+                    declared_type: Type::Int,
+                    name: "b".into(),
+                    line: 1
+                },
+                Param {
+                    declared_type: Type::Bool,
+                    name: "x".into(),
+                    line: 1
+                },
+                Param {
+                    declared_type: Type::Bool,
+                    name: "y".into(),
+                    line: 1
+                },
+                Param {
+                    declared_type: Type::String,
+                    name: "str".into(),
+                    line: 1
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn reserved_keyword_rejected_as_local_name() {
+        let e = program_err("class Foo () { void m() { int this; } }");
+        assert_eq!(e.code, ErrorCode::EReservedKeywordAsIdentifier);
+    }
+
+    #[test]
+    fn reserved_keyword_rejected_as_method_name() {
+        let e = program_err("class Foo () { bool break() { ; } }");
+        assert_eq!(e.code, ErrorCode::EReservedKeywordAsIdentifier);
+    }
+
+    #[test]
+    fn multiple_constructors_in_one_class() {
+        let p = program(
+            "class Cake (int layers;) [ Cake() { this(5); } Cake(int n) { layers = n; } ] { }",
+        );
+        assert_eq!(p.classes[0].constructors.len(), 2);
+        assert_eq!(p.classes[0].constructors[0].params.len(), 0);
+        assert_eq!(p.classes[0].constructors[1].params.len(), 1);
+    }
+
+    #[test]
+    fn plain_instanceof_without_double_parens() {
+        assert_eq!(
+            expr("(a instanceof Cat)"),
+            Expr::InstanceOf(Box::new(Expr::Var("a".into(), 1)), "Cat".into(), 1)
+        );
     }
 }
