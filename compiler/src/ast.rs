@@ -85,7 +85,7 @@ pub struct BodyScope {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[allow(clippy::enum_variant_names)] // CallStmt is deliberately named this way — see parser_design.md's Naming section
+#[allow(clippy::enum_variant_names)]
 pub enum Stmt {
     Assign(String, Expr, u32),
     Return(Expr, u32),

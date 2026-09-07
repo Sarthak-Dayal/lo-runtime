@@ -9,7 +9,7 @@ pub struct ParseError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(clippy::enum_variant_names)] // shared `E` prefix mirrors the course's own error-code naming convention
+#[allow(clippy::enum_variant_names)]
 pub enum ErrorCode {
     EReservedKeywordAsIdentifier,
     EMalformedClassDecl,
@@ -34,19 +34,17 @@ impl ErrorCode {
     }
 }
 
-/// Threaded through parse_stmt / parse_nested_block / parse_var_decl. Built fresh for
-/// each method/constructor body by parse_method_body_scope / parse_constructor_body_scope.
+// Threaded through parse_stmt, parse_nested_block, and parse_var_decl. Built
+// fresh for each method/constructor body.
 struct ParseContext<'p> {
     class_name: &'p str,
     locals: &'p mut Vec<VarDecl>,
     in_constructor: bool,
-    /// True only while parsing the constructor's own top-level Stmt list. Set to
-    /// false when recursing into any if/while block, at any depth, and never set
-    /// back to true again for that subtree — see parse_nested_block.
+    // True only while parsing the constructor's own top-level statements;
+    // false inside any nested if/while, at any depth.
     at_constructor_top_level: bool,
-    /// The constructor's recorded delegation call, if any: Some(true) for a
-    /// this(...) delegation, Some(false) for super(...), None if no
-    /// delegation appeared. Read-only from here on.
+    // The constructor's recorded delegation call, if any: Some(true) for
+    // this(...), Some(false) for super(...), None if no delegation appeared.
     recorded_call_is_this: Option<bool>,
 }
 
@@ -71,10 +69,6 @@ impl<'a> Parser<'a> {
         &self.tokens[self.pos]
     }
 
-    /// Every call site only reaches `peek2`/`peek3` after already confirming
-    /// the current token isn't `Eof` (which is always the last token), so
-    /// `pos + 1`/`pos + 2` are always in bounds — an out-of-bounds panic here
-    /// means that invariant broke, which should fail loudly, not be masked.
     fn peek2(&self) -> &Token {
         &self.tokens[self.pos + 1]
     }
@@ -163,7 +157,9 @@ impl<'a> Parser<'a> {
         Ok(Type::Class(name))
     }
 
-    /// Decision point 1: `Ident` then another `Ident` means a VarDecl continues.
+    // Ident then Ident means a VarDecl (e.g. "Foo x;") continues — an
+    // assignment ("x = ...") or call ("x.foo()") has only one Ident before
+    // `=` or `.`.
     fn starts_var_decl(&self) -> bool {
         match &self.peek().kind {
             TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid => true,
@@ -172,8 +168,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parses a comma-separated list via `parse_list`, or returns an empty
-    /// list without calling it if the current token is already `)`.
+    // Parses a comma-separated list via `parse_list`, or returns an empty
+    // list if the current token is already `)`.
     fn parse_list_or_empty<T>(
         &mut self,
         parse_list: fn(&mut Self) -> Result<Vec<T>, ParseError>,
@@ -229,11 +225,9 @@ impl<'a> Parser<'a> {
         }
         self.advance(); // }
 
-        // A `[ ]` section here means it was written after `{ methods }` instead of
-        // before it — the three sections are position-fixed (fields, then
-        // constructors, then methods), so this is the "wrong order" case
-        // E_MALFORMED_CLASS_DECL's trigger text names explicitly, not a fresh
-        // top-level `class` to hand back to parse_program.
+        // A `[` right here means the constructor section was written after
+        // the methods instead of before — E_MALFORMED_CLASS_DECL's "wrong
+        // order" case.
         if self.check(&TokenKind::LBracket) {
             return Err(ParseError {
                 code: ErrorCode::EMalformedClassDecl,
@@ -253,9 +247,9 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// A class's field-parens section is VarDecl*, not Formals — grouped names
-    /// (`int x, y;`) are legal and must be flattened one Param per name. No
-    /// duplicate-name check here: E_DUPLICATE_FIELD is checker work.
+    // Field-parens is VarDecl*, not Formals — flattens grouped names like
+    // `int x, y;` into one Param per name. No duplicate-name check here:
+    // E_DUPLICATE_FIELD is checked later, not by the parser.
     fn parse_field_list(&mut self) -> Result<Vec<Param>, ParseError> {
         let mut fields = Vec::new();
         while !self.check(&TokenKind::RParen) {
@@ -403,10 +397,8 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    /// The one legitimate this()/super() slot, if present — the very first thing in a
-    /// constructor body, before any VarDecl. `E_MALFORMED_CONSTRUCTOR`-adjacent
-    /// legality (whether it's allowed given `extends`) is checker work, not this
-    /// function's job — this only records which keyword appeared, if either did.
+    // The optional this()/super() delegation call at the very start of a
+    // constructor body, if present.
     fn parse_other_constructor_call(&mut self) -> Result<Option<OtherConstructorCall>, ParseError> {
         let line = self.peek().line;
         let is_this = self.check(&TokenKind::KwThis);
@@ -429,8 +421,8 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Shared by method bodies (min_stmts=1), constructor bodies (min_stmts=0), and
-    /// if/while bodies (min_stmts=1) — all four are "(VarDecl)* (Stmt)(*|+)".
+    // Shared by method bodies, constructor bodies, and if/while bodies: zero
+    // or more VarDecls followed by `min_stmts` or more statements.
     fn parse_locals_then_stmts(
         &mut self,
         ctx: &mut ParseContext,
@@ -453,12 +445,9 @@ impl<'a> Parser<'a> {
         Ok(stmts)
     }
 
-    /// Parses one VarDecl, expands its (possibly several) names, and pushes each
-    /// into ctx.locals — checking each new name against every name already in
-    /// ctx.locals AND every name already collected earlier in this same
-    /// declaration (per-name, not per-VarDecl-node, per the flattening note on
-    /// VarDecl in the AST — `int x, x;` is a duplicate within one declaration, not
-    /// just across two). This is the parser-level E_DUPLICATE_LOCAL check.
+    // Parses one VarDecl, flattening its (possibly several) names into
+    // ctx.locals — each new name is checked against every name already
+    // collected, in this declaration or an earlier one, for E_DUPLICATE_LOCAL.
     fn parse_var_decl(&mut self, ctx: &mut ParseContext) -> Result<(), ParseError> {
         let line = self.peek().line;
         let declared_type = self.parse_type()?;
@@ -498,9 +487,11 @@ impl<'a> Parser<'a> {
     fn parse_stmt(&mut self, ctx: &mut ParseContext) -> Result<Stmt, ParseError> {
         let line = self.peek().line;
 
-        // Decision point 5, step 2: this()/super()-shaped fragment check. Position is
-        // checked before keyword — nesting always wins over a keyword-mismatch
-        // classification, even when a fragment is technically both.
+        // A bare this(/super( fragment here is a misplaced delegation unless
+        // it's exactly the constructor's first statement. Position is
+        // checked before keyword: nesting always wins over a
+        // keyword-mismatch classification, even when a fragment is
+        // technically both.
         if ctx.in_constructor {
             let is_this = self.check(&TokenKind::KwThis);
             let is_super = self.check(&TokenKind::KwSuper);
@@ -582,9 +573,8 @@ impl<'a> Parser<'a> {
         Ok(Stmt::While(cond, body, line))
     }
 
-    /// Grammar's `Block` (if/while body): { (VarDecl)* (Stmt)+ }, no BodyScope of
-    /// its own — every VarDecl still goes into the SAME locals collection as the
-    /// enclosing method/constructor, via the reborrowed handle below.
+    // if/while body: VarDecls still go into the enclosing method/constructor's
+    // locals, not a new scope, via the reborrowed handle below.
     fn parse_nested_block(&mut self, ctx: &mut ParseContext) -> Result<Vec<Stmt>, ParseError> {
         self.expect(TokenKind::LBrace, ErrorCode::EParsePhaseOther)?;
         let mut nested_ctx = ParseContext {
@@ -710,7 +700,7 @@ impl<'a> Parser<'a> {
         Ok(Expr::New(name, args, line))
     }
 
-    /// Assumes the `.` has NOT been consumed yet — consumes it here.
+    // Caller must not have consumed the '.' yet.
     fn finish_call_tail(
         &mut self,
         receiver: Receiver,
@@ -729,11 +719,8 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// `(`-led Expr, including the trailing-call continuation P23/P49 require: once
-    /// `parse_paren_value` resolves the parenthesized value, a `.` immediately after
-    /// means this was actually a call receiver (`(new Circle(5)).area()`,
-    /// `((Cat) a).purr()` used as a value, not a bare statement) — same shape as
-    /// decision point 2's `Ident`/`this`/`super` receivers, one level of parens up.
+    // Resolves a `(`-led expression; a `.` immediately after means it was
+    // actually a call receiver, e.g. `(new Circle(5)).area()`.
     fn parse_paren_expr(&mut self) -> Result<Expr, ParseError> {
         let line = self.peek().line;
         let value = self.parse_paren_value()?;
@@ -747,13 +734,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Decision point 4's core: resolves exactly one fully-parenthesized value —
-    /// unop, cast, ternary, binop, instanceof, or plain unwrap — consuming the
-    /// opening `(` through its matching close and nothing past it. Shared by
-    /// `parse_paren_expr` (Expr position) and `parse_receiver`'s `(` arm (statement
-    /// position, e.g. `((Cat) a).purr();`) so both resolve `(`-led content
-    /// identically, per decision point 4's general dispatch — a receiver is just an
-    /// Expr in a position that requires a trailing `.MethodName(...)`.
+    // Resolves one fully-parenthesized value: a unop, a cast, or an ordinary
+    // expression continuing into a ternary/binop/instanceof, or a plain
+    // unwrap. Shared by parse_paren_expr (Expr position) and
+    // parse_receiver's `(` arm (statement position, e.g. `((Cat) a).purr();`).
     fn parse_paren_value(&mut self) -> Result<Expr, ParseError> {
         let line = self.peek().line;
         self.advance(); // consume outer '('
@@ -771,49 +755,23 @@ impl<'a> Parser<'a> {
             return Ok(Expr::Un(op, Box::new(operand), line));
         }
 
-        // Double-paren AND the content is exactly `(Type)` — a single keyword or a
-        // single bare identifier immediately closed. This is a lookahead-only check
-        // (try_peek_type_in_parens), deliberately NOT just "is the next token '('":
-        // that weaker condition is also true when the outer paren simply contains an
-        // ordinary nested expression that happens to start with '(' (e.g. a cast one
-        // level down, as in `((Animal)((Dog)obj))` or `(((Dog)x) instanceof Animal)`)
-        // — committing to cast-parsing on that weaker signal alone mishandles those
-        // cases. Requiring the full `(Type)` shape up front, via pure lookahead, is
-        // what makes the general recursive-descent case below (which handles nested
-        // '('-led expressions on its own, correctly, at whatever depth) the fallback
-        // for everything that isn't genuinely a type-in-parens.
+        // Only commit to cast-parsing when the content is exactly `(Type)`;
+        // otherwise fall through to ordinary recursive parsing, which
+        // resolves nested parens/casts on its own, at any depth.
         if self.try_peek_type_in_parens() {
             return self.parse_cast_or_nested_paren(line);
         }
 
-        // General case: parse ONE full Expr via ordinary recursive dispatch — if it
-        // starts with '(', it recurses through this same function and correctly
-        // resolves whatever it is (including nested casts) entirely on its own,
-        // returning only once it's genuinely complete. Then branch on what follows.
         let first = self.parse_expr()?;
         if self.check(&TokenKind::RParen) {
             self.advance();
-            return Ok(first); // plain paren-wrap (P28), unwrapped
+            return Ok(first); // plain paren-wrap, unwrapped
         }
         self.parse_paren_operator_tail(first, line)
     }
 
-    /// Lookahead-only (consumes nothing): true iff the current token is '(' AND what
-    /// immediately follows is exactly one Type token (a primitive keyword, or a bare
-    /// identifier immediately followed by ')') — i.e. the current position opens
-    /// precisely a `(Type)` fragment. False for anything else, including when the
-    /// current token is '(' but what follows is itself another '(' (an ordinary
-    /// nested expression, not a type position at all).
-    ///
-    /// The `)`-immediately-follows check only applies to the identifier case: a
-    /// primitive keyword alone is enough to return true, with no check that `)`
-    /// follows it too. That's safe only because `parse_expr` has no dispatch arm for
-    /// any primitive-keyword token, so a primitive keyword can never legally start an
-    /// `Expr` — any malformed shape past it (e.g. no closing `)`) still fails cleanly,
-    /// just one level down, via `expect(RParen)` in `parse_cast_or_nested_paren`
-    /// rather than here. A bare identifier has no such guarantee (`Ident` legally
-    /// starts an ordinary `Expr`), which is why that branch needs the explicit
-    /// closure check to avoid false-positiving on something like `(x + 1)`.
+    // True iff the current token opens exactly `(Type)`: a primitive
+    // keyword, or a bare identifier immediately followed by `)`.
     fn try_peek_type_in_parens(&self) -> bool {
         if !self.check(&TokenKind::LParen) {
             return false;
@@ -825,9 +783,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Shared tail for "parsed one Expr inside parens, now decide ternary vs. binop
-    /// vs. instanceof" — used by both parse_paren_expr's general case and
-    /// parse_cast_or_nested_paren's "was a genuine value" branches.
+    // After one operand inside parens: ternary, instanceof, or binop, then
+    // the closing `)`.
     fn parse_paren_operator_tail(&mut self, first: Expr, line: u32) -> Result<Expr, ParseError> {
         match self.peek().kind.clone() {
             TokenKind::Question => {
@@ -867,11 +824,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Precondition: try_peek_type_in_parens() was just true, so the current token
-    /// is '(' and it opens EXACTLY `(Type)` — a single keyword or a single bare
-    /// identifier, immediately closed. Safe to consume directly; no speculative
-    /// parsing needed, and no recursive parse_expr() call that could accidentally
-    /// swallow more or less than the type-in-parens fragment.
+    // Precondition: try_peek_type_in_parens() was true, so this opens
+    // exactly `(Type)`.
     fn parse_cast_or_nested_paren(&mut self, outer_line: u32) -> Result<Expr, ParseError> {
         self.advance(); // consume the second '('
         let ty = if let Some(ty) = self.try_parse_primitive_type() {
@@ -881,7 +835,7 @@ impl<'a> Parser<'a> {
         };
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // closes (Type)
 
-        // Now decide: was this genuinely a cast, or just `((Ident))` / `((Ident) op ...)`?
+        // Decide: cast, or just a parenthesized identifier?
         match self.peek().kind.clone() {
             TokenKind::RParen => {
                 // Nothing followed: not a cast. Unwrap both layers.
@@ -904,8 +858,7 @@ impl<'a> Parser<'a> {
                 self.parse_paren_operator_tail(as_expr, outer_line)
             }
             _ => {
-                // A new expression starts here with no operator bridging it to the
-                // type-shaped fragment — the only grammar shape that fits is a cast.
+                // No operator followed — this is a cast; parse the operand.
                 let operand = self.parse_expr()?;
                 self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
                 Ok(Expr::Cast(ty, Box::new(operand), outer_line))
@@ -914,9 +867,7 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Used only inside parse_cast_or_nested_paren's "not a cast after all" branches —
-/// a primitive-keyword type reaching here (e.g. `((int) + y)`) is never valid,
-/// since a value position can't be a bare primitive-type keyword.
+// A primitive type reaching here (e.g. `((int) + y)`) is never a valid value.
 fn reinterpret_as_expr(ty: Type, line: u32) -> Result<Expr, ParseError> {
     match ty {
         Type::Class(name) => Ok(Expr::Var(name, line)),
