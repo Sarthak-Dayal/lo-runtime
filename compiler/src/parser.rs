@@ -307,10 +307,10 @@ impl<'a> Parser<'a> {
         let params = self.parse_paren_list_or_empty(Self::parse_params)?;
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
 
-        let (other_constructor_call, body) = self.parse_constructor_body_scope(class_name)?;
+        let (delegation, body) = self.parse_constructor_body_scope(class_name)?;
         Ok(ConstructorDecl {
             params,
-            other_constructor_call,
+            delegation,
             body,
             line,
         })
@@ -387,25 +387,25 @@ impl<'a> Parser<'a> {
     fn parse_constructor_body_scope(
         &mut self,
         class_name: &str,
-    ) -> Result<(Option<OtherConstructorCall>, BodyScope), ParseError> {
+    ) -> Result<(Option<ConstructorDelegation>, BodyScope), ParseError> {
         let line = self.peek().line;
         self.expect(TokenKind::LBrace, ErrorCode::EParsePhaseOther)?;
-        let other_call = self.parse_other_constructor_call()?;
+        let delegation = self.parse_constructor_delegation()?;
         let mut locals = Vec::new();
         let mut ctx = ParseContext {
             class_name,
             locals: &mut locals,
             in_constructor: true,
             at_constructor_top_level: true,
-            recorded_delegation: other_call.as_ref().map(|d| match d {
-                OtherConstructorCall::ThisCall(..) => DelegationKeyword::This,
-                OtherConstructorCall::SuperCall(..) => DelegationKeyword::Super,
+            recorded_delegation: delegation.as_ref().map(|d| match d {
+                ConstructorDelegation::ThisCall(..) => DelegationKeyword::This,
+                ConstructorDelegation::SuperCall(..) => DelegationKeyword::Super,
             }),
         };
         let stmts = self.parse_locals_then_stmts(&mut ctx, 0)?; // Stmt*
         self.expect(TokenKind::RBrace, ErrorCode::EParsePhaseOther)?;
         Ok((
-            other_call,
+            delegation,
             BodyScope {
                 locals,
                 stmts,
@@ -414,7 +414,9 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    fn parse_other_constructor_call(&mut self) -> Result<Option<OtherConstructorCall>, ParseError> {
+    fn parse_constructor_delegation(
+        &mut self,
+    ) -> Result<Option<ConstructorDelegation>, ParseError> {
         let line = self.peek().line;
         let is_this = self.check(&TokenKind::KwThis);
         let is_super = self.check(&TokenKind::KwSuper);
@@ -430,9 +432,9 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
         self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?;
         Ok(Some(if is_this {
-            OtherConstructorCall::ThisCall(args, line)
+            ConstructorDelegation::ThisCall(args, line)
         } else {
-            OtherConstructorCall::SuperCall(args, line)
+            ConstructorDelegation::SuperCall(args, line)
         }))
     }
 
@@ -972,7 +974,7 @@ mod tests {
     fn constructor_with_no_delegation() {
         let p = program("class Foo (int x;) [ Foo(int n) { x = n; } ] { }");
         let ctor = &p.classes[0].constructors[0];
-        assert_eq!(ctor.other_constructor_call, None);
+        assert_eq!(ctor.delegation, None);
         assert_eq!(
             ctor.body.stmts,
             vec![Stmt::Assign("x".into(), Expr::Var("n".into(), 1), 1)]
@@ -990,8 +992,8 @@ mod tests {
         let p = program("class Dog extends Animal (int n;) [ Dog(int n) { super(n); } ] { }");
         let ctor = &p.classes[0].constructors[0];
         assert_eq!(
-            ctor.other_constructor_call,
-            Some(OtherConstructorCall::SuperCall(
+            ctor.delegation,
+            Some(ConstructorDelegation::SuperCall(
                 vec![Expr::Var("n".into(), 1)],
                 1
             ))
@@ -1224,7 +1226,7 @@ mod tests {
     fn empty_constructor_body_is_legal() {
         let p = program("class Foo () [ Foo() { } ] { }");
         let ctor = &p.classes[0].constructors[0];
-        assert_eq!(ctor.other_constructor_call, None);
+        assert_eq!(ctor.delegation, None);
         assert_eq!(ctor.body.stmts, vec![]);
     }
 
@@ -1264,8 +1266,8 @@ mod tests {
         let p = program("class Dog extends Animal () [ Dog() { super(1); this.setup(); } ] { }");
         let ctor = &p.classes[0].constructors[0];
         assert_eq!(
-            ctor.other_constructor_call,
-            Some(OtherConstructorCall::SuperCall(vec![Expr::Num(1, 1)], 1))
+            ctor.delegation,
+            Some(ConstructorDelegation::SuperCall(vec![Expr::Num(1, 1)], 1))
         );
         let Stmt::CallStmt(call) = &ctor.body.stmts[0] else {
             panic!("expected a call statement");
@@ -1285,8 +1287,8 @@ mod tests {
         let p = program("class Foo (int x;) [ Foo() { this(5); } ] { }");
         let ctor = &p.classes[0].constructors[0];
         assert_eq!(
-            ctor.other_constructor_call,
-            Some(OtherConstructorCall::ThisCall(vec![Expr::Num(5, 1)], 1))
+            ctor.delegation,
+            Some(ConstructorDelegation::ThisCall(vec![Expr::Num(5, 1)], 1))
         );
     }
 

@@ -32,7 +32,7 @@ pub struct ClassDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConstructorDecl {
     pub params: Vec<Param>,
-    pub other_constructor_call: Option<OtherConstructorCall>,
+    pub delegation: Option<ConstructorDelegation>,
     pub body: BodyScope,
     pub line: u32,
 }
@@ -47,7 +47,7 @@ pub struct MethodDecl {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum OtherConstructorCall {
+pub enum ConstructorDelegation {
     ThisCall(Vec<Expr>, u32),
     SuperCall(Vec<Expr>, u32),
 }
