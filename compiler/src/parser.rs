@@ -34,26 +34,17 @@ impl ErrorCode {
     }
 }
 
-// Which keyword a constructor's optional this()/super() delegation used.
-// A lightweight tag, not a reuse of OtherConstructorCall — that type also
-// carries the call's arguments and line, which the delegation-mismatch
-// check below never needs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum DelegationKeyword {
     This,
     Super,
 }
 
-// Threaded through parse_stmt, parse_nested_block, and parse_var_decl. Built
-// fresh for each method/constructor body.
 struct ParseContext<'p> {
     class_name: &'p str,
     locals: &'p mut Vec<VarDecl>,
     in_constructor: bool,
-    // True only while parsing the constructor's own top-level statements;
-    // false inside any nested if/while, at any depth.
-    at_constructor_top_level: bool,
-    // Which keyword the constructor's delegation call used, if it had one.
+    at_constructor_top_level: bool, // false once nested in any if/while
     recorded_delegation: Option<DelegationKeyword>,
 }
 
@@ -78,8 +69,7 @@ impl<'a> Parser<'a> {
         &self.tokens[self.pos]
     }
 
-    // Only ever called after the caller has confirmed the current token
-    // isn't Eof, so pos+1/pos+2 are always in bounds.
+    // caller must confirm current token isn't Eof first
     fn peek2(&self) -> &Token {
         &self.tokens[self.pos + 1]
     }
@@ -192,9 +182,7 @@ impl<'a> Parser<'a> {
         Ok(Type::Class(name))
     }
 
-    // Ident then Ident means a VarDecl (e.g. "Foo x;") continues — an
-    // assignment ("x = ...") or call ("x.foo()") has only one Ident before
-    // `=` or `.`.
+    // "Foo x" (VarDecl) vs "x = " (assign) vs "x." (call)
     fn starts_var_decl(&self) -> bool {
         match &self.peek().kind {
             TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid => true,
@@ -203,8 +191,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // Parses a comma-separated list via `parse_list`, or returns an empty
-    // list if the current token is already `)`.
     fn parse_paren_list_or_empty<T>(
         &mut self,
         parse_list: fn(&mut Self) -> Result<Vec<T>, ParseError>,
@@ -260,9 +246,7 @@ impl<'a> Parser<'a> {
         }
         self.advance(); // }
 
-        // A `[` right here means the constructor section was written after
-        // the methods instead of before — E_MALFORMED_CLASS_DECL's "wrong
-        // order" case.
+        // `[` here means the constructor section came after the methods
         if self.check(&TokenKind::LBracket) {
             return Err(err(
                 ErrorCode::EMalformedClassDecl,
@@ -281,9 +265,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // Field-parens is VarDecl*, not Formals — flattens grouped names like
-    // `int x, y;` into one Param per name. No duplicate-name check here:
-    // E_DUPLICATE_FIELD is checked later, not by the parser.
+    // VarDecl*, not Formals: `int x, y;` flattens to two Params
     fn parse_field_list(&mut self) -> Result<Vec<Param>, ParseError> {
         let mut fields = Vec::new();
         while !self.check(&TokenKind::RParen) {
@@ -432,8 +414,6 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    // The optional this()/super() delegation call at the very start of a
-    // constructor body, if present.
     fn parse_other_constructor_call(&mut self) -> Result<Option<OtherConstructorCall>, ParseError> {
         let line = self.peek().line;
         let is_this = self.check(&TokenKind::KwThis);
@@ -442,7 +422,7 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
         if self.peek2().kind != TokenKind::LParen {
-            return Ok(None); // this./super. — not a this()/super() call, leave for ordinary Stmt parsing
+            return Ok(None); // e.g. this.foo() — not a delegation call
         }
         self.advance(); // this/super
         self.advance(); // (
@@ -456,8 +436,6 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    // Shared by method bodies, constructor bodies, and if/while bodies: zero
-    // or more VarDecls followed by `min_stmts` or more statements.
     fn parse_locals_then_stmts(
         &mut self,
         ctx: &mut ParseContext,
@@ -480,9 +458,6 @@ impl<'a> Parser<'a> {
         Ok(stmts)
     }
 
-    // Parses one VarDecl, flattening its (possibly several) names into
-    // ctx.locals — each new name is checked against every name already
-    // collected, in this declaration or an earlier one, for E_DUPLICATE_LOCAL.
     fn parse_var_decl(&mut self, ctx: &mut ParseContext) -> Result<(), ParseError> {
         let line = self.peek().line;
         let declared_type = self.parse_type()?;
@@ -519,10 +494,6 @@ impl<'a> Parser<'a> {
 
     // ---- Stmt ----
 
-    // A bare this(/super( fragment is a misplaced delegation unless it's
-    // exactly the constructor's first statement. Position is checked before
-    // keyword: nesting always wins over a keyword-mismatch classification,
-    // even when a fragment is technically both.
     fn check_misplaced_delegation(&self, ctx: &ParseContext) -> Option<ParseError> {
         if !ctx.in_constructor {
             return None;
@@ -611,15 +582,13 @@ impl<'a> Parser<'a> {
         Ok(Stmt::While(cond, body, line))
     }
 
-    // if/while body: VarDecls still go into the enclosing method/constructor's
-    // locals, not a new scope, via the reborrowed handle below.
     fn parse_nested_block(&mut self, ctx: &mut ParseContext) -> Result<Vec<Stmt>, ParseError> {
         self.expect(TokenKind::LBrace, ErrorCode::EParsePhaseOther)?;
         let mut nested_ctx = ParseContext {
             class_name: ctx.class_name,
-            locals: &mut *ctx.locals, // reborrow — same Vec, not a new one
+            locals: &mut *ctx.locals, // reborrow, not a new Vec
             in_constructor: ctx.in_constructor,
-            at_constructor_top_level: false, // always false once nested, permanently for this subtree
+            at_constructor_top_level: false,
             recorded_delegation: ctx.recorded_delegation,
         };
         let stmts = self.parse_locals_then_stmts(&mut nested_ctx, 1)?; // Stmt+
@@ -703,8 +672,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.var_or_call(Receiver::This(line), Expr::This(line), line)
             }
-            // Bare `super` is never a legal Expr on its own (no such production) —
-            // it only ever appears as a receiver, always followed by `.`.
+            // bare `super` isn't a legal Expr; always requires `.method(...)`
             TokenKind::KwSuper => {
                 self.advance();
                 Ok(Expr::Call(
@@ -720,9 +688,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // If a `.` follows, `receiver` was actually a call; otherwise `bare` is
-    // the whole expression. Shared by the Ident and this-keyword cases in
-    // parse_expr, which differ only in what `receiver`/`bare` are.
     fn var_or_call(
         &mut self,
         receiver: Receiver,
@@ -765,8 +730,6 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // Resolves a `(`-led expression; a `.` immediately after means it was
-    // actually a call receiver, e.g. `(new Circle(5)).area()`.
     fn parse_paren_expr(&mut self) -> Result<Expr, ParseError> {
         let line = self.peek().line;
         let value = self.parse_parenthesized_content()?;
@@ -780,15 +743,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // Resolves one fully-parenthesized value: a unop, a cast, or an ordinary
-    // expression continuing into a ternary/binop/instanceof, or a plain
-    // unwrap. Shared by parse_paren_expr (Expr position) and
-    // parse_receiver's `(` arm (statement position, e.g. `((Cat) a).purr();`).
     fn parse_parenthesized_content(&mut self) -> Result<Expr, ParseError> {
         let line = self.peek().line;
         self.advance(); // consume outer '('
 
-        // Unop: ~ or !
         if self.check(&TokenKind::Tilde) || self.check(&TokenKind::Bang) {
             let op = if self.check(&TokenKind::Tilde) {
                 UnaryOp::Neg
@@ -801,9 +759,6 @@ impl<'a> Parser<'a> {
             return Ok(Expr::Unary(op, Box::new(operand), line));
         }
 
-        // Only commit to cast-parsing when the content is exactly `(Type)`;
-        // otherwise fall through to ordinary recursive parsing, which
-        // resolves nested parens/casts on its own, at any depth.
         if self.try_peek_type_in_parens() {
             return self.parse_cast_or_nested_paren(line);
         }
@@ -816,8 +771,6 @@ impl<'a> Parser<'a> {
         self.parse_paren_operator_tail(first, line)
     }
 
-    // True iff the current token opens exactly `(Type)`: a primitive
-    // keyword, or a bare identifier immediately followed by `)`.
     fn try_peek_type_in_parens(&self) -> bool {
         if !self.check(&TokenKind::LParen) {
             return false;
@@ -829,8 +782,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // After one operand inside parens: ternary, instanceof, or binop, then
-    // the closing `)`.
     fn parse_paren_operator_tail(&mut self, first: Expr, line: u32) -> Result<Expr, ParseError> {
         match self.peek().kind.clone() {
             TokenKind::Question => {
@@ -872,8 +823,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // Precondition: try_peek_type_in_parens() was true, so this opens
-    // exactly `(Type)`.
     fn parse_cast_or_nested_paren(&mut self, outer_line: u32) -> Result<Expr, ParseError> {
         self.advance(); // consume the second '('
         let ty = if let Some(ty) = self.try_parse_primitive_type() {
@@ -883,7 +832,6 @@ impl<'a> Parser<'a> {
         };
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // closes (Type)
 
-        // Decide: cast, or just a parenthesized identifier?
         match self.peek().kind.clone() {
             TokenKind::RParen => {
                 // Nothing followed: not a cast. Unwrap both layers.
@@ -1070,8 +1018,7 @@ mod tests {
 
     #[test]
     fn nested_delegation_beats_keyword_mismatch() {
-        // this(5) is nested inside the if, so position wins: NotFirstStatement,
-        // not BothSuperAndThis, even though it's also an opposite-keyword case.
+        // nested, so NotFirstStatement wins even though it's also this-vs-super
         let e = program_err(
             "class Dog extends Animal () [ Dog() { super(1); if (true) { this(5); } else { ; } } ] { }",
         );

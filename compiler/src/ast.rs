@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     Int,
     Bool,
@@ -7,19 +7,19 @@ pub enum Type {
     Class(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub classes: Vec<ClassDecl>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub declared_type: Type,
     pub name: String,
     pub line: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClassDecl {
     pub name: String,
     pub extends: Option<String>,
@@ -29,7 +29,7 @@ pub struct ClassDecl {
     pub line: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConstructorDecl {
     pub params: Vec<Param>,
     pub other_constructor_call: Option<OtherConstructorCall>,
@@ -37,7 +37,7 @@ pub struct ConstructorDecl {
     pub line: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MethodDecl {
     pub return_type: Type,
     pub name: String,
@@ -46,22 +46,19 @@ pub struct MethodDecl {
     pub line: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum OtherConstructorCall {
     ThisCall(Vec<Expr>, u32),
     SuperCall(Vec<Expr>, u32),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MethodBody {
-    // Real, source-written method bodies.
     UserDefined(BodyScope),
-    // Never produced by the parser — injected later via the synthetic
-    // Input/Output preamble classes.
-    Io(IoOp),
+    Io(IoOp), // never produced by the parser
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum IoOp {
     ReadInt,
     ReadBool,
@@ -73,21 +70,21 @@ pub enum IoOp {
     Println,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VarDecl {
     pub declared_type: Type,
     pub names: Vec<String>,
     pub line: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BodyScope {
     pub locals: Vec<VarDecl>,
     pub stmts: Vec<Stmt>,
     pub line: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::enum_variant_names)]
 pub enum Stmt {
     Assign(String, Expr, u32),
@@ -99,7 +96,7 @@ pub enum Stmt {
     CallStmt(MethodCall),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MethodCall {
     pub receiver: Receiver,
     pub name: String,
@@ -107,7 +104,7 @@ pub struct MethodCall {
     pub line: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Num(i32, u32),
     Bool(bool, u32),
@@ -124,7 +121,7 @@ pub enum Expr {
     InstanceOf(Box<Expr>, String, u32),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Receiver {
     Var(String, u32),
     This(u32),
@@ -132,7 +129,7 @@ pub enum Receiver {
     Computed(Box<Expr>, u32),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -146,7 +143,7 @@ pub enum BinaryOp {
     Eq,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum UnaryOp {
     Not,
     Neg,
