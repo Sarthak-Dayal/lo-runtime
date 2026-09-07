@@ -386,7 +386,7 @@ impl<'a> Parser<'a> {
     // Statements
     // ================================
 
-    fn check_misplaced_delegation(&self, ctx: &ParseContext) -> Option<ParseError> {
+    fn misplaced_delegation_error(&self, ctx: &ParseContext) -> Option<ParseError> {
         let constructor = ctx.constructor?;
         let line = self.peek().line;
         let is_this = self.check(&TokenKind::KwThis);
@@ -411,7 +411,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_stmt(&mut self, ctx: &mut ParseContext) -> Result<Stmt, ParseError> {
-        if let Some(delegation_err) = self.check_misplaced_delegation(ctx) {
+        if let Some(delegation_err) = self.misplaced_delegation_error(ctx) {
             return Err(delegation_err);
         }
 
@@ -559,7 +559,7 @@ impl<'a> Parser<'a> {
             TokenKind::KwNew => self.parse_new_expr(),
             TokenKind::Ident(_) => {
                 let name = self.expect_ident_name()?;
-                self.var_or_call(
+                self.resolve_call_or_value(
                     Receiver::Var(name.clone(), line),
                     Expr::Var(name, line),
                     line,
@@ -567,7 +567,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::KwThis => {
                 self.advance();
-                self.var_or_call(Receiver::This(line), Expr::This(line), line)
+                self.resolve_call_or_value(Receiver::This(line), Expr::This(line), line)
             }
             // bare `super` isn't a legal Expr; always requires `.method(...)`
             TokenKind::KwSuper => {
@@ -578,7 +578,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::LParen => {
                 let value = self.parse_compound_expr()?;
-                self.var_or_call(
+                self.resolve_call_or_value(
                     Receiver::Computed(Box::new(value.clone()), line),
                     value,
                     line,
@@ -592,16 +592,16 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn var_or_call(
+    fn resolve_call_or_value(
         &mut self,
         receiver: Receiver,
-        bare: Expr,
+        bare_value: Expr,
         line: u32,
     ) -> Result<Expr, ParseError> {
         if self.check(&TokenKind::Dot) {
             Ok(Expr::Call(self.parse_method_call_suffix(receiver, line)?))
         } else {
-            Ok(bare)
+            Ok(bare_value)
         }
     }
 
