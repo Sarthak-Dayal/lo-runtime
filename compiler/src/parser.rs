@@ -172,6 +172,19 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parses a comma-separated list via `parse_list`, or returns an empty
+    /// list without calling it if the current token is already `)`.
+    fn parse_list_or_empty<T>(
+        &mut self,
+        parse_list: fn(&mut Self) -> Result<Vec<T>, ParseError>,
+    ) -> Result<Vec<T>, ParseError> {
+        if self.check(&TokenKind::RParen) {
+            Ok(Vec::new())
+        } else {
+            parse_list(self)
+        }
+    }
+
     // ---- Program / ClassDecl ----
 
     fn parse_class_decl(&mut self) -> Result<ClassDecl, ParseError> {
@@ -281,11 +294,7 @@ impl<'a> Parser<'a> {
             });
         }
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
-        let formals = if self.check(&TokenKind::RParen) {
-            Vec::new()
-        } else {
-            self.parse_formals()?
-        };
+        let formals = self.parse_list_or_empty(Self::parse_formals)?;
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
 
         let (other_constructor_call, body) = self.parse_constructor_body_scope(class_name)?;
@@ -302,11 +311,7 @@ impl<'a> Parser<'a> {
         let ret = self.parse_type()?;
         let name = self.expect_ident_name()?;
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
-        let formals = if self.check(&TokenKind::RParen) {
-            Vec::new()
-        } else {
-            self.parse_formals()?
-        };
+        let formals = self.parse_list_or_empty(Self::parse_formals)?;
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
         let body_scope = self.parse_method_body_scope(class_name)?;
         Ok(MethodDecl {
@@ -414,11 +419,7 @@ impl<'a> Parser<'a> {
         }
         self.advance(); // this/super
         self.advance(); // (
-        let args = if self.check(&TokenKind::RParen) {
-            Vec::new()
-        } else {
-            self.parse_actuals()?
-        };
+        let args = self.parse_list_or_empty(Self::parse_actuals)?;
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
         self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?;
         Ok(Some(if is_this {
@@ -601,22 +602,9 @@ impl<'a> Parser<'a> {
     fn parse_call_stmt(&mut self) -> Result<Stmt, ParseError> {
         let line = self.peek().line;
         let receiver = self.parse_receiver()?;
-        self.expect(TokenKind::Dot, ErrorCode::EParsePhaseOther)?;
-        let name = self.expect_ident_name()?;
-        self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
-        let args = if self.check(&TokenKind::RParen) {
-            Vec::new()
-        } else {
-            self.parse_actuals()?
-        };
-        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
+        let call = self.finish_call_tail(receiver, line)?;
         self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?;
-        Ok(Stmt::CallStmt(MethodCall {
-            receiver,
-            name,
-            args,
-            line,
-        }))
+        Ok(Stmt::CallStmt(call))
     }
 
     fn parse_receiver(&mut self) -> Result<Receiver, ParseError> {
@@ -675,13 +663,33 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Null(line))
             }
             TokenKind::KwNew => self.parse_new_expr(),
-            TokenKind::Ident(_) => self.parse_var_or_call_expr(),
-            TokenKind::KwThis => self.parse_this_or_call_expr(),
+            TokenKind::Ident(_) => {
+                let name = self.expect_ident_name()?;
+                if self.check(&TokenKind::Dot) {
+                    Ok(Expr::Call(
+                        self.finish_call_tail(Receiver::Var(name, line), line)?,
+                    ))
+                } else {
+                    Ok(Expr::Var(name, line))
+                }
+            }
+            TokenKind::KwThis => {
+                self.advance();
+                if self.check(&TokenKind::Dot) {
+                    Ok(Expr::Call(
+                        self.finish_call_tail(Receiver::This(line), line)?,
+                    ))
+                } else {
+                    Ok(Expr::This(line))
+                }
+            }
             // Bare `super` is never a legal Expr on its own (no such production) —
             // it only ever appears as a receiver, always followed by `.`.
             TokenKind::KwSuper => {
                 self.advance();
-                self.finish_call_tail(Receiver::Super(line), line)
+                Ok(Expr::Call(
+                    self.finish_call_tail(Receiver::Super(line), line)?,
+                ))
             }
             TokenKind::LParen => self.parse_paren_expr(),
             other => Err(ParseError {
@@ -697,52 +705,28 @@ impl<'a> Parser<'a> {
         self.advance(); // new
         let name = self.expect_ident_name()?;
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
-        let args = if self.check(&TokenKind::RParen) {
-            Vec::new()
-        } else {
-            self.parse_actuals()?
-        };
+        let args = self.parse_list_or_empty(Self::parse_actuals)?;
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
         Ok(Expr::New(name, args, line))
     }
 
-    fn parse_var_or_call_expr(&mut self) -> Result<Expr, ParseError> {
-        let line = self.peek().line;
-        let name = self.expect_ident_name()?;
-        if self.check(&TokenKind::Dot) {
-            self.finish_call_tail(Receiver::Var(name, line), line)
-        } else {
-            Ok(Expr::Var(name, line))
-        }
-    }
-
-    fn parse_this_or_call_expr(&mut self) -> Result<Expr, ParseError> {
-        let line = self.peek().line;
-        self.advance(); // this
-        if self.check(&TokenKind::Dot) {
-            self.finish_call_tail(Receiver::This(line), line)
-        } else {
-            Ok(Expr::This(line))
-        }
-    }
-
     /// Assumes the `.` has NOT been consumed yet — consumes it here.
-    fn finish_call_tail(&mut self, receiver: Receiver, line: u32) -> Result<Expr, ParseError> {
+    fn finish_call_tail(
+        &mut self,
+        receiver: Receiver,
+        line: u32,
+    ) -> Result<MethodCall, ParseError> {
         self.expect(TokenKind::Dot, ErrorCode::EParsePhaseOther)?;
         let name = self.expect_ident_name()?;
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
-        let args = if self.check(&TokenKind::RParen) {
-            Vec::new()
-        } else {
-            self.parse_actuals()?
-        };
+        let args = self.parse_list_or_empty(Self::parse_actuals)?;
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
-        Ok(Expr::Call(MethodCall {
+        Ok(MethodCall {
             receiver,
             name,
             args,
             line,
-        }))
+        })
     }
 
     /// `(`-led Expr, including the trailing-call continuation P23/P49 require: once
@@ -754,7 +738,10 @@ impl<'a> Parser<'a> {
         let line = self.peek().line;
         let value = self.parse_paren_value()?;
         if self.check(&TokenKind::Dot) {
-            self.finish_call_tail(Receiver::Computed(Box::new(value), line), line)
+            Ok(Expr::Call(self.finish_call_tail(
+                Receiver::Computed(Box::new(value), line),
+                line,
+            )?))
         } else {
             Ok(value)
         }
