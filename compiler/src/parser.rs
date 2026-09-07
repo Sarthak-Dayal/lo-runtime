@@ -281,8 +281,8 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // Flattens grouped names like `int x, y;` into one Param per name. No
-    // duplicate-name check here:
+    // Field-parens is VarDecl*, not Formals — flattens grouped names like
+    // `int x, y;` into one Param per name. No duplicate-name check here:
     // E_DUPLICATE_FIELD is checked later, not by the parser.
     fn parse_field_list(&mut self) -> Result<Vec<Param>, ParseError> {
         let mut fields = Vec::new();
