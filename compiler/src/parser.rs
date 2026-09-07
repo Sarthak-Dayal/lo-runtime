@@ -179,7 +179,11 @@ impl<'a> Parser<'a> {
             ));
         }
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
-        let params = self.parse_optional_list(Self::parse_params)?;
+        let params = if self.check(&TokenKind::RParen) {
+            Vec::new()
+        } else {
+            self.parse_params()?
+        };
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
 
         let (delegation, body) = self.parse_constructor_body_scope(class_name)?;
@@ -196,7 +200,11 @@ impl<'a> Parser<'a> {
         let return_type = self.parse_type()?;
         let name = self.expect_ident_name()?;
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
-        let params = self.parse_optional_list(Self::parse_params)?;
+        let params = if self.check(&TokenKind::RParen) {
+            Vec::new()
+        } else {
+            self.parse_params()?
+        };
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
         let body_scope = self.parse_method_body_scope(class_name)?;
         Ok(MethodDecl {
@@ -304,7 +312,11 @@ impl<'a> Parser<'a> {
         }
         self.advance(); // this/super
         self.advance(); // (
-        let args = self.parse_optional_list(Self::parse_args)?;
+        let args = if self.check(&TokenKind::RParen) {
+            Vec::new()
+        } else {
+            self.parse_args()?
+        };
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
         self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?;
         Ok(Some(if is_this {
@@ -503,7 +515,7 @@ impl<'a> Parser<'a> {
                 Ok(Receiver::Super(line))
             }
             TokenKind::LParen => {
-                let inner = self.parse_parenthesized_content()?;
+                let inner = self.parse_compound_expr()?;
                 Ok(Receiver::Computed(Box::new(inner), line))
             }
             other => Err(new_parse_error(
@@ -565,7 +577,7 @@ impl<'a> Parser<'a> {
                 ))
             }
             TokenKind::LParen => {
-                let value = self.parse_parenthesized_content()?;
+                let value = self.parse_compound_expr()?;
                 self.var_or_call(
                     Receiver::Computed(Box::new(value.clone()), line),
                     value,
@@ -598,7 +610,11 @@ impl<'a> Parser<'a> {
         self.advance(); // new
         let name = self.expect_ident_name()?;
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
-        let args = self.parse_optional_list(Self::parse_args)?;
+        let args = if self.check(&TokenKind::RParen) {
+            Vec::new()
+        } else {
+            self.parse_args()?
+        };
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
         Ok(Expr::New(name, args, line))
     }
@@ -611,7 +627,11 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::Dot, ErrorCode::EParsePhaseOther)?;
         let name = self.expect_ident_name()?;
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
-        let args = self.parse_optional_list(Self::parse_args)?;
+        let args = if self.check(&TokenKind::RParen) {
+            Vec::new()
+        } else {
+            self.parse_args()?
+        };
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
         Ok(MethodCall {
             receiver,
@@ -621,7 +641,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_parenthesized_content(&mut self) -> Result<Expr, ParseError> {
+    fn parse_compound_expr(&mut self) -> Result<Expr, ParseError> {
         let line = self.peek().line;
         self.advance(); // consume outer '('
 
@@ -868,17 +888,6 @@ impl<'a> Parser<'a> {
             TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid => true,
             TokenKind::Ident(_) => matches!(self.peek2().kind, TokenKind::Ident(_)),
             _ => false,
-        }
-    }
-
-    fn parse_optional_list<T>(
-        &mut self,
-        parse_list: fn(&mut Self) -> Result<Vec<T>, ParseError>,
-    ) -> Result<Vec<T>, ParseError> {
-        if self.check(&TokenKind::RParen) {
-            Ok(Vec::new())
-        } else {
-            parse_list(self)
         }
     }
 }
