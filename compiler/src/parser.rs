@@ -1199,4 +1199,12 @@ mod tests {
         let e = program_err("class Foo (int x;) [ Bar(int x) { } ] { }");
         assert_eq!(e.code, ErrorCode::EMalformedConstructor);
     }
+
+    #[test]
+    fn second_methods_own_closing_brace_does_not_leak_to_class_end() {
+        let p = program("class Foo () { void a() { ; } void b() { ; } }");
+        assert_eq!(p.classes[0].methods.len(), 2);
+        assert_eq!(p.classes[0].methods[0].name, "a");
+        assert_eq!(p.classes[0].methods[1].name, "b");
+    }
 }
