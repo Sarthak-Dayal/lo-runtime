@@ -16,7 +16,7 @@ where they constrain a parsing or AST-shape decision.
 | 2 tokens of lookahead (LL(2)) via cursor + `peek`/`peek2` over the pre-built `Vec<Token>` | Two real ambiguous points exist in the grammar; both resolve with small, bounded, purely structural lookahead — no backtracking anywhere. See below. |
 | Fail-fast: stop at the first parse error | Not stated as policy anywhere in the handout, the language reference, or `error-codes.md` — this is a team assumption adopted for implementation simplicity, not a confirmed requirement (`error-codes.md` arguably leans the other way, explicitly permitting one error to emit multiple codes when it "genuinely spans phases"). Doesn't affect grading correctness, since the harness only substring-matches the declared code in stderr regardless of which phase raised it — but does affect code-review legibility ("is the parser recognizably the grammar," "is the checker's phase structure legible"), which is a real, separate reason to keep the discipline. |
 | Declaration pre-scan (class table, vtable layout) is NOT part of the parser | The class/method-table pre-scan is the type checker's Pass 1, run over the finished AST. Vtable layout specifically isn't clearly assigned to a single pass by the handout — it describes signature-collection and vtable-layout-collection as one undifferentiated pre-scan happening "before emission," without stating whether that's literally Pass 1 or a separate step. Either way, neither is parser work — parsing's job ends at "tokens in, `Program` out" — and vtable slot assignment needs the full class hierarchy (parent-first slot inheritance), so it can't run before Pass 1's cycle/hierarchy checks succeed regardless of which pass it's formally part of. The type-checker design should settle whether vtable layout is literally inside Pass 1 or a dependent step right after it. |
-| The synthetic `Input`/`Output` preamble classes are NOT built by the parser | Never parsed from text — two `ClassDecl` values constructed directly in Rust and injected by a small named step (e.g. `inject_preamble(program) -> Program`) between parsing and checking. |
+| The synthetic `Input`/`Output` preamble classes are NOT built by the parser | Never parsed from text — two `ClassDecl` values constructed directly in Rust by a small named step, `add_io_classes(program: Program) -> Program`, that takes the parser's finished output and returns it with both classes added, immediately before the type checker runs. Lives in its own module, not in `parser.rs` and not a `Parser` method — it has no tokens, no lookahead, nothing parser-shaped about it. See "Preamble injection" below for the concrete shape. |
 | `Main`/`Input`/`Output`/reserved-variable-name checks are NOT parser-level, except `String` | `String` is a lexical keyword, so `extends String` fails to parse as `E_RESERVED_KEYWORD_AS_IDENTIFIER` for free. `Main`/`Input`/`Output`/`in`/`out`/`err` are ordinary identifiers to the parser; reservation is checked at name resolution. `Main` is explicitly *permitted*, just shape-constrained by its own dedicated entry-point codes. |
 | Constructor name must equal enclosing class name — checked in the parser | `E_MALFORMED_CONSTRUCTOR` is a parse-phase code, with trigger text: *"A constructor declaration whose name does not equal the enclosing class's name."* The enclosing class's name is already local parser state the moment a constructor is parsed. |
 | Every local in a method or constructor is hoisted to that method/constructor's flat scope, regardless of how deeply nested in `if`/`while` it's textually declared — permanent, per course staff | Three explicit consequences: (1) every local holds its type's default value from the start of the body, even before its declaring block runs; (2) declaring the same local name twice anywhere in one body — including once per `if`/`else` arm — is unconditionally illegal, `E_DUPLICATE_LOCAL`, regardless of matching types; (3) a use may textually precede its declaration. |
@@ -390,3 +390,45 @@ Settled facts and implementation guidance — not open questions, just worth rec
 | Keeping the body-scope type uniform across method, constructor, `if`, and `while`, with hoisting done later by the checker | Considered specifically to hedge against flat-hoisted semantics possibly changing to block-scoped. Hoisting is confirmed permanent by course staff, and separately, exact textual position stopped mattering for legality once "a use may precede its declaration" was confirmed — both original justifications for the hedge no longer apply, so flattening at parse time (this document's current design) is preferred instead. |
 | Merging `VarDecl` into the same list as `Stmt`, with a "reorder declarations to the top" step as a removable pass | Blurs a distinction the grammar makes on purpose (`Block → { (VarDecl)* (Stmt)+ }` is two nonterminal categories, not one interleaved list), and reordering *within* a single block doesn't reproduce cross-block hoisting unless it *also* reaches into nested blocks — the same work as full flattening, just placed worse. |
 | `ConstructorForward` / `IntrinsicOp` / `Preamble` / `LocalScope` / `CallableScope` as final names | See "Naming" table above for the specific reasoning behind each rejection. |
+
+---
+
+## `add_io_classes`
+
+`fn add_io_classes(program: Program) -> Program`. Free function, own module, not part
+of the parser — takes the parsed `Program`, returns it with `Input`/`Output` added, runs
+between `parse_program` and the type checker's Pass 1. Pure: no tokens, no `ParseError`.
+
+Builds two `ClassDecl`s, prepended to `program.classes` (reference: preamble is "treated
+as if it preceded the first user class"), signatures copied verbatim from the reference's
+own preamble listing (§3.4.6):
+
+```
+class Input ( ) {
+    int    read_int()      // IoOp::ReadInt
+    bool   read_bool()     // IoOp::ReadBool
+    String read_string()   // IoOp::ReadString
+    bool   eof()           // IoOp::Eof
+}
+
+class Output ( ) {
+    void print_int(int n)         // IoOp::PrintInt
+    void print_bool(bool b)       // IoOp::PrintBool
+    void print_string(String s)   // IoOp::PrintString
+    void println()                // IoOp::Println
+}
+```
+
+| Field | Value | Why |
+|---|---|---|
+| `extends` | `None` | Forest roots — not extensible per the reference, no parent given anywhere. |
+| `fields` | `vec![]` | Ordinary empty field-parens (P4's `( (VarDecl)* )`, zero entries) — same as any class with no fields, e.g. `Main ()`. |
+| `constructors` | `vec![]` | `[ ]` section omitted entirely — legal only for root classes, which these are; implicit no-arg constructor, same convention as `Main () { ... }` in the corpus. |
+| every `line` | `0` | Real parsed nodes are always `>= 1`; `0` unambiguously marks the node as synthetic. |
+
+Grammar-conformant by construction, cross-checked against `LO-4/ValidPrograms/test_3_hello_world.lo`'s `class Main () { ... }` for the root/empty-fields/omitted-brackets shape, and against `Formals`' one-`Param`-per-name production for the method parameters. `MethodBody::Io(op)` is the one deliberate divergence from a real parse — these bodies are never written as text, so there's no `BodyScope` to build; `IoOp` exists for exactly this.
+
+**Out of scope for this step:**
+- Binding `in`/`out`/`err` — those are pre-bound singleton variables, not classes; that wiring is the type checker's (name resolution) and interpreter/WASM back end's (actual stdout/stderr/stdin plumbing) responsibility, not something `Program.classes` holds.
+- `E_RESERVED_CLASS_NAME` / `E_RESERVED_VARIABLE_NAME` checks — a user file declaring `class Input` or a local `out` still parses fine; Pass 1 catches the collision against the now-present synthetic class, same as any other duplicate.
+- Idempotency — not guaranteed and not needed; called exactly once in the pipeline, `add_io_classes(parse_program(tokens)?)`.

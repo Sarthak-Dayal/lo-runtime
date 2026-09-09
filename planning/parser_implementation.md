@@ -13,7 +13,8 @@ package `lo-compiler`, edition 2021, no external dependencies. `src/token.rs` an
 |---|---|
 | `src/ast.rs` | new — every AST type from `parser_design.md`'s "AST shape" section |
 | `src/parser.rs` | new — `ParseError`, `ErrorCode`, `parse_program`, and every `parse_*` function |
-| `src/main.rs` | modified — add `mod ast; mod parser;` |
+| `src/add_io_classes.rs` | new — `add_io_classes`, per `parser_design.md`'s "`add_io_classes`" section |
+| `src/main.rs` | modified — add `mod ast; mod parser; mod add_io_classes;` |
 
 ---
 
@@ -1084,11 +1085,77 @@ fn is_keyword(kind: &TokenKind) -> bool {
 
 ---
 
+## `src/add_io_classes.rs`
+
+```rust
+use crate::ast::{ClassDecl, IoOp, MethodBody, MethodDecl, Param, Program, Type};
+
+const SYNTHETIC_LINE: u32 = 0;
+
+pub fn add_io_classes(mut program: Program) -> Program {
+    let mut classes = vec![input_class(), output_class()];
+    classes.append(&mut program.classes);
+    program.classes = classes;
+    program
+}
+
+fn input_class() -> ClassDecl {
+    ClassDecl {
+        name: "Input".to_string(),
+        extends: None,
+        fields: vec![],
+        constructors: vec![],
+        methods: vec![
+            io_method(Type::Int, "read_int", IoOp::ReadInt, vec![]),
+            io_method(Type::Bool, "read_bool", IoOp::ReadBool, vec![]),
+            io_method(Type::String, "read_string", IoOp::ReadString, vec![]),
+            io_method(Type::Bool, "eof", IoOp::Eof, vec![]),
+        ],
+        line: SYNTHETIC_LINE,
+    }
+}
+
+fn output_class() -> ClassDecl {
+    ClassDecl {
+        name: "Output".to_string(),
+        extends: None,
+        fields: vec![],
+        constructors: vec![],
+        methods: vec![
+            io_method(Type::Void, "print_int", IoOp::PrintInt, vec![io_param(Type::Int, "n")]),
+            io_method(Type::Void, "print_bool", IoOp::PrintBool, vec![io_param(Type::Bool, "b")]),
+            io_method(Type::Void, "print_string", IoOp::PrintString, vec![io_param(Type::String, "s")]),
+            io_method(Type::Void, "println", IoOp::Println, vec![]),
+        ],
+        line: SYNTHETIC_LINE,
+    }
+}
+
+fn io_method(ret: Type, name: &str, op: IoOp, formals: Vec<Param>) -> MethodDecl {
+    MethodDecl {
+        ret,
+        name: name.to_string(),
+        formals,
+        body: MethodBody::Io(op),
+        line: SYNTHETIC_LINE,
+    }
+}
+
+fn io_param(declared_type: Type, name: &str) -> Param {
+    Param { declared_type, name: name.to_string(), line: SYNTHETIC_LINE }
+}
+```
+
+Called once, between `parse_program` and the (not-yet-built) type checker: `add_io_classes(parse_program(tokens)?)`. Prepends so `Input`/`Output` sit ahead of every user class, matching the reference's "treated as if it preceded the first user class." Takes no `&Parser`, no tokens — operates purely on the finished `Program`, which is why it's its own file rather than a function in `parser.rs`.
+
+---
+
 ## `src/main.rs` (add to the existing file)
 
 ```rust
 mod ast;
 mod parser;
+mod add_io_classes;
 ```
 
 (alongside the existing `mod token; mod lexer;` — `main()` itself doesn't need to change yet, this is still not the CLI.)
@@ -1129,3 +1196,8 @@ Rows that show a full `class ... { }` are direct `parse_program` calls. Rows tha
 | `class Foo (int x;) { int m() { return x; } } [ Foo(int n) { x = n; } ]` | `[ ]` section appears after `{ }` instead of before → `Err(EMalformedClassDecl)` — the "wrong order" trigger, not a fresh top-level `class` parse attempt |
 | `class C extends String () { }` | `Err(EReservedKeywordAsIdentifier)` — `String` lexes as `KwString`, `expect_ident_name` rejects it in the `extends` clause |
 | `class Foo (int x;) [ Bar(int x) { } ] { }` | `Err(EMalformedConstructor)` — constructor name `Bar` ≠ class name `Foo` |
+| `add_io_classes(Program { classes: vec![] })` | `Program { classes: [Input, Output] }` — both prepended even with no user classes |
+| `add_io_classes(Program { classes: [Main] })` | `Program { classes: [Input, Output, Main] }` — order is `Input`, `Output`, then whatever the parser produced, unchanged |
+| `Input`'s methods | `read_int: ret Int, formals [], Io(ReadInt)`; `read_bool: ret Bool, Io(ReadBool)`; `read_string: ret String, Io(ReadString)`; `eof: ret Bool, Io(Eof)` |
+| `Output`'s methods | `print_int: ret Void, formals [Param{Int,"n"}], Io(PrintInt)`; `print_bool: ret Void, formals [Param{Bool,"b"}], Io(PrintBool)`; `print_string: ret Void, formals [Param{String,"s"}], Io(PrintString)`; `println: ret Void, formals [], Io(Println)` |
+| every field/method/param on `Input`/`Output` | `line: 0` |
