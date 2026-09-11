@@ -128,24 +128,6 @@ impl<'a> Parser<'a> {
         }
         self.advance(); // "}"
 
-        match &self.peek().kind {
-            TokenKind::LBracket => {
-                return Err(new_parse_error(
-                    ErrorCode::EMalformedClassDecl,
-                    self.peek().line,
-                    "constructor [ ] section must come before the method body, not after",
-                ));
-            }
-            TokenKind::LParen => {
-                return Err(new_parse_error(
-                    ErrorCode::EMalformedClassDecl,
-                    self.peek().line,
-                    "field ( ) section must come before the method body, not after",
-                ));
-            }
-            _ => {}
-        }
-
         Ok(ClassDecl {
             class_name,
             extends,
@@ -279,7 +261,7 @@ impl<'a> Parser<'a> {
         loop {
             let line = self.peek().line;
             let declared_type = self.parse_type()?; // P36
-            let identifier = self.expect_ident_name()?; // Identifier
+            let identifier = self.parse_identifier()?; // Identifier
             formals.push(Formal {
                 declared_type,
                 identifier,
@@ -308,10 +290,10 @@ impl<'a> Parser<'a> {
     fn parse_var_decl(&mut self) -> Result<VarDecl, ParseError> {
         let line = self.peek().line;
         let declared_type = self.parse_type()?; // P36
-        let mut identifiers = vec![self.expect_ident_name()?]; // Identifier
+        let mut identifiers = vec![self.parse_identifier()?]; // Identifier
         while self.check(&TokenKind::Comma) {
             self.advance(); // ","
-            identifiers.push(self.expect_ident_name()?); // Identifier
+            identifiers.push(self.parse_identifier()?); // Identifier
         }
         self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?; // ";"
         Ok(VarDecl {
@@ -326,9 +308,12 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LBrace, ErrorCode::EParsePhaseOther)?; // "{"
         let mut nested_ctx = ParseContext {
             locals: &mut *ctx.locals, // reborrow -- same Vec as the enclosing body
-            constructor: ctx.constructor.map(|c| ConstructorContext {
+            // delegation is never read once at_top_level is false -- see
+            // misplaced_delegation_error, which only consults it in the
+            // at_top_level branch.
+            constructor: ctx.constructor.map(|_| ConstructorContext {
                 at_top_level: false,
-                delegation: c.delegation,
+                delegation: None,
             }),
         };
         let stmts = self.parse_var_decls_and_stmts(&mut nested_ctx, StmtArity::OneOrMore)?;
@@ -362,7 +347,6 @@ impl<'a> Parser<'a> {
 
     fn hoist(&self, decl: VarDecl, ctx: &mut ParseContext) -> Result<(), ParseError> {
         for (i, identifier) in decl.identifiers.iter().enumerate() {
-            // [..i]: names earlier in THIS VarDecl ("int x, x;")
             let is_duplicate = decl.identifiers[..i].contains(identifier)
                 || ctx
                     .locals
@@ -436,7 +420,7 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(_) => {
                 if self.peek_ahead1().kind == TokenKind::Equals {
                     // P17: Stmt -> Var = Expr ;
-                    let name = self.parse_var()?; // P50
+                    let name = self.parse_var()?; // P50: Var -> Identifier
                     self.advance(); // "="
                     let expr = self.parse_expr()?;
                     self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?; // ";"
@@ -463,10 +447,10 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
         let cond = self.parse_expr()?;
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
-        let then_branch = self.parse_block(ctx)?; // P12
+        let if_body = self.parse_block(ctx)?; // P12
         self.expect(TokenKind::KwElse, ErrorCode::EParsePhaseOther)?; // "else"
-        let else_branch = self.parse_block(ctx)?; // P12
-        Ok(Stmt::If(cond, then_branch, else_branch, line))
+        let else_body = self.parse_block(ctx)?; // P12
+        Ok(Stmt::If(cond, if_body, else_body, line))
     }
 
     // P15: Stmt -> while ( Expr ) Block
@@ -494,7 +478,7 @@ impl<'a> Parser<'a> {
         let line = self.peek().line;
         match &self.peek().kind {
             TokenKind::Ident(_) => {
-                let identifier = self.parse_var()?; // P50
+                let identifier = self.parse_var()?; // P50: Var -> Identifier
                 Ok(ObjName::Var(identifier, line)) // P46: ObjName -> Var
             }
             TokenKind::KwThis => {
@@ -559,7 +543,7 @@ impl<'a> Parser<'a> {
             // P22: Expr -> new ClassName ( (Actuals)? )
             TokenKind::KwNew => self.parse_new_expr(),
             TokenKind::Ident(_) => {
-                let identifier = self.parse_var()?; // P50
+                let identifier = self.parse_var()?; // P50: Var -> Identifier
                 if self.check(&TokenKind::Dot) {
                     // P23: Expr -> ObjName . MethodName ( (Actuals)? ), via P46: ObjName -> Var
                     let obj_name = ObjName::Var(identifier, line);
@@ -581,9 +565,9 @@ impl<'a> Parser<'a> {
                     Ok(Expr::This(line))
                 }
             }
+            // P23: Expr -> ObjName . MethodName ( (Actuals)? ), via P48: ObjName -> super
             TokenKind::KwSuper => {
                 self.advance(); // "super"
-                                // P23: Expr -> ObjName . MethodName ( (Actuals)? ), via P48: ObjName -> super
                 Ok(Expr::Call(
                     self.parse_method_call_suffix(ObjName::Super(line), line)?,
                 ))
@@ -644,15 +628,16 @@ impl<'a> Parser<'a> {
                 }
                 _ => {
                     // P29: Expr -> ( ( Type ) Expr )
-                    let operand = self.parse_expr()?;
+                    let value = self.parse_expr()?;
                     self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
-                    Ok(Expr::Cast(ty, Box::new(operand), line))
+                    Ok(Expr::Cast(ty, Box::new(value), line))
                 }
             };
         }
 
-        let first = self.parse_expr()?;
-        self.parse_paren_suffix(first, line)
+        // P25/P26/P28/P30's operand: an ordinary Expr
+        let primary = self.parse_expr()?;
+        self.parse_paren_suffix(primary, line)
     }
 
     // The "( Type )" fragment of P29.
@@ -701,7 +686,7 @@ impl<'a> Parser<'a> {
     }
 
     // P25/P26/P30: Expr -> ... (continuation after the caller's own first Expr)
-    fn parse_operator_suffix(&mut self, first: Expr, line: u32) -> Result<Expr, ParseError> {
+    fn parse_operator_suffix(&mut self, primary: Expr, line: u32) -> Result<Expr, ParseError> {
         match self.peek().kind.clone() {
             TokenKind::Question => {
                 // P25: Expr -> ( Expr ? Expr : Expr )
@@ -711,7 +696,7 @@ impl<'a> Parser<'a> {
                 let else_expr = self.parse_expr()?;
                 self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
                 Ok(Expr::Ternary(
-                    Box::new(first),
+                    Box::new(primary),
                     Box::new(if_expr),
                     Box::new(else_expr),
                     line,
@@ -722,7 +707,7 @@ impl<'a> Parser<'a> {
                 self.advance(); // "instanceof"
                 let class_name = self.parse_class_name()?; // P44
                 self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
-                Ok(Expr::InstanceOf(Box::new(first), class_name, line))
+                Ok(Expr::InstanceOf(Box::new(primary), class_name, line))
             }
             other => {
                 if let Some(op) = Self::to_binop(&other) {
@@ -730,7 +715,7 @@ impl<'a> Parser<'a> {
                     self.advance(); // Binop token
                     let right = self.parse_expr()?;
                     self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
-                    Ok(Expr::Binop(Box::new(first), op, Box::new(right), line))
+                    Ok(Expr::Binop(Box::new(primary), op, Box::new(right), line))
                 } else {
                     Err(new_parse_error(
                         ErrorCode::EParsePhaseOther,
@@ -799,17 +784,17 @@ impl<'a> Parser<'a> {
 
     // P44: ClassName -> Identifier
     fn parse_class_name(&mut self) -> Result<String, ParseError> {
-        self.expect_ident_name()
+        self.parse_identifier()
     }
 
     // P45: MethodName -> Identifier
     fn parse_method_name(&mut self) -> Result<String, ParseError> {
-        self.expect_ident_name()
+        self.parse_identifier()
     }
 
     // P50: Var -> Identifier
     fn parse_var(&mut self) -> Result<String, ParseError> {
-        self.expect_ident_name()
+        self.parse_identifier()
     }
 
     // P32: Expr -> Literal; P40-P43: Literal -> ...
@@ -850,7 +835,7 @@ impl<'a> Parser<'a> {
     }
 
     // Consumes the lexer's Identifier token (P53).
-    fn expect_ident_name(&mut self) -> Result<String, ParseError> {
+    fn parse_identifier(&mut self) -> Result<String, ParseError> {
         let line = self.peek().line;
         match self.peek().kind.clone() {
             TokenKind::Ident(identifier) => {
