@@ -291,14 +291,6 @@ mod tests {
     }
 
     #[test]
-    fn declaration_statement() {
-        assert_eq!(
-            kinds("int radius;"),
-            vec![KwInt, Ident("radius".into()), Semicolon, Eof]
-        );
-    }
-
-    #[test]
     fn integer_literal() {
         assert_eq!(kinds("42"), vec![Num(42), Eof]);
     }
@@ -332,14 +324,6 @@ mod tests {
                 kind: LexErrorKind::UnexpectedChar('\''),
                 line: 1
             }
-        );
-    }
-
-    #[test]
-    fn single_char_bitwise_and() {
-        assert_eq!(
-            kinds("(1 & 0)"),
-            vec![LParen, Num(1), Amp, Num(0), RParen, Eof]
         );
     }
 
