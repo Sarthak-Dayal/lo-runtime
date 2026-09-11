@@ -17,6 +17,18 @@ pub enum LexErrorKind {
     IntegerLiteralOverflow(String),
 }
 
+impl LexErrorKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LexErrorKind::InvalidUnicodeEscape => "E_INVALID_UNICODE_ESCAPE",
+            LexErrorKind::UnexpectedChar(_)
+            | LexErrorKind::UnterminatedString
+            | LexErrorKind::InvalidEscape(_)
+            | LexErrorKind::IntegerLiteralOverflow(_) => "E_PARSE_PHASE_OTHER",
+        }
+    }
+}
+
 impl LexError {
     fn new(kind: LexErrorKind, line: u32) -> Self {
         LexError { kind, line }
@@ -348,6 +360,34 @@ mod tests {
                 kind: LexErrorKind::InvalidUnicodeEscape,
                 line: 1
             }
+        );
+    }
+
+    #[test]
+    fn invalid_unicode_escape_has_its_own_error_code() {
+        assert_eq!(
+            LexErrorKind::InvalidUnicodeEscape.as_str(),
+            "E_INVALID_UNICODE_ESCAPE"
+        );
+    }
+
+    #[test]
+    fn other_lex_error_kinds_use_the_parse_phase_sentinel() {
+        assert_eq!(
+            LexErrorKind::UnexpectedChar('@').as_str(),
+            "E_PARSE_PHASE_OTHER"
+        );
+        assert_eq!(
+            LexErrorKind::UnterminatedString.as_str(),
+            "E_PARSE_PHASE_OTHER"
+        );
+        assert_eq!(
+            LexErrorKind::InvalidEscape('q').as_str(),
+            "E_PARSE_PHASE_OTHER"
+        );
+        assert_eq!(
+            LexErrorKind::IntegerLiteralOverflow("9".into()).as_str(),
+            "E_PARSE_PHASE_OTHER"
         );
     }
 
