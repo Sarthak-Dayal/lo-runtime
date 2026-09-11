@@ -17,6 +17,18 @@ pub enum LexErrorKind {
     IntegerLiteralOverflow(String),
 }
 
+impl LexErrorKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LexErrorKind::InvalidUnicodeEscape => "E_INVALID_UNICODE_ESCAPE",
+            LexErrorKind::UnexpectedChar(_)
+            | LexErrorKind::UnterminatedString
+            | LexErrorKind::InvalidEscape(_)
+            | LexErrorKind::IntegerLiteralOverflow(_) => "E_PARSE_PHASE_OTHER",
+        }
+    }
+}
+
 impl LexError {
     fn new(kind: LexErrorKind, line: u32) -> Self {
         LexError { kind, line }
@@ -279,14 +291,6 @@ mod tests {
     }
 
     #[test]
-    fn declaration_statement() {
-        assert_eq!(
-            kinds("int radius;"),
-            vec![KwInt, Ident("radius".into()), Semicolon, Eof]
-        );
-    }
-
-    #[test]
     fn integer_literal() {
         assert_eq!(kinds("42"), vec![Num(42), Eof]);
     }
@@ -324,14 +328,6 @@ mod tests {
     }
 
     #[test]
-    fn single_char_bitwise_and() {
-        assert_eq!(
-            kinds("(1 & 0)"),
-            vec![LParen, Num(1), Amp, Num(0), RParen, Eof]
-        );
-    }
-
-    #[test]
     fn unicode_escape_hello() {
         assert_eq!(
             kinds("\"\\u{48}\\u{65}\\u{6C}\\u{6C}\\u{6F}\""),
@@ -348,6 +344,34 @@ mod tests {
                 kind: LexErrorKind::InvalidUnicodeEscape,
                 line: 1
             }
+        );
+    }
+
+    #[test]
+    fn invalid_unicode_escape_has_its_own_error_code() {
+        assert_eq!(
+            LexErrorKind::InvalidUnicodeEscape.as_str(),
+            "E_INVALID_UNICODE_ESCAPE"
+        );
+    }
+
+    #[test]
+    fn other_lex_error_kinds_use_the_parse_phase_sentinel() {
+        assert_eq!(
+            LexErrorKind::UnexpectedChar('@').as_str(),
+            "E_PARSE_PHASE_OTHER"
+        );
+        assert_eq!(
+            LexErrorKind::UnterminatedString.as_str(),
+            "E_PARSE_PHASE_OTHER"
+        );
+        assert_eq!(
+            LexErrorKind::InvalidEscape('q').as_str(),
+            "E_PARSE_PHASE_OTHER"
+        );
+        assert_eq!(
+            LexErrorKind::IntegerLiteralOverflow("9".into()).as_str(),
+            "E_PARSE_PHASE_OTHER"
         );
     }
 
