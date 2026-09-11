@@ -13,17 +13,24 @@ pub struct Program {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Param {
+pub struct Formal {
     pub declared_type: Type,
-    pub name: String,
+    pub identifier: String,
+    pub line: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VarDecl {
+    pub declared_type: Type,
+    pub identifiers: Vec<String>,
     pub line: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassDecl {
-    pub name: String,
+    pub class_name: String,
     pub extends: Option<String>,
-    pub fields: Vec<Param>,
+    pub fields: Vec<VarDecl>,
     pub constructors: Vec<ConstructorDecl>,
     pub methods: Vec<MethodDecl>,
     pub line: u32,
@@ -31,7 +38,7 @@ pub struct ClassDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConstructorDecl {
-    pub params: Vec<Param>,
+    pub formals: Vec<Formal>,
     pub delegation: Option<ConstructorDelegation>,
     pub body: BodyScope,
     pub line: u32,
@@ -40,8 +47,8 @@ pub struct ConstructorDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodDecl {
     pub return_type: Type,
-    pub name: String,
-    pub params: Vec<Param>,
+    pub method_name: String,
+    pub formals: Vec<Formal>,
     pub body: MethodBody,
     pub line: u32,
 }
@@ -55,7 +62,7 @@ pub enum ConstructorDelegation {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MethodBody {
     UserDefined(BodyScope),
-    Io(IoOp), // never produced by the parser
+    Io(IoOp),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,13 +75,6 @@ pub enum IoOp {
     PrintBool,
     PrintString,
     Println,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct VarDecl {
-    pub declared_type: Type,
-    pub names: Vec<String>,
-    pub line: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,9 +98,9 @@ pub enum Stmt {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodCall {
-    pub receiver: Receiver,
-    pub name: String,
-    pub args: Vec<Expr>,
+    pub obj_name: ObjName,
+    pub method_name: String,
+    pub actuals: Vec<Expr>,
     pub line: u32,
 }
 
@@ -115,22 +115,22 @@ pub enum Expr {
     New(String, Vec<Expr>, u32),
     Call(MethodCall),
     Ternary(Box<Expr>, Box<Expr>, Box<Expr>, u32),
-    Binary(Box<Expr>, BinaryOp, Box<Expr>, u32),
-    Unary(UnaryOp, Box<Expr>, u32),
+    Binop(Box<Expr>, Binop, Box<Expr>, u32),
+    Unop(Unop, Box<Expr>, u32),
     Cast(Type, Box<Expr>, u32),
     InstanceOf(Box<Expr>, String, u32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Receiver {
+pub enum ObjName {
     Var(String, u32),
     This(u32),
     Super(u32),
     Computed(Box<Expr>, u32),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum BinaryOp {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Binop {
     Add,
     Sub,
     Mul,
@@ -143,8 +143,8 @@ pub enum BinaryOp {
     Eq,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum UnaryOp {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Unop {
     Not,
     Neg,
 }

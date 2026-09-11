@@ -34,30 +34,38 @@ impl ErrorCode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+fn new_parse_error(code: ErrorCode, line: u32, message: impl Into<String>) -> ParseError {
+    ParseError {
+        code,
+        line,
+        message: message.into(),
+    }
+}
+
+struct ParseContext<'p> {
+    locals: &'p mut Vec<VarDecl>,
+    constructor: Option<ConstructorContext>,
+}
+
+#[derive(Clone, Copy)]
+struct ConstructorContext {
+    at_top_level: bool,
+    delegation: Option<DelegationKeyword>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
 enum DelegationKeyword {
     This,
     Super,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(PartialEq)]
 enum StmtArity {
     ZeroOrMore,
     OneOrMore,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ConstructorContext {
-    at_top_level: bool, // false once nested in any if/while
-    delegation: Option<DelegationKeyword>,
-}
-
-struct ParseContext<'p> {
-    class_name: &'p str,
-    locals: &'p mut Vec<VarDecl>,
-    constructor: Option<ConstructorContext>,
-}
-
+// P1: Program -> (ClassDecl)*
 pub fn parse_program(tokens: &[Token]) -> Result<Program, ParseError> {
     let mut parser = Parser { tokens, pos: 0 };
     let mut classes = Vec::new();
@@ -73,28 +81,28 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    // ================================
-    // Class declarations
-    // ================================
-
+    // P4: ClassDecl -> class ClassName (extends ClassName)? ( (VarDecl)* ) ( [ (ConstructorDecl)+ ] )? { (MethodDecl)* }
     fn parse_class_decl(&mut self) -> Result<ClassDecl, ParseError> {
         let line = self.peek().line;
-        self.expect(TokenKind::KwClass, ErrorCode::EParsePhaseOther)?;
-        let name = self.expect_ident_name()?;
+        self.expect(TokenKind::KwClass, ErrorCode::EMalformedClassDecl)?; // "class"
+        let class_name = self.parse_class_name()?; // P44
 
         let extends = if self.check(&TokenKind::KwExtends) {
-            self.advance();
-            Some(self.expect_ident_name()?)
+            self.advance(); // "extends"
+            Some(self.parse_class_name()?) // P44
         } else {
             None
         };
 
-        self.expect(TokenKind::LParen, ErrorCode::EMalformedClassDecl)?;
-        let fields = self.parse_field_list()?;
-        self.expect(TokenKind::RParen, ErrorCode::EMalformedClassDecl)?;
+        self.expect(TokenKind::LParen, ErrorCode::EMalformedClassDecl)?; // "("
+        let mut fields = Vec::new();
+        while !self.check(&TokenKind::RParen) {
+            fields.push(self.parse_var_decl()?); // P11
+        }
+        self.expect(TokenKind::RParen, ErrorCode::EMalformedClassDecl)?; // ")"
 
         let constructors = if self.check(&TokenKind::LBracket) {
-            self.advance();
+            self.advance(); // "["
             if self.check(&TokenKind::RBracket) {
                 return Err(new_parse_error(
                     ErrorCode::EMalformedClassDecl,
@@ -102,34 +110,44 @@ impl<'a> Parser<'a> {
                     "empty [ ] constructor section",
                 ));
             }
-            let mut constructors = Vec::new();
+            let mut parsed_constructors = Vec::new();
             while !self.check(&TokenKind::RBracket) {
-                constructors.push(self.parse_constructor_decl(&name)?);
+                parsed_constructors.push(self.parse_constructor_decl(&class_name)?);
+                // P5/P6
             }
-            self.advance(); // ]
-            constructors
+            self.advance(); // "]"
+            parsed_constructors
         } else {
             Vec::new()
         };
 
-        self.expect(TokenKind::LBrace, ErrorCode::EMalformedClassDecl)?;
+        self.expect(TokenKind::LBrace, ErrorCode::EMalformedClassDecl)?; // "{"
         let mut methods = Vec::new();
         while !self.check(&TokenKind::RBrace) {
-            methods.push(self.parse_method_decl(&name)?);
+            methods.push(self.parse_method_decl()?); // P7
         }
-        self.advance(); // }
+        self.advance(); // "}"
 
-        // `[` here means the constructor section came after the methods
-        if self.check(&TokenKind::LBracket) {
-            return Err(new_parse_error(
-                ErrorCode::EMalformedClassDecl,
-                self.peek().line,
-                "constructor [ ] section must come before the method body, not after",
-            ));
+        match &self.peek().kind {
+            TokenKind::LBracket => {
+                return Err(new_parse_error(
+                    ErrorCode::EMalformedClassDecl,
+                    self.peek().line,
+                    "constructor [ ] section must come before the method body, not after",
+                ));
+            }
+            TokenKind::LParen => {
+                return Err(new_parse_error(
+                    ErrorCode::EMalformedClassDecl,
+                    self.peek().line,
+                    "field ( ) section must come before the method body, not after",
+                ));
+            }
+            _ => {}
         }
 
         Ok(ClassDecl {
-            name,
+            class_name,
             extends,
             fields,
             constructors,
@@ -138,36 +156,11 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // each name in "int x, y;" gets its own Param
-    fn parse_field_list(&mut self) -> Result<Vec<Param>, ParseError> {
-        let mut fields = Vec::new();
-        while !self.check(&TokenKind::RParen) {
-            let line = self.peek().line;
-            let declared_type = self.parse_type()?;
-            let mut names = vec![self.expect_ident_name()?];
-            while self.check(&TokenKind::Comma) {
-                self.advance();
-                names.push(self.expect_ident_name()?);
-            }
-            self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?;
-            for name in names {
-                fields.push(Param {
-                    declared_type: declared_type.clone(),
-                    name,
-                    line,
-                });
-            }
-        }
-        Ok(fields)
-    }
-
-    // ================================
-    // Constructors and methods
-    // ================================
-
+    // P5: ConstructorDecl -> ClassName ( (Formals)? ) { ( this ( (Actuals)? ) ; )? (VarDecl)* (Stmt)* }
+    // P6: ConstructorDecl -> ClassName ( (Formals)? ) { ( super ( (Actuals)? ) ; )? (VarDecl)* (Stmt)* }
     fn parse_constructor_decl(&mut self, class_name: &str) -> Result<ConstructorDecl, ParseError> {
         let line = self.peek().line;
-        let constructor_name = self.expect_ident_name()?;
+        let constructor_name = self.parse_class_name()?; // P44
         if constructor_name != class_name {
             return Err(new_parse_error(
                 ErrorCode::EMalformedConstructor,
@@ -178,105 +171,19 @@ impl<'a> Parser<'a> {
                 ),
             ));
         }
-        self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
-        let params = if self.check(&TokenKind::RParen) {
+        self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
+        let formals = if self.check(&TokenKind::RParen) {
             Vec::new()
         } else {
-            self.parse_params()?
+            self.parse_formals()? // P9
         };
-        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
+        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
 
-        let (delegation, body) = self.parse_constructor_body_scope(class_name)?;
-        Ok(ConstructorDecl {
-            params,
-            delegation,
-            body,
-            line,
-        })
-    }
-
-    fn parse_method_decl(&mut self, class_name: &str) -> Result<MethodDecl, ParseError> {
-        let line = self.peek().line;
-        let return_type = self.parse_type()?;
-        let name = self.expect_ident_name()?;
-        self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
-        let params = if self.check(&TokenKind::RParen) {
-            Vec::new()
-        } else {
-            self.parse_params()?
-        };
-        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
-        let body_scope = self.parse_method_body_scope(class_name)?;
-        Ok(MethodDecl {
-            return_type,
-            name,
-            params,
-            body: MethodBody::UserDefined(body_scope),
-            line,
-        })
-    }
-
-    fn parse_params(&mut self) -> Result<Vec<Param>, ParseError> {
-        let mut params = Vec::new();
-        loop {
-            let line = self.peek().line;
-            let declared_type = self.parse_type()?;
-            let name = self.expect_ident_name()?;
-            params.push(Param {
-                declared_type,
-                name,
-                line,
-            });
-            if self.check(&TokenKind::Comma) {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-        Ok(params)
-    }
-
-    fn parse_args(&mut self) -> Result<Vec<Expr>, ParseError> {
-        let mut args = vec![self.parse_expr()?];
-        while self.check(&TokenKind::Comma) {
-            self.advance();
-            args.push(self.parse_expr()?);
-        }
-        Ok(args)
-    }
-
-    // ================================
-    // Method and constructor bodies
-    // ================================
-
-    fn parse_method_body_scope(&mut self, class_name: &str) -> Result<BodyScope, ParseError> {
-        let line = self.peek().line;
-        self.expect(TokenKind::LBrace, ErrorCode::EParsePhaseOther)?;
-        let mut locals = Vec::new();
-        let mut ctx = ParseContext {
-            class_name,
-            locals: &mut locals,
-            constructor: None,
-        };
-        let stmts = self.parse_locals_then_stmts(&mut ctx, StmtArity::OneOrMore)?;
-        self.expect(TokenKind::RBrace, ErrorCode::EParsePhaseOther)?;
-        Ok(BodyScope {
-            locals,
-            stmts,
-            line,
-        })
-    }
-
-    fn parse_constructor_body_scope(
-        &mut self,
-        class_name: &str,
-    ) -> Result<(Option<ConstructorDelegation>, BodyScope), ParseError> {
-        let line = self.peek().line;
-        self.expect(TokenKind::LBrace, ErrorCode::EParsePhaseOther)?;
+        let body_line = self.peek().line;
+        self.expect(TokenKind::LBrace, ErrorCode::EParsePhaseOther)?; // "{"
         let delegation = self.parse_constructor_delegation()?;
         let mut locals = Vec::new();
         let mut ctx = ParseContext {
-            class_name,
             locals: &mut locals,
             constructor: Some(ConstructorContext {
                 at_top_level: true,
@@ -286,18 +193,23 @@ impl<'a> Parser<'a> {
                 }),
             }),
         };
-        let stmts = self.parse_locals_then_stmts(&mut ctx, StmtArity::ZeroOrMore)?;
-        self.expect(TokenKind::RBrace, ErrorCode::EParsePhaseOther)?;
-        Ok((
+        let stmts = self.parse_var_decls_and_stmts(&mut ctx, StmtArity::ZeroOrMore)?;
+        self.expect(TokenKind::RBrace, ErrorCode::EParsePhaseOther)?; // "}"
+        let body = BodyScope {
+            locals,
+            stmts,
+            line: body_line,
+        };
+        Ok(ConstructorDecl {
+            formals,
             delegation,
-            BodyScope {
-                locals,
-                stmts,
-                line,
-            },
-        ))
+            body,
+            line,
+        })
     }
 
+    // P5: ConstructorDecl -> ClassName ( (Formals)? ) { ( this ( (Actuals)? ) ; )? (VarDecl)* (Stmt)* }
+    // P6: ConstructorDecl -> ClassName ( (Formals)? ) { ( super ( (Actuals)? ) ; )? (VarDecl)* (Stmt)* }
     fn parse_constructor_delegation(
         &mut self,
     ) -> Result<Option<ConstructorDelegation>, ParseError> {
@@ -307,32 +219,132 @@ impl<'a> Parser<'a> {
         if !is_this && !is_super {
             return Ok(None);
         }
-        if self.peek2().kind != TokenKind::LParen {
-            return Ok(None); // e.g. this.foo() — not a delegation call
+        if self.peek_ahead1().kind != TokenKind::LParen {
+            return Ok(None);
         }
-        self.advance(); // this/super
-        self.advance(); // (
+        self.advance(); // "this" or "super"
+        self.advance(); // "("
         let args = if self.check(&TokenKind::RParen) {
             Vec::new()
         } else {
-            self.parse_args()?
+            self.parse_actuals()? // P10
         };
-        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
-        self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?;
+        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
+        self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?; // ";"
         Ok(Some(if is_this {
-            ConstructorDelegation::ThisCall(args, line)
+            ConstructorDelegation::ThisCall(args, line) // P5
         } else {
-            ConstructorDelegation::SuperCall(args, line)
+            ConstructorDelegation::SuperCall(args, line) // P6
         }))
     }
 
-    fn parse_locals_then_stmts(
+    // P7: MethodDecl -> Type MethodName ( (Formals)? ) { (VarDecl)* (Stmt)+ }
+    fn parse_method_decl(&mut self) -> Result<MethodDecl, ParseError> {
+        let line = self.peek().line;
+        let return_type = self.parse_type()?; // P36
+        let method_name = self.parse_method_name()?; // P45
+        self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
+        let formals = if self.check(&TokenKind::RParen) {
+            Vec::new()
+        } else {
+            self.parse_formals()? // P9
+        };
+        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
+        let body_line = self.peek().line;
+        self.expect(TokenKind::LBrace, ErrorCode::EParsePhaseOther)?; // "{"
+        let mut locals = Vec::new();
+        let mut ctx = ParseContext {
+            locals: &mut locals,
+            constructor: None,
+        };
+        let stmts = self.parse_var_decls_and_stmts(&mut ctx, StmtArity::OneOrMore)?;
+        self.expect(TokenKind::RBrace, ErrorCode::EParsePhaseOther)?; // "}"
+        let body_scope = BodyScope {
+            locals,
+            stmts,
+            line: body_line,
+        };
+        Ok(MethodDecl {
+            return_type,
+            method_name,
+            formals,
+            body: MethodBody::UserDefined(body_scope),
+            line,
+        })
+    }
+
+    // P9: Formals -> Type Identifier ( , Type Identifier)*
+    fn parse_formals(&mut self) -> Result<Vec<Formal>, ParseError> {
+        let mut formals = Vec::new();
+        loop {
+            let line = self.peek().line;
+            let declared_type = self.parse_type()?; // P36
+            let identifier = self.expect_ident_name()?; // Identifier
+            formals.push(Formal {
+                declared_type,
+                identifier,
+                line,
+            });
+            if self.check(&TokenKind::Comma) {
+                self.advance(); // ","
+            } else {
+                break;
+            }
+        }
+        Ok(formals)
+    }
+
+    // P10: Actuals -> Expr ( , Expr)*
+    fn parse_actuals(&mut self) -> Result<Vec<Expr>, ParseError> {
+        let mut actuals = vec![self.parse_expr()?];
+        while self.check(&TokenKind::Comma) {
+            self.advance(); // ","
+            actuals.push(self.parse_expr()?);
+        }
+        Ok(actuals)
+    }
+
+    // P11: VarDecl -> Type Identifier ( , Identifier)* ;
+    fn parse_var_decl(&mut self) -> Result<VarDecl, ParseError> {
+        let line = self.peek().line;
+        let declared_type = self.parse_type()?; // P36
+        let mut identifiers = vec![self.expect_ident_name()?]; // Identifier
+        while self.check(&TokenKind::Comma) {
+            self.advance(); // ","
+            identifiers.push(self.expect_ident_name()?); // Identifier
+        }
+        self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?; // ";"
+        Ok(VarDecl {
+            declared_type,
+            identifiers,
+            line,
+        })
+    }
+
+    // P12: Block -> { (VarDecl)* (Stmt)+ }
+    fn parse_block(&mut self, ctx: &mut ParseContext) -> Result<Vec<Stmt>, ParseError> {
+        self.expect(TokenKind::LBrace, ErrorCode::EParsePhaseOther)?; // "{"
+        let mut nested_ctx = ParseContext {
+            locals: &mut *ctx.locals, // reborrow -- same Vec as the enclosing body
+            constructor: ctx.constructor.map(|c| ConstructorContext {
+                at_top_level: false,
+                delegation: c.delegation,
+            }),
+        };
+        let stmts = self.parse_var_decls_and_stmts(&mut nested_ctx, StmtArity::OneOrMore)?;
+        self.expect(TokenKind::RBrace, ErrorCode::EParsePhaseOther)?; // "}"
+        Ok(stmts)
+    }
+
+    // "(VarDecl)* (Stmt)+" (P7, P12) or "(VarDecl)* (Stmt)*" (P5, P6), per `arity`.
+    fn parse_var_decls_and_stmts(
         &mut self,
         ctx: &mut ParseContext,
         arity: StmtArity,
     ) -> Result<Vec<Stmt>, ParseError> {
         while self.is_start_of_var_decl() {
-            self.parse_var_decl(ctx)?;
+            let decl = self.parse_var_decl()?; // P11
+            self.hoist(decl, ctx)?;
         }
         let mut stmts = Vec::new();
         while !self.check(&TokenKind::RBrace) {
@@ -348,50 +360,31 @@ impl<'a> Parser<'a> {
         Ok(stmts)
     }
 
-    fn parse_var_decl(&mut self, ctx: &mut ParseContext) -> Result<(), ParseError> {
-        let line = self.peek().line;
-        let declared_type = self.parse_type()?;
-        let mut names: Vec<String> = Vec::new();
-        loop {
-            let name = self.expect_ident_name()?;
-            let is_duplicate = names.contains(&name)
+    fn hoist(&self, decl: VarDecl, ctx: &mut ParseContext) -> Result<(), ParseError> {
+        for (i, identifier) in decl.identifiers.iter().enumerate() {
+            // [..i]: names earlier in THIS VarDecl ("int x, x;")
+            let is_duplicate = decl.identifiers[..i].contains(identifier)
                 || ctx
                     .locals
                     .iter()
-                    .any(|existing| existing.names.contains(&name));
+                    .any(|existing| existing.identifiers.contains(identifier));
             if is_duplicate {
                 return Err(new_parse_error(
                     ErrorCode::EDuplicateLocal,
-                    line,
-                    format!("duplicate local '{}'", name),
+                    decl.line,
+                    format!("duplicate local '{}'", identifier),
                 ));
             }
-            names.push(name);
-            if self.check(&TokenKind::Comma) {
-                self.advance();
-            } else {
-                break;
-            }
         }
-        self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?;
-        ctx.locals.push(VarDecl {
-            declared_type,
-            names,
-            line,
-        });
+        ctx.locals.push(decl);
         Ok(())
     }
 
-    // ================================
-    // Statements
-    // ================================
-
     fn misplaced_delegation_error(&self, ctx: &ParseContext) -> Option<ParseError> {
         let constructor = ctx.constructor?;
-        let line = self.peek().line;
         let is_this = self.check(&TokenKind::KwThis);
         let is_super = self.check(&TokenKind::KwSuper);
-        if !(is_this || is_super) || self.peek2().kind != TokenKind::LParen {
+        if !(is_this || is_super) || self.peek_ahead1().kind != TokenKind::LParen {
             return None;
         }
         let code = if !constructor.at_top_level {
@@ -405,11 +398,12 @@ impl<'a> Parser<'a> {
         };
         Some(new_parse_error(
             code,
-            line,
+            self.peek().line,
             "misplaced constructor this()/super() call",
         ))
     }
 
+    // P13-P19: Stmt -> ...
     fn parse_stmt(&mut self, ctx: &mut ParseContext) -> Result<Stmt, ParseError> {
         if let Some(delegation_err) = self.misplaced_delegation_error(ctx) {
             return Err(delegation_err);
@@ -417,34 +411,42 @@ impl<'a> Parser<'a> {
 
         let line = self.peek().line;
         match self.peek().kind.clone() {
+            // P13: Stmt -> return Expr ;
             TokenKind::KwReturn => {
-                self.advance();
+                self.advance(); // "return"
                 let expr = self.parse_expr()?;
-                self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?;
+                self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?; // ";"
                 Ok(Stmt::Return(expr, line))
             }
-            TokenKind::KwIf => self.parse_if_stmt(ctx),
+            // P14: Stmt -> if ( Expr ) Block else Block
+            TokenKind::KwIf => self.parse_if_else_stmt(ctx),
+            // P15: Stmt -> while ( Expr ) Block
             TokenKind::KwWhile => self.parse_while_stmt(ctx),
+            // P16: Stmt -> break ;
             TokenKind::KwBreak => {
-                self.advance();
-                self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?;
+                self.advance(); // "break"
+                self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?; // ";"
                 Ok(Stmt::Break(line))
             }
+            // P18: Stmt -> ;
             TokenKind::Semicolon => {
-                self.advance();
+                self.advance(); // ";"
                 Ok(Stmt::Empty(line))
             }
-            TokenKind::Ident(name) => {
-                if self.peek2().kind == TokenKind::Equals {
-                    self.advance(); // ident
-                    self.advance(); // =
+            TokenKind::Ident(_) => {
+                if self.peek_ahead1().kind == TokenKind::Equals {
+                    // P17: Stmt -> Var = Expr ;
+                    let name = self.parse_var()?; // P50
+                    self.advance(); // "="
                     let expr = self.parse_expr()?;
-                    self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?;
+                    self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?; // ";"
                     Ok(Stmt::Assign(name, expr, line))
                 } else {
+                    // P19: Stmt -> ObjName . MethodName ( (Actuals)? ) ;, via P46: ObjName -> Var
                     self.parse_call_stmt()
                 }
             }
+            // P19, via P47: ObjName -> this | P48: ObjName -> super | P49: ObjName -> ( Expr )
             TokenKind::KwThis | TokenKind::KwSuper | TokenKind::LParen => self.parse_call_stmt(),
             other => Err(new_parse_error(
                 ErrorCode::EParsePhaseOther,
@@ -454,135 +456,147 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_if_stmt(&mut self, ctx: &mut ParseContext) -> Result<Stmt, ParseError> {
+    // P14: Stmt -> if ( Expr ) Block else Block
+    fn parse_if_else_stmt(&mut self, ctx: &mut ParseContext) -> Result<Stmt, ParseError> {
         let line = self.peek().line;
-        self.advance(); // if
-        self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
+        self.advance(); // "if"
+        self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
         let cond = self.parse_expr()?;
-        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
-        let then_branch = self.parse_nested_block(ctx)?;
-        self.expect(TokenKind::KwElse, ErrorCode::EParsePhaseOther)?;
-        let else_branch = self.parse_nested_block(ctx)?;
+        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
+        let then_branch = self.parse_block(ctx)?; // P12
+        self.expect(TokenKind::KwElse, ErrorCode::EParsePhaseOther)?; // "else"
+        let else_branch = self.parse_block(ctx)?; // P12
         Ok(Stmt::If(cond, then_branch, else_branch, line))
     }
 
+    // P15: Stmt -> while ( Expr ) Block
     fn parse_while_stmt(&mut self, ctx: &mut ParseContext) -> Result<Stmt, ParseError> {
         let line = self.peek().line;
-        self.advance(); // while
-        self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
+        self.advance(); // "while"
+        self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
         let cond = self.parse_expr()?;
-        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
-        let body = self.parse_nested_block(ctx)?;
+        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
+        let body = self.parse_block(ctx)?; // P12
         Ok(Stmt::While(cond, body, line))
     }
 
-    fn parse_nested_block(&mut self, ctx: &mut ParseContext) -> Result<Vec<Stmt>, ParseError> {
-        self.expect(TokenKind::LBrace, ErrorCode::EParsePhaseOther)?;
-        let mut nested_ctx = ParseContext {
-            class_name: ctx.class_name,
-            locals: &mut *ctx.locals, // reborrow, not a new Vec
-            constructor: ctx.constructor.map(|c| ConstructorContext {
-                at_top_level: false,
-                delegation: c.delegation,
-            }),
-        };
-        let stmts = self.parse_locals_then_stmts(&mut nested_ctx, StmtArity::OneOrMore)?;
-        self.expect(TokenKind::RBrace, ErrorCode::EParsePhaseOther)?;
-        Ok(stmts)
-    }
-
+    // P19: Stmt -> ObjName . MethodName ( (Actuals)? ) ;
     fn parse_call_stmt(&mut self) -> Result<Stmt, ParseError> {
         let line = self.peek().line;
-        let receiver = self.parse_receiver()?;
-        let call = self.parse_method_call_suffix(receiver, line)?;
-        self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?;
+        let obj_name = self.parse_obj_name()?;
+        let call = self.parse_method_call_suffix(obj_name, line)?;
+        self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?; // ";"
         Ok(Stmt::CallStmt(call))
     }
 
-    fn parse_receiver(&mut self) -> Result<Receiver, ParseError> {
+    // P46-P49: ObjName -> ...
+    fn parse_obj_name(&mut self) -> Result<ObjName, ParseError> {
         let line = self.peek().line;
         match &self.peek().kind {
             TokenKind::Ident(_) => {
-                let name = self.expect_ident_name()?;
-                Ok(Receiver::Var(name, line))
+                let identifier = self.parse_var()?; // P50
+                Ok(ObjName::Var(identifier, line)) // P46: ObjName -> Var
             }
             TokenKind::KwThis => {
-                self.advance();
-                Ok(Receiver::This(line))
+                self.advance(); // "this"
+                Ok(ObjName::This(line)) // P47: ObjName -> this
             }
             TokenKind::KwSuper => {
-                self.advance();
-                Ok(Receiver::Super(line))
+                self.advance(); // "super"
+                Ok(ObjName::Super(line)) // P48: ObjName -> super
             }
             TokenKind::LParen => {
-                let inner = self.parse_compound_expr()?;
-                Ok(Receiver::Computed(Box::new(inner), line))
+                let inner = self.parse_paren_expr()?;
+                Ok(ObjName::Computed(Box::new(inner), line)) // P49: ObjName -> ( Expr )
             }
             other => Err(new_parse_error(
                 ErrorCode::EParsePhaseOther,
                 line,
                 format!(
-                    "expected a receiver (identifier, this, super, or parenthesized expression), found {:?}",
+                    "expected an ObjName (identifier, this, super, or parenthesized expression), found {:?}",
                     other
                 ),
             )),
         }
     }
 
-    // ================================
-    // Expressions
-    // ================================
+    // The ". MethodName ( (Actuals)? )" fragment of P19 and P23.
+    fn parse_method_call_suffix(
+        &mut self,
+        obj_name: ObjName,
+        line: u32,
+    ) -> Result<MethodCall, ParseError> {
+        self.expect(TokenKind::Dot, ErrorCode::EParsePhaseOther)?; // "."
+        let method_name = self.parse_method_name()?; // P45
+        self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
+        let actuals = if self.check(&TokenKind::RParen) {
+            Vec::new()
+        } else {
+            self.parse_actuals()? // P10
+        };
+        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
+        Ok(MethodCall {
+            obj_name,
+            method_name,
+            actuals,
+            line,
+        })
+    }
 
+    // P20-P23, P31, P32: Expr -> ...
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
         let line = self.peek().line;
         match self.peek().kind.clone() {
-            TokenKind::Num(n) => {
-                self.advance();
-                Ok(Expr::Num(n, line))
+            // P32: Expr -> Literal
+            TokenKind::Num(_) | TokenKind::KwTrue | TokenKind::KwFalse | TokenKind::Str(_) => {
+                self.parse_literal()
             }
-            TokenKind::KwTrue => {
-                self.advance();
-                Ok(Expr::Bool(true, line))
-            }
-            TokenKind::KwFalse => {
-                self.advance();
-                Ok(Expr::Bool(false, line))
-            }
-            TokenKind::Str(s) => {
-                self.advance();
-                Ok(Expr::Str(s, line))
-            }
+            // P21: Expr -> null
             TokenKind::KwNull => {
-                self.advance();
+                self.advance(); // "null"
                 Ok(Expr::Null(line))
             }
+            // P22: Expr -> new ClassName ( (Actuals)? )
             TokenKind::KwNew => self.parse_new_expr(),
             TokenKind::Ident(_) => {
-                let name = self.expect_ident_name()?;
-                self.resolve_call_or_value(
-                    Receiver::Var(name.clone(), line),
-                    Expr::Var(name, line),
-                    line,
-                )
+                let identifier = self.parse_var()?; // P50
+                if self.check(&TokenKind::Dot) {
+                    // P23: Expr -> ObjName . MethodName ( (Actuals)? ), via P46: ObjName -> Var
+                    let obj_name = ObjName::Var(identifier, line);
+                    Ok(Expr::Call(self.parse_method_call_suffix(obj_name, line)?))
+                } else {
+                    // P31: Expr -> Var
+                    Ok(Expr::Var(identifier, line))
+                }
             }
             TokenKind::KwThis => {
-                self.advance();
-                self.resolve_call_or_value(Receiver::This(line), Expr::This(line), line)
+                self.advance(); // "this"
+                if self.check(&TokenKind::Dot) {
+                    // P23: Expr -> ObjName . MethodName ( (Actuals)? ), via P47: ObjName -> this
+                    Ok(Expr::Call(
+                        self.parse_method_call_suffix(ObjName::This(line), line)?,
+                    ))
+                } else {
+                    // P20: Expr -> this
+                    Ok(Expr::This(line))
+                }
             }
-            // bare `super` isn't a legal Expr; always requires `.method(...)`
             TokenKind::KwSuper => {
-                self.advance();
+                self.advance(); // "super"
+                                // P23: Expr -> ObjName . MethodName ( (Actuals)? ), via P48: ObjName -> super
                 Ok(Expr::Call(
-                    self.parse_method_call_suffix(Receiver::Super(line), line)?,
+                    self.parse_method_call_suffix(ObjName::Super(line), line)?,
                 ))
             }
             TokenKind::LParen => {
-                let value = self.parse_compound_expr()?;
-                self.resolve_call_or_value(
-                    Receiver::Computed(Box::new(value.clone()), line),
-                    value,
-                    line,
-                )
+                let value = self.parse_paren_expr()?; // P25-P30
+                if self.check(&TokenKind::Dot) {
+                    // P23: Expr -> ObjName . MethodName ( (Actuals)? ), via P49: ObjName -> ( Expr )
+                    let obj_name = ObjName::Computed(Box::new(value), line);
+                    Ok(Expr::Call(self.parse_method_call_suffix(obj_name, line)?))
+                } else {
+                    Ok(value)
+                }
             }
             other => Err(new_parse_error(
                 ErrorCode::EParsePhaseOther,
@@ -592,103 +606,110 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn resolve_call_or_value(
-        &mut self,
-        receiver: Receiver,
-        bare_value: Expr,
-        line: u32,
-    ) -> Result<Expr, ParseError> {
-        if self.check(&TokenKind::Dot) {
-            Ok(Expr::Call(self.parse_method_call_suffix(receiver, line)?))
-        } else {
-            Ok(bare_value)
-        }
-    }
-
+    // P22: Expr -> new ClassName ( (Actuals)? )
     fn parse_new_expr(&mut self) -> Result<Expr, ParseError> {
         let line = self.peek().line;
-        self.advance(); // new
-        let name = self.expect_ident_name()?;
-        self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
-        let args = if self.check(&TokenKind::RParen) {
+        self.advance(); // "new"
+        let class_name = self.parse_class_name()?; // P44
+        self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
+        let actuals = if self.check(&TokenKind::RParen) {
             Vec::new()
         } else {
-            self.parse_args()?
+            self.parse_actuals()? // P10
         };
-        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
-        Ok(Expr::New(name, args, line))
+        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
+        Ok(Expr::New(class_name, actuals, line))
     }
 
-    fn parse_method_call_suffix(
-        &mut self,
-        receiver: Receiver,
-        line: u32,
-    ) -> Result<MethodCall, ParseError> {
-        self.expect(TokenKind::Dot, ErrorCode::EParsePhaseOther)?;
-        let name = self.expect_ident_name()?;
-        self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
-        let args = if self.check(&TokenKind::RParen) {
-            Vec::new()
-        } else {
-            self.parse_args()?
-        };
-        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
-        Ok(MethodCall {
-            receiver,
-            name,
-            args,
-            line,
-        })
-    }
-
-    fn parse_compound_expr(&mut self) -> Result<Expr, ParseError> {
+    // P25-P30: Expr -> ...
+    fn parse_paren_expr(&mut self) -> Result<Expr, ParseError> {
         let line = self.peek().line;
-        self.advance(); // consume outer '('
+        self.advance(); // outer "("
 
-        if self.check(&TokenKind::Tilde) || self.check(&TokenKind::Bang) {
-            let op = if self.check(&TokenKind::Tilde) {
-                UnaryOp::Neg
-            } else {
-                UnaryOp::Not
-            };
-            self.advance();
+        if let Some(op) = Self::to_unop(&self.peek().kind) {
+            // P27: Expr -> ( Unop Expr )
+            self.advance(); // "~" or "!"
             let operand = self.parse_expr()?;
-            self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
-            return Ok(Expr::Unary(op, Box::new(operand), line));
+            self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
+            return Ok(Expr::Unop(op, Box::new(operand), line));
         }
 
-        // only a cast needs this lookahead; everything else below is plain recursive descent
         if self.is_cast_type_ahead() {
-            return self.parse_cast_or_nested_paren(line);
+            let ty = self.parse_paren_type()?;
+
+            return match ty {
+                Type::Class(identifier) if !self.is_start_of_expr() => {
+                    // P28: Expr -> ( Expr ), via P31: Expr -> Var
+                    self.parse_paren_suffix(Expr::Var(identifier, line), line)
+                }
+                _ => {
+                    // P29: Expr -> ( ( Type ) Expr )
+                    let operand = self.parse_expr()?;
+                    self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
+                    Ok(Expr::Cast(ty, Box::new(operand), line))
+                }
+            };
         }
 
         let first = self.parse_expr()?;
+        self.parse_paren_suffix(first, line)
+    }
+
+    // The "( Type )" fragment of P29.
+    fn parse_paren_type(&mut self) -> Result<Type, ParseError> {
+        self.advance(); // second "("
+        let ty = if let Some(ty) = self.try_parse_primitive_type() {
+            ty
+        } else {
+            Type::Class(self.parse_class_name()?) // P44
+        };
+        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
+        Ok(ty)
+    }
+
+    fn parse_paren_suffix(&mut self, primary: Expr, line: u32) -> Result<Expr, ParseError> {
+        let value = if self.check(&TokenKind::Dot) {
+            let obj_name = ObjName::Computed(Box::new(primary), line);
+            Expr::Call(self.parse_method_call_suffix(obj_name, line)?) // P23, via P49
+        } else {
+            primary
+        };
         if self.check(&TokenKind::RParen) {
-            self.advance();
-            return Ok(first); // plain paren-wrap, unwrapped
-        }
-        self.parse_operator_suffix(first, line)
-    }
-
-    fn is_cast_type_ahead(&self) -> bool {
-        if !self.check(&TokenKind::LParen) {
-            return false;
-        }
-        match &self.peek2().kind {
-            TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid => true,
-            TokenKind::Ident(_) => self.peek3().kind == TokenKind::RParen,
-            _ => false,
+            // P28: Expr -> ( Expr )
+            self.advance(); // ")"
+            Ok(value)
+        } else {
+            self.parse_operator_suffix(value, line)
         }
     }
 
+    // first(Expr).
+    fn is_start_of_expr(&self) -> bool {
+        matches!(
+            self.peek().kind,
+            TokenKind::Num(_)
+                | TokenKind::KwTrue
+                | TokenKind::KwFalse
+                | TokenKind::Str(_)
+                | TokenKind::KwNull
+                | TokenKind::KwNew
+                | TokenKind::Ident(_)
+                | TokenKind::KwThis
+                | TokenKind::KwSuper
+                | TokenKind::LParen
+        )
+    }
+
+    // P25/P26/P30: Expr -> ... (continuation after the caller's own first Expr)
     fn parse_operator_suffix(&mut self, first: Expr, line: u32) -> Result<Expr, ParseError> {
         match self.peek().kind.clone() {
             TokenKind::Question => {
-                self.advance();
+                // P25: Expr -> ( Expr ? Expr : Expr )
+                self.advance(); // "?"
                 let if_expr = self.parse_expr()?;
-                self.expect(TokenKind::Colon, ErrorCode::EParsePhaseOther)?;
+                self.expect(TokenKind::Colon, ErrorCode::EParsePhaseOther)?; // ":"
                 let else_expr = self.parse_expr()?;
-                self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
+                self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
                 Ok(Expr::Ternary(
                     Box::new(first),
                     Box::new(if_expr),
@@ -697,17 +718,19 @@ impl<'a> Parser<'a> {
                 ))
             }
             TokenKind::KwInstanceof => {
-                self.advance();
-                let class_name = self.expect_ident_name()?;
-                self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
+                // P30: Expr -> ( Expr instanceof ClassName )
+                self.advance(); // "instanceof"
+                let class_name = self.parse_class_name()?; // P44
+                self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
                 Ok(Expr::InstanceOf(Box::new(first), class_name, line))
             }
             other => {
-                if let Some(op) = Self::binary_op_for(&other) {
-                    self.advance();
+                if let Some(op) = Self::to_binop(&other) {
+                    // P26: Expr -> ( Expr Binop Expr )
+                    self.advance(); // Binop token
                     let right = self.parse_expr()?;
-                    self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
-                    Ok(Expr::Binary(Box::new(first), op, Box::new(right), line))
+                    self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
+                    Ok(Expr::Binop(Box::new(first), op, Box::new(right), line))
                 } else {
                     Err(new_parse_error(
                         ErrorCode::EParsePhaseOther,
@@ -722,58 +745,141 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_cast_or_nested_paren(&mut self, outer_line: u32) -> Result<Expr, ParseError> {
-        self.advance(); // consume the second '('
-        let ty = if let Some(ty) = self.try_parse_primitive_type() {
-            ty
-        } else {
-            Type::Class(self.expect_ident_name()?)
-        };
-        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // closes (Type)
-
-        match self.peek().kind.clone() {
-            TokenKind::RParen => {
-                // Nothing followed: not a cast. Unwrap both layers.
-                self.advance(); // closes outer (
-                match ty {
-                    Type::Class(name) => Ok(Expr::Var(name, outer_line)),
-                    _ => Err(new_parse_error(
-                        ErrorCode::EParsePhaseOther,
-                        outer_line,
-                        "a primitive type in parens with nothing following is not a valid expression",
-                    )),
-                }
-            }
-            kind if kind == TokenKind::Question
-                || kind == TokenKind::KwInstanceof
-                || Self::binary_op_for(&kind).is_some() =>
-            {
-                let as_expr = reinterpret_as_expr(ty, outer_line)?;
-                self.parse_operator_suffix(as_expr, outer_line)
-            }
-            _ => {
-                // No operator followed — this is a cast; parse the operand.
-                let operand = self.parse_expr()?;
-                self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
-                Ok(Expr::Cast(ty, Box::new(operand), outer_line))
-            }
+    // P33: Binop -> [+-*/%&|<>=]
+    fn to_binop(kind: &TokenKind) -> Option<Binop> {
+        match kind {
+            TokenKind::Plus => Some(Binop::Add),
+            TokenKind::Minus => Some(Binop::Sub),
+            TokenKind::Star => Some(Binop::Mul),
+            TokenKind::Slash => Some(Binop::Div),
+            TokenKind::Percent => Some(Binop::Mod),
+            TokenKind::Amp => Some(Binop::And),
+            TokenKind::Pipe => Some(Binop::Or),
+            TokenKind::Lt => Some(Binop::Lt),
+            TokenKind::Gt => Some(Binop::Gt),
+            TokenKind::Equals => Some(Binop::Eq),
+            _ => None,
         }
     }
 
-    // ================================
-    // Token-level helpers
-    // ================================
+    // LL(2) lookahead disambiguating P28 vs. P29.
+    fn is_cast_type_ahead(&self) -> bool {
+        if !self.check(&TokenKind::LParen) {
+            return false;
+        }
+        match &self.peek_ahead1().kind {
+            TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid => true,
+            TokenKind::Ident(_) => self.peek_ahead2().kind == TokenKind::RParen,
+            _ => false,
+        }
+    }
+
+    // P35/P37/P38/P39: Type -> void | int | bool | String
+    fn try_parse_primitive_type(&mut self) -> Option<Type> {
+        let ty = match &self.peek().kind {
+            TokenKind::KwInt => Type::Int,       // P37
+            TokenKind::KwBool => Type::Bool,     // P38
+            TokenKind::KwString => Type::String, // P39
+            TokenKind::KwVoid => Type::Void,     // P35
+            _ => return None,
+        };
+        self.advance(); // primitive-type keyword
+        Some(ty)
+    }
+
+    // P35-P39: Type -> ...
+    fn parse_type(&mut self) -> Result<Type, ParseError> {
+        if let Some(ty) = self.try_parse_primitive_type() {
+            return Ok(ty);
+        }
+        // P36: Type -> ClassName
+        let class_name = self.parse_class_name()?; // P44
+        Ok(Type::Class(class_name))
+    }
+
+    // P44: ClassName -> Identifier
+    fn parse_class_name(&mut self) -> Result<String, ParseError> {
+        self.expect_ident_name()
+    }
+
+    // P45: MethodName -> Identifier
+    fn parse_method_name(&mut self) -> Result<String, ParseError> {
+        self.expect_ident_name()
+    }
+
+    // P50: Var -> Identifier
+    fn parse_var(&mut self) -> Result<String, ParseError> {
+        self.expect_ident_name()
+    }
+
+    // P32: Expr -> Literal; P40-P43: Literal -> ...
+    fn parse_literal(&mut self) -> Result<Expr, ParseError> {
+        let line = self.peek().line;
+        match self.peek().kind.clone() {
+            TokenKind::Num(n) => {
+                self.advance(); // P40: Literal -> Num
+                Ok(Expr::Num(n, line))
+            }
+            TokenKind::KwTrue => {
+                self.advance(); // P41: Literal -> true
+                Ok(Expr::Bool(true, line))
+            }
+            TokenKind::KwFalse => {
+                self.advance(); // P42: Literal -> false
+                Ok(Expr::Bool(false, line))
+            }
+            TokenKind::Str(s) => {
+                self.advance(); // P43: Literal -> String
+                Ok(Expr::Str(s, line))
+            }
+            other => Err(new_parse_error(
+                ErrorCode::EParsePhaseOther,
+                line,
+                format!("expected a literal, found {:?}", other),
+            )),
+        }
+    }
+
+    // P34: Unop -> [~!]
+    fn to_unop(kind: &TokenKind) -> Option<Unop> {
+        match kind {
+            TokenKind::Tilde => Some(Unop::Neg),
+            TokenKind::Bang => Some(Unop::Not),
+            _ => None,
+        }
+    }
+
+    // Consumes the lexer's Identifier token (P53).
+    fn expect_ident_name(&mut self) -> Result<String, ParseError> {
+        let line = self.peek().line;
+        match self.peek().kind.clone() {
+            TokenKind::Ident(identifier) => {
+                self.advance(); // identifier
+                Ok(identifier)
+            }
+            kind if Self::is_keyword(&kind) => Err(new_parse_error(
+                ErrorCode::EReservedKeywordAsIdentifier,
+                line,
+                format!("expected an identifier, found reserved keyword {:?}", kind),
+            )),
+            other => Err(new_parse_error(
+                ErrorCode::EParsePhaseOther,
+                line,
+                format!("expected an identifier, found {:?}", other),
+            )),
+        }
+    }
 
     fn peek(&self) -> &Token {
         &self.tokens[self.pos]
     }
 
-    fn peek2(&self) -> &Token {
+    fn peek_ahead1(&self) -> &Token {
         debug_assert!(self.peek().kind != TokenKind::Eof);
         &self.tokens[self.pos + 1]
     }
 
-    fn peek3(&self) -> &Token {
+    fn peek_ahead2(&self) -> &Token {
         debug_assert!(self.peek().kind != TokenKind::Eof);
         &self.tokens[self.pos + 2]
     }
@@ -802,26 +908,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect_ident_name(&mut self) -> Result<String, ParseError> {
-        let line = self.peek().line;
-        match self.peek().kind.clone() {
-            TokenKind::Ident(name) => {
-                self.advance();
-                Ok(name)
-            }
-            kind if Self::is_keyword(&kind) => Err(new_parse_error(
-                ErrorCode::EReservedKeywordAsIdentifier,
-                line,
-                format!("expected an identifier, found reserved keyword {:?}", kind),
-            )),
-            other => Err(new_parse_error(
-                ErrorCode::EParsePhaseOther,
-                line,
-                format!("expected an identifier, found {:?}", other),
-            )),
-        }
-    }
-
     fn is_keyword(kind: &TokenKind) -> bool {
         matches!(
             kind,
@@ -846,69 +932,13 @@ impl<'a> Parser<'a> {
         )
     }
 
-    fn binary_op_for(kind: &TokenKind) -> Option<BinaryOp> {
-        match kind {
-            TokenKind::Plus => Some(BinaryOp::Add),
-            TokenKind::Minus => Some(BinaryOp::Sub),
-            TokenKind::Star => Some(BinaryOp::Mul),
-            TokenKind::Slash => Some(BinaryOp::Div),
-            TokenKind::Percent => Some(BinaryOp::Mod),
-            TokenKind::Amp => Some(BinaryOp::And),
-            TokenKind::Pipe => Some(BinaryOp::Or),
-            TokenKind::Lt => Some(BinaryOp::Lt),
-            TokenKind::Gt => Some(BinaryOp::Gt),
-            TokenKind::Equals => Some(BinaryOp::Eq),
-            _ => None,
-        }
-    }
-
-    fn try_parse_primitive_type(&mut self) -> Option<Type> {
-        let ty = match &self.peek().kind {
-            TokenKind::KwInt => Type::Int,
-            TokenKind::KwBool => Type::Bool,
-            TokenKind::KwString => Type::String,
-            TokenKind::KwVoid => Type::Void,
-            _ => return None,
-        };
-        self.advance();
-        Some(ty)
-    }
-
-    fn parse_type(&mut self) -> Result<Type, ParseError> {
-        if let Some(ty) = self.try_parse_primitive_type() {
-            return Ok(ty);
-        }
-        let name = self.expect_ident_name()?;
-        Ok(Type::Class(name))
-    }
-
-    // "Foo x" (VarDecl) vs "x = " (assign) vs "x." (call)
+    // distinguishes P11 (VarDecl) from P17/P19 at the top of a body
     fn is_start_of_var_decl(&self) -> bool {
         match &self.peek().kind {
             TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid => true,
-            TokenKind::Ident(_) => matches!(self.peek2().kind, TokenKind::Ident(_)),
+            TokenKind::Ident(_) => matches!(self.peek_ahead1().kind, TokenKind::Ident(_)),
             _ => false,
         }
-    }
-}
-
-fn new_parse_error(code: ErrorCode, line: u32, message: impl Into<String>) -> ParseError {
-    ParseError {
-        code,
-        line,
-        message: message.into(),
-    }
-}
-
-// A primitive type reaching here (e.g. `((int) + y)`) is never a valid value.
-fn reinterpret_as_expr(ty: Type, line: u32) -> Result<Expr, ParseError> {
-    match ty {
-        Type::Class(name) => Ok(Expr::Var(name, line)),
-        _ => Err(new_parse_error(
-            ErrorCode::EParsePhaseOther,
-            line,
-            "unexpected token following a primitive type in parens",
-        )),
     }
 }
 
@@ -967,7 +997,7 @@ mod tests {
             p,
             Program {
                 classes: vec![ClassDecl {
-                    name: "Empty".into(),
+                    class_name: "Empty".into(),
                     extends: None,
                     fields: vec![],
                     constructors: vec![],
@@ -979,22 +1009,15 @@ mod tests {
     }
 
     #[test]
-    fn grouped_field_names_flatten_to_one_param_each() {
+    fn grouped_field_names_stay_in_one_var_decl() {
         let p = program("class Foo (int x, y;) { }");
         assert_eq!(
             p.classes[0].fields,
-            vec![
-                Param {
-                    declared_type: Type::Int,
-                    name: "x".into(),
-                    line: 1
-                },
-                Param {
-                    declared_type: Type::Int,
-                    name: "y".into(),
-                    line: 1
-                },
-            ]
+            vec![VarDecl {
+                declared_type: Type::Int,
+                identifiers: vec!["x".into(), "y".into()],
+                line: 1,
+            }]
         );
     }
 
@@ -1002,6 +1025,14 @@ mod tests {
     fn constructor_with_no_delegation() {
         let p = program("class Foo (int x;) [ Foo(int n) { x = n; } ] { }");
         let ctor = &p.classes[0].constructors[0];
+        assert_eq!(
+            ctor.formals,
+            vec![Formal {
+                declared_type: Type::Int,
+                identifier: "n".into(),
+                line: 1,
+            }]
+        );
         assert_eq!(ctor.delegation, None);
         assert_eq!(
             ctor.body.stmts,
@@ -1048,7 +1079,6 @@ mod tests {
 
     #[test]
     fn nested_delegation_beats_keyword_mismatch() {
-        // nested, so NotFirstStatement wins even though it's also this-vs-super
         let e = program_err(
             "class Dog extends Animal () [ Dog() { super(1); if (true) { this(5); } else { ; } } ] { }",
         );
@@ -1104,9 +1134,9 @@ mod tests {
     fn double_paren_identifier_then_binop() {
         assert_eq!(
             expr("((x) + y)"),
-            Expr::Binary(
+            Expr::Binop(
                 Box::new(Expr::Var("x".into(), 1)),
-                BinaryOp::Add,
+                Binop::Add,
                 Box::new(Expr::Var("y".into(), 1)),
                 1
             )
@@ -1147,8 +1177,6 @@ mod tests {
 
     #[test]
     fn casts_nest_to_arbitrary_depth() {
-        // three levels deep, not just two — the lookahead check only ever
-        // resolves one `((` at a time; deeper nesting falls out of recursion
         assert_eq!(
             expr("((A)((B)((C)obj)))"),
             Expr::Cast(
@@ -1184,6 +1212,37 @@ mod tests {
     }
 
     #[test]
+    fn computed_receiver_call_in_double_parens() {
+        assert_eq!(
+            expr("((x).m())"),
+            Expr::Call(MethodCall {
+                obj_name: ObjName::Computed(Box::new(Expr::Var("x".into(), 1)), 1),
+                method_name: "m".into(),
+                actuals: vec![],
+                line: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn computed_receiver_call_then_binop() {
+        assert_eq!(
+            expr("((x).m() + y)"),
+            Expr::Binop(
+                Box::new(Expr::Call(MethodCall {
+                    obj_name: ObjName::Computed(Box::new(Expr::Var("x".into(), 1)), 1),
+                    method_name: "m".into(),
+                    actuals: vec![],
+                    line: 1,
+                })),
+                Binop::Add,
+                Box::new(Expr::Var("y".into(), 1)),
+                1
+            )
+        );
+    }
+
+    #[test]
     fn direct_call_chaining_without_parens_is_illegal() {
         let e = program_err("class Foo () { void m() { a.foo().bar(); } }");
         assert_eq!(e.code, ErrorCode::EParsePhaseOther);
@@ -1195,9 +1254,9 @@ mod tests {
         let Stmt::CallStmt(call) = &method_stmts(&p, 0, 0)[0] else {
             panic!("expected a call statement");
         };
-        assert_eq!(call.name, "bar");
+        assert_eq!(call.method_name, "bar");
         assert!(
-            matches!(&call.receiver, Receiver::Computed(inner, _) if matches!(**inner, Expr::Call(_)))
+            matches!(&call.obj_name, ObjName::Computed(inner, _) if matches!(**inner, Expr::Call(_)))
         );
     }
 
@@ -1207,10 +1266,10 @@ mod tests {
         let Stmt::CallStmt(call) = &method_stmts(&p, 0, 0)[0] else {
             panic!("expected a call statement");
         };
-        assert_eq!(call.name, "purr");
+        assert_eq!(call.method_name, "purr");
         assert!(matches!(
-            &call.receiver,
-            Receiver::Computed(inner, _) if matches!(**inner, Expr::Cast(Type::Class(ref c), _, _) if c == "Cat")
+            &call.obj_name,
+            ObjName::Computed(inner, _) if matches!(**inner, Expr::Cast(Type::Class(ref c), _, _) if c == "Cat")
         ));
     }
 
@@ -1221,9 +1280,9 @@ mod tests {
             panic!("expected an assignment to a call expression");
         };
         assert_eq!(name, "x");
-        assert_eq!(call.name, "area");
+        assert_eq!(call.method_name, "area");
         assert!(
-            matches!(&call.receiver, Receiver::Computed(inner, _) if matches!(**inner, Expr::New(ref n, _, _) if n == "Circle"))
+            matches!(&call.obj_name, ObjName::Computed(inner, _) if matches!(**inner, Expr::New(ref n, _, _) if n == "Circle"))
         );
     }
 
@@ -1250,8 +1309,8 @@ mod tests {
     fn second_methods_own_closing_brace_does_not_leak_to_class_end() {
         let p = program("class Foo () { void a() { ; } void b() { ; } }");
         assert_eq!(p.classes[0].methods.len(), 2);
-        assert_eq!(p.classes[0].methods[0].name, "a");
-        assert_eq!(p.classes[0].methods[1].name, "b");
+        assert_eq!(p.classes[0].methods[0].method_name, "a");
+        assert_eq!(p.classes[0].methods[1].method_name, "b");
     }
 
     #[test]
@@ -1267,12 +1326,12 @@ mod tests {
             vec![
                 VarDecl {
                     declared_type: Type::Int,
-                    names: vec!["x".into()],
+                    identifiers: vec!["x".into()],
                     line: 1
                 },
                 VarDecl {
                     declared_type: Type::Int,
-                    names: vec!["y".into()],
+                    identifiers: vec!["y".into()],
                     line: 1
                 },
             ]
@@ -1311,11 +1370,11 @@ mod tests {
     fn unary_operators() {
         assert_eq!(
             expr("(~x)"),
-            Expr::Unary(UnaryOp::Neg, Box::new(Expr::Var("x".into(), 1)), 1)
+            Expr::Unop(Unop::Neg, Box::new(Expr::Var("x".into(), 1)), 1)
         );
         assert_eq!(
             expr("(!x)"),
-            Expr::Unary(UnaryOp::Not, Box::new(Expr::Var("x".into(), 1)), 1)
+            Expr::Unop(Unop::Not, Box::new(Expr::Var("x".into(), 1)), 1)
         );
     }
 
@@ -1330,8 +1389,8 @@ mod tests {
         let Stmt::CallStmt(call) = &ctor.body.stmts[0] else {
             panic!("expected a call statement");
         };
-        assert_eq!(call.name, "setup");
-        assert!(matches!(call.receiver, Receiver::This(_)));
+        assert_eq!(call.method_name, "setup");
+        assert!(matches!(call.obj_name, ObjName::This(_)));
     }
 
     #[test]
@@ -1386,8 +1445,8 @@ mod tests {
     fn program_with_multiple_classes() {
         let p = program("class A () { } class B () { }");
         assert_eq!(p.classes.len(), 2);
-        assert_eq!(p.classes[0].name, "A");
-        assert_eq!(p.classes[1].name, "B");
+        assert_eq!(p.classes[0].class_name, "A");
+        assert_eq!(p.classes[1].class_name, "B");
     }
 
     #[test]
@@ -1432,29 +1491,19 @@ mod tests {
         assert_eq!(
             p.classes[0].fields,
             vec![
-                Param {
+                VarDecl {
                     declared_type: Type::Int,
-                    name: "a".into(),
+                    identifiers: vec!["a".into(), "b".into()],
                     line: 1
                 },
-                Param {
-                    declared_type: Type::Int,
-                    name: "b".into(),
-                    line: 1
-                },
-                Param {
+                VarDecl {
                     declared_type: Type::Bool,
-                    name: "x".into(),
+                    identifiers: vec!["x".into(), "y".into()],
                     line: 1
                 },
-                Param {
-                    declared_type: Type::Bool,
-                    name: "y".into(),
-                    line: 1
-                },
-                Param {
+                VarDecl {
                     declared_type: Type::String,
-                    name: "str".into(),
+                    identifiers: vec!["str".into()],
                     line: 1
                 },
             ]
@@ -1479,8 +1528,8 @@ mod tests {
             "class Cake (int layers;) [ Cake() { this(5); } Cake(int n) { layers = n; } ] { }",
         );
         assert_eq!(p.classes[0].constructors.len(), 2);
-        assert_eq!(p.classes[0].constructors[0].params.len(), 0);
-        assert_eq!(p.classes[0].constructors[1].params.len(), 1);
+        assert_eq!(p.classes[0].constructors[0].formals.len(), 0);
+        assert_eq!(p.classes[0].constructors[1].formals.len(), 1);
     }
 
     #[test]
