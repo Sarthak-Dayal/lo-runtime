@@ -1,298 +1,116 @@
 # Parser Design — LO (LiveOak) P1
 
-Scope: `Vec<Token>` in, `Program` (the AST) out. Lexing is `lexer_design.md`. Type
-checking, the interpreter, and codegen are separate documents — referenced here only
-where they constrain a parsing or AST-shape decision.
+Scope: `Vec<Token>` in, `Program` (the AST) out.
 
 ---
 
-## Decisions
-
-| Decision | Why |
-|---|---|
-| Recursive descent, one function per grammar nonterminal | Grammar tables (P1–P53) are written to translate this way directly. Keeps the parser "recognizably the grammar" for code review. |
-| Build the AST directly while parsing — no concrete syntax tree stage, ever | Every compound expression in the grammar is mandatorily fully parenthesized, so there's no operator-precedence ambiguity to defer — the one thing a CST would normally buy you doesn't apply here. No source document mandates a particular AST shape or discusses a CST at all; skipping one is an inferred conclusion from the grammar's full-parenthesization property and the handout's own framing that the AST is the team's to design. A CST also wouldn't grant more lookahead than direct-to-AST parsing does — both are built by the same forward-moving recursive descent, and the token stream is already fully materialized in a `Vec<Token>` either way. |
-| Target the LO-4 grammar only, one entry point (`Program → ClassDecl*`) | The grammar table itself shows LO-2's `Program → MethodDecl*` and LO-0/1's `Program → Body` are structurally absent at LO-3/4 ("empty in LO-3"). The real `lo-testing` repo confirms LO-2's bare top-level tests are explicitly optional practice scaffolding, not part of what the graded LO-4 parser needs to accept. |
-| 2 tokens of lookahead (LL(2)) via cursor + `peek`/`peek2` over the pre-built `Vec<Token>` | Two real ambiguous points exist in the grammar; both resolve with small, bounded, purely structural lookahead — no backtracking anywhere. See below. |
-| Fail-fast: stop at the first parse error | Not stated as policy anywhere in the handout, the language reference, or `error-codes.md` — this is a team assumption adopted for implementation simplicity, not a confirmed requirement (`error-codes.md` arguably leans the other way, explicitly permitting one error to emit multiple codes when it "genuinely spans phases"). Doesn't affect grading correctness, since the harness only substring-matches the declared code in stderr regardless of which phase raised it — but does affect code-review legibility ("is the parser recognizably the grammar," "is the checker's phase structure legible"), which is a real, separate reason to keep the discipline. |
-| Declaration pre-scan (class table, vtable layout) is NOT part of the parser | The class/method-table pre-scan is the type checker's Pass 1, run over the finished AST. Vtable layout specifically isn't clearly assigned to a single pass by the handout — it describes signature-collection and vtable-layout-collection as one undifferentiated pre-scan happening "before emission," without stating whether that's literally Pass 1 or a separate step. Either way, neither is parser work — parsing's job ends at "tokens in, `Program` out" — and vtable slot assignment needs the full class hierarchy (parent-first slot inheritance), so it can't run before Pass 1's cycle/hierarchy checks succeed regardless of which pass it's formally part of. The type-checker design should settle whether vtable layout is literally inside Pass 1 or a dependent step right after it. |
-| The synthetic `Input`/`Output` preamble classes are NOT built by the parser | Never parsed from text — two `ClassDecl` values constructed directly in Rust and injected by a small named step (e.g. `inject_preamble(program) -> Program`) between parsing and checking. |
-| `Main`/`Input`/`Output`/reserved-variable-name checks are NOT parser-level, except `String` | `String` is a lexical keyword, so `extends String` fails to parse as `E_RESERVED_KEYWORD_AS_IDENTIFIER` for free. `Main`/`Input`/`Output`/`in`/`out`/`err` are ordinary identifiers to the parser; reservation is checked at name resolution. `Main` is explicitly *permitted*, just shape-constrained by its own dedicated entry-point codes. |
-| Constructor name must equal enclosing class name — checked in the parser | `E_MALFORMED_CONSTRUCTOR` is a parse-phase code, with trigger text: *"A constructor declaration whose name does not equal the enclosing class's name."* The enclosing class's name is already local parser state the moment a constructor is parsed. |
-| Every local in a method or constructor is hoisted to that method/constructor's flat scope, regardless of how deeply nested in `if`/`while` it's textually declared — permanent, per course staff | Three explicit consequences: (1) every local holds its type's default value from the start of the body, even before its declaring block runs; (2) declaring the same local name twice anywhere in one body — including once per `if`/`else` arm — is unconditionally illegal, `E_DUPLICATE_LOCAL`, regardless of matching types; (3) a use may textually precede its declaration. |
-| Hoisting is done by the **parser**, at parse time — not deferred to the checker | The AST mirroring exact nested position buys nothing once "a use may precede its declaration" holds — only each node's own `line` matters for diagnostics, and that travels with the node regardless of where it sits in the tree. Flattening at parse time makes `E_DUPLICATE_LOCAL` a natural parser-level check: the parser already builds one flat name collection per method as a direct byproduct, so checking for a repeat is available immediately, with no forward-reference or cross-method dependency needed. This also matches how real compiler backends already treat function-local declarations — LO's own semantics (every local default-valued from body entry, regardless of whether its declaring block ran) mirror the "hoist every declaration to the function's entry block" convention used before register-promotion (e.g. LLVM's `mem2reg`): `BodyScope.locals` is already shaped like the entry-block declaration list a 3-address-code lowering pass would want to build for itself in P2. |
-| The "check it in the parser if the info is local" principle only applies where no published categorization exists yet | `E_LOCAL_SHADOWS_FORMAL` and `E_BREAK_OUTSIDE_LOOP` are both explicitly filed under well-formedness (checker-phase) in `error-codes.md`, despite being just as locally trackable during parsing as `E_DUPLICATE_LOCAL` is (a "current enclosing loop" flag and a "does this name match a formal" check are exactly as local as a flat-locals collection). The rule: respect the published phase categorization when one exists; only make an independent local-info-based call for codes that are genuinely unpublished (like `E_DUPLICATE_LOCAL`). Neither of these checks a use resolves to — both are purely declaration-vs-declaration name collisions, never reference resolution, so none of this creeps toward the parser resolving names in the sense that stays forbidden. |
-| Rejecting empty `[ ]` constructor brackets uses `E_MALFORMED_CONSTRUCTOR`'s sibling code, `E_MALFORMED_CLASS_DECL` | Trigger text: *"has them in the wrong order, or has empty `[ ]` brackets."* Not a generic/unspecified syntax error — cite this code specifically. |
-| `if`/`while` bodies are plain `Vec<Stmt>`, not a wrapper type | Once every `VarDecl` is diverted to the enclosing `BodyScope` during parsing, there's nothing left for an `if`/`while` body to hold besides statements — no reason for a struct. |
-
----
-
-## Naming
-
-A few node names were revisited for clarity. General rules applied: if the language
-reference itself already uses a term, keep it (consistency with course vocabulary
-matters for viva voce); if a name was our own invented shorthand and it doesn't
-self-explain, prefer something more descriptive over something merely shorter; when a
-name requires the reader to make an inferential leap, prefer the more literal
-alternative even if it's marginally less precise.
-
-| Old name | Final name | Why |
-|---|---|---|
-| `Delegation` | `OtherConstructorCall` | `Delegation` is the reference's own word, but as a bare type name doesn't say what's being delegated. The concrete distinguishing fact: this calls *another* constructor (sibling via `this`, parent via `super`) *on the object already being constructed* — no allocation, unlike `New`. `OtherConstructorCall` states that directly. `ConstructorForward` was considered and rejected — "forward" doesn't say what's being forwarded, the same vagueness `Delegation` had. |
-| `MethodBody::Intrinsic` / `IntrinsicOp` | `MethodBody::Io` / `IoOp` | "Intrinsic" and "Preamble" (the reference's own term, considered as an intermediate step) both require already knowing course-specific jargon. All 8 of these operations (4 reads, 4 prints) are genuinely I/O, so `IoOp` is both more self-explanatory and more precise than either. **Capitalization matters here**: `IoOp`, not `IOOp` — Rust API guidelines and `clippy`'s default `upper_case_acronyms` lint treat acronyms in type names as one word (`Uuid` not `UUID`, `Http` not `HTTP`), and "idiomatic use of your chosen language" is part of the graded code-review bar. |
-| `Block` | `BodyScope` | No longer a generic "curly braces" container — it has exactly one job: hold every local for one method or constructor body. `LocalScope` and `CallableScope` were considered. `CallableScope` is arguably more precise (methods and constructors are both things you invoke) but requires an inferential leap from "callable" to "oh, that means method-or-constructor" — `BodyScope` says what it is with no leap required. The only real ambiguity risk (confusion with an `if`/`while` "body") is prose-level only, not a type-level collision: `if`/`while` bodies are plain `Vec<Stmt>` with no dedicated type at all. |
-| `Receiver` | kept | Standard OOP terminology *and* the reference's own word ("the receiver's static type"). Specifically avoid `Callee` if tempted toward a synonym — that means "the function being called," not "the object it's called on," and would be a real misnomer here. |
-| `Stmt::CallStmt`, `MethodCall` struct | kept, unchanged | `MethodCall` is deliberately narrow — it's only ever a real instance-method dispatch with a receiver, never a constructor call. `New` (allocating) and `OtherConstructorCall` (forwarding within construction) are separately-shaped types that never wrap it, so the name being narrow is accurate, not misleading. Renaming `Expr::Call`/`Stmt::CallStmt` to `Expr::MethodCall`/`Stmt::MethodCallStmt` for symmetry was considered and rejected — that would read as "the one place all calls go," which is exactly wrong given `New` and `OtherConstructorCall` exist as separate call-like constructs. |
-| `ty: Type` (on `VarDecl`, `Param`) | `declared_type: Type` | Plain `type` isn't available — it's a reserved Rust keyword, so `type: Type` would need the `r#type` raw-identifier escape, which reads worse than `ty`, not better. `declared_type` is unambiguous, accurate (it's the type as written in source, not something inferred), and avoids the keyword collision. |
-
----
-
-## Grammar → function mapping
-
-| Nonterminal | Function | Produces |
-|---|---|---|
-| `Program` | `parse_program` | `Program` |
-| `ClassDecl` | `parse_class_decl` | `ClassDecl` |
-| `ConstructorDecl` | `parse_constructor_decl` | `ConstructorDecl` |
-| `MethodDecl` | `parse_method_decl` | `MethodDecl` |
-| `VarDecl` (method/constructor locals) | `parse_var_decl` | `VarDecl` (routed into the enclosing `BodyScope`, not returned to its lexical position) |
-| `Block` (method body) | `parse_method_body_scope` | `BodyScope` |
-| constructor body (**not** the `Block` nonterminal — see note below) | `parse_constructor_body_scope` | `BodyScope` |
-| `Block` (if/while body) | `parse_nested_block` | `Vec<Stmt>` |
-| `Stmt` | `parse_stmt` | `Stmt` |
-| `Expr` | `parse_expr` | `Expr` |
-| `ObjName` (receiver) | `parse_receiver` | `Receiver` |
-| `Formals` | `parse_formals` | `Vec<Param>` |
-| `VarDecl` (class field-parens section) | `parse_field_list` | `Vec<Param>` |
-| `Actuals` | `parse_actuals` | `Vec<Expr>` |
-| `Type` | `parse_type` | `Type` |
-| `Literal` | folded into `parse_expr` | `Expr::Num` / `Bool` / `Str` |
-
-`parse_formals`/`parse_actuals` are only called when the current token isn't already `)` — the empty-list case comes from the *caller* skipping the optional `(Formals)?`/`(Actuals)?`, not from either production handling zero internally.
-
-**A class's field-parens section is not `Formals` — it's built from `VarDecl`.** P4 gives `⟨ClassDecl⟩ → class ⟨ClassName⟩ (extends ⟨ClassName⟩)? ( (⟨VarDecl⟩)* ) ...` — the field list is a sequence of `VarDecl`s (P11: `⟨Type⟩ ⟨Identifier⟩ ( , ⟨Identifier⟩)* ;`), the exact same production used for hoisted locals, which explicitly allows several comma-separated names sharing one type (`int a, b;`) — the conformance suite uses this shape for locals (e.g. `LO-3/ValidPrograms/test_44.lo`: `int a, b;`), and the grammar permits the identical shape in field position, and the corpus exercises it directly: `LO-3/ValidPrograms/test_36.lo:17` declares `class Fiver(int a, b; bool x, y; String str;)` — three `VarDecl`s flattening to five `Param`s. This is a *different* production from `Formals` (`⟨Type⟩ ⟨Identifier⟩ (, ⟨Type⟩ ⟨Identifier⟩)*` — no grouping, one type per name, no semicolons), whose one-name-per-entry shape happens to match `Param` directly — an easy but wrong model to reach for when parsing fields. `parse_field_list` parses each `VarDecl` (type + comma-separated names, terminated by `;`, zero or more of them) the same way `parse_var_decl` does for locals, then flattens every name into its own `Param` entry — the same per-name expansion required for `BodyScope.locals` (see the `VarDecl` struct's own comment on this). `E_DUPLICATE_FIELD` needs the identical per-name-not-per-node duplicate check as `E_DUPLICATE_LOCAL`, checked across the flattened `Vec<Param>`, not across the pre-flattening `VarDecl` sequence.
-
-**Method bodies and constructor bodies are not the same grammar production, and must not be parsed by one shared function that treats them identically.** A `MethodDecl` body is literally `⟨Block⟩` (P12: `{ (VarDecl)* (Stmt)+ }` — **`Stmt+`, at least one statement required**). A `ConstructorDecl` body is a *different* inline production (P5/P6: `{ (this/super(Actuals?);)? (VarDecl)* (Stmt)* }`) — **`Stmt*`, zero statements allowed** — plus the optional leading delegation call (see decision point 5, below) that `Block` doesn't have at all. `parse_method_body_scope` enforces "at least one `Stmt`"; `parse_constructor_body_scope` consumes the optional delegation call first (as its own explicit step, checking for the two delegation error codes), then allows zero or more statements. A single shared function parameterized only by a "how many statements minimum" flag would still need to know about the delegation-call step being constructor-only, so two separate functions is the more honest shape, even though most of their VarDecl/Stmt-collection logic is otherwise identical and can share a common inner helper (`parse_locals_then_stmts`, parameterized by the minimum statement count).
-
-**Threading the enclosing scope:** both body-parsing functions establish a handle to the `BodyScope` being built (its `locals: Vec<VarDecl>`) and pass it down through every recursive call into `parse_stmt`/`parse_nested_block`, however deeply `if`/`while` nest. Every `VarDecl` encountered at any depth is pushed onto that same handle, never attached to the immediate `Vec<Stmt>` it's lexically inside.
-
-**This threading also has to work across *sibling* blocks, not just nested ones.** Two sequential (not nested) `while` loops in the same method sharing a duplicate local name must still be caught:
-```
-while (a) { int x; ... }
-while (b) { int x; ... }   // must ALSO be E_DUPLICATE_LOCAL
-```
-This works "for free" if the handle is a genuine live mutable reference threaded by identity through every recursive call. It does **not** work if implemented as a "parse a block, return the locals it found, caller merges the returned list into its own" pattern instead — that pattern happens to also work correctly for nesting (since the caller still merges before continuing), but is a fundamentally different implementation than "one shared mutable collection," and is easy to reach for without realizing it's more code, more error-prone on merge timing, and easier to accidentally scope per-block instead of per-method. Use a shared mutable reference, not return-and-merge.
-
-Declaring the same name in each arm of one `if`/`else` is caught correctly under sequential recursive descent, since arm 1 fully completes — pushing its locals to the shared handle — before arm 2 begins parsing.
-
----
-
-## LL(2) decision points
-
-All resolve with small, bounded, forward-only lookahead; none need backtracking or a semantic symbol table.
-
-### 1. `VarDecl` vs. assignment `Stmt` vs. call `Stmt`
-
-An `Ident` could start `Foo x;` (`VarDecl`), `x = 5;` (assignment), or `x.foo();` (call) — all share a one-token prefix. The second token resolves it by pure grammar shape, no semantic information needed:
-
-| Second token | Means |
-|---|---|
-| another `Ident` | `VarDecl` continues — no other production has `Ident Ident` as its first two tokens |
-| `=` | assignment `Stmt` |
-| `.` | call `Stmt` |
-
-### 2. `Stmt` doesn't only start with `Ident` — `this`, `super`, and `(` are also legal statement starts, and there is NO expression-statement production
-
-`Stmt → ObjName.MethodName(Actuals);` means `ObjName` can be `Var` (an `Ident`), `this`, `super`, or `(Expr)` — so a statement can legally begin with any of those four token shapes, not just `Ident`. Each of `this`, `super`, `(` unambiguously means "this must be a call statement" the moment it's seen (nothing else can start a `Stmt`), so no extra lookahead is needed there. **The trap worth naming explicitly: there is no expression-statement production anywhere in this grammar.** `(x + 1);` is a syntax error — a bare parenthesized expression is never legal as a standalone statement. The only way a `(`-led statement is legal is if it's a receiver that gets chased by `.MethodName(...)`, e.g. `(new Circle(5)).area();` or `((Cat) a).purr();`. The rule: statement-start `(` is legal only when parsing it all the way through resolves to a `Receiver::Computed` immediately followed by `.MethodName(...)`; if it doesn't reach a trailing method call, it's an unexpected-token parse failure, not a valid statement.
-
-### 3. Bare `this`/`super` vs. `this.foo()`/`super.foo()` — same trick as decision point 1, one level down
-
-At the expression level, `this` alone (P20) and `this.foo()` (via `Receiver::This` feeding into `MethodCall`) share the one-token `this` prefix — resolved by peeking the next token: `.` continues into a method call, anything else means the bare `this` expression is complete. Same mechanism as decision point 1, applied to `this`/`super` specifically.
-
-### 4. The general dispatch for anything starting with `(`, then the cast-specific case within it
-
-Once the parser sees a `(` starting an `Expr`, the general algorithm is: peek the current token; `~`/`!` means a unop (P27), done; anything else that can start an `Expr` means parse it via a normal recursive `parse_expr()` call, then branch on whatever token comes next — `?` → ternary (P25), a `Binop` symbol → binop (P26), `instanceof` → `instanceof` (P30), the closing `)` → plain parenthesized expression (P28). `((x) instanceof Circle)` is a legal, ordinary case of this same general dispatch: parse `(x)` as a normal sub-expression, see `instanceof` next, consume it and the following `ClassName`, done. It fits the general algorithm above; it doesn't need special-casing the way the cast form does.
-
-**The one case inside this general dispatch that genuinely is special: `(` immediately followed by another `(`.** `( ( Type ) Expr )` (a cast) and `( Expr )` where `Expr` itself starts with `(` (an ordinary nested sub-expression, which is what the general algorithm above already handles for every *other* leading token) share this specific `( (` prefix. A primitive keyword in the type position (`int`/`bool`/`String`/`void`) is unambiguous immediately — those can never start an `Expr`. A bare identifier there is genuinely ambiguous at the token level (`((Circle) obj)` and `((x))` start identically) and is resolved by parsing eagerly and checking what follows:
-
-| What follows the closing `)` | Means |
-|---|---|
-| the outer closing `)`, immediately | Can't be a cast — nothing followed the tentative type. `((Ident))`, unwrap both layers, return the plain `Var`. |
-| a `Binop` symbol or `?` | Was a genuine value, continuing as the left operand of an outer binop/ternary. |
-| `instanceof` | Was a genuine value, continuing as the operand of an `instanceof` test — e.g. `((x) instanceof Circle)`. |
-| the start of a new expression, no operator bridging | Only a cast has two adjacent expression-like fragments with nothing between them. Reinterpret the `Var`'s name as `Type::Class(name)`, parse what follows as the operand. |
-
-No single decision point needs more than 1–2 tokens of *new* lookahead from wherever the parser currently is — this is several small local decisions strung across recursive calls, not one big lookahead window. Nested casts (`((Animal)((Dog)obj))`) fall out for free through ordinary recursion — the operand of a cast is parsed via a normal recursive `parse_expr()` call, which can resolve to another cast one level down using the identical bounded check. Matches the official course text precisely: *"the tokens `(`, `(`, type-or-keyword, `)`, expression, `)` form the cast pattern."*
-
-This resolution mechanism never consults a name/symbol table — purely structural, keeping the parser consistent with "the parser never resolves or validates names" everywhere else in this design. (A semantic "known class names" table, the C-style "lexer hack," was considered specifically for this and rejected — see Alternate designs.)
-
-Combining a cast and `instanceof` needs *three* leading parens, not two — `(((Dog) x) instanceof Animal)`, since P29's whole `(Type)Expr` pair needs its own wrapping paren and P30 separately wraps `(Expr instanceof ClassName)`. The two-paren form `((Dog) x instanceof Animal)` is not legal grammar. The algorithm above handles this correctly either way: it commits to the cast reading, then fails to find the expected closing `)` (finds `instanceof` instead) — a correct syntax error, not a silent misparse.
-
-### 5. Constructor delegation errors — `E_DELEGATION_BOTH_SUPER_AND_THIS` / `E_DELEGATION_NOT_FIRST_STATEMENT` need explicit parser handling, not implicit fallout
-
-Both codes are parse-phase per `error-codes.md`, with precise trigger text: `E_DELEGATION_BOTH_SUPER_AND_THIS` — *"A constructor body contains both a `super(...)` and a `this(...)` delegation"* (a specific keyword-mismatch case); `E_DELEGATION_NOT_FIRST_STATEMENT` — *"A `super(...)` or `this(...)` delegation appears anywhere other than the optional first statement"* (the general/catch-all misplacement case, covering any position, not just the constructor's own top level). Neither happens automatically as a side effect of ordinary `Stmt` dispatch — the grammar has no `Stmt` production matching a bare `this(...)`/`super(...)` in ordinary statement position at all (`this`/`super` only participate in a `Stmt` via `ObjName.MethodName(...)`, which requires a `.` afterward) — so both must be checked for explicitly, and the check has to run for the entire body, including inside nested `if`/`while` blocks, not just the constructor's own top-level statement list.
-
-The algorithm:
-1. At the very start of constructor-body parsing, check whether the current token is `this`/`super` directly followed by `(` (not `.`). If so, consume it as the one legitimate delegation slot, recording which keyword it was. If not, no delegation was declared (this is legal — delegation is always optional); proceed straight to ordinary body parsing.
-2. For the rest of the constructor body — its own remaining statements, and every `Stmt`/`Vec<Stmt>` reachable from it via `if`/`while` nesting at any depth — check on every statement position: if the current token is again `this`/`super` directly followed by `(`, that fragment is illegal by construction, since a legitimate first statement (delegation or not) has already been decided in step 1. This check is threaded alongside the `BodyScope` handle through the same recursive descent used for hoisting — one additional "am I inside a constructor body" flag, true for the constructor's own statement list and everything nested inside it — so it fires inside `parse_stmt` itself wherever that flag is set, not just in a top-level-only loop. Position is checked before keyword — the two conditions below are not independent, and position always wins:
-   - The fragment is nested inside any `if`/`while` (not a literal sibling statement in the constructor's own top-level statement list, however deep the nesting) → `E_DELEGATION_NOT_FIRST_STATEMENT`, unconditionally, regardless of which keyword it uses or what step 1 found. Example: `Dog(String n) { super(n); if (true) { this(5); } else { ; } }` — `this(5)` is nested, so this is `E_DELEGATION_NOT_FIRST_STATEMENT` even though it's also an opposite-keyword case; nesting is checked first and wins.
-   - Only for a fragment that *is* a literal top-level sibling statement (same nesting depth as the constructor's own body): if a delegation was recorded in step 1 and this fragment uses the **opposite keyword** (recorded `this`, new one is `super`, or vice versa) → `E_DELEGATION_BOTH_SUPER_AND_THIS`. Example: `Dog(String n) { this(n); super(n); }`.
-   - Every other top-level-sibling case — no delegation was recorded at all in step 1 (e.g. `Dog(String n) { x = 1; super(n); }`), or the fragment repeats the **same** keyword as the one already recorded (e.g. `Dog(String n) { this(n); this(5); }`) → `E_DELEGATION_NOT_FIRST_STATEMENT`.
-3. Anything that isn't delegation-shaped falls through to ordinary `Stmt` parsing (decision point 2) as normal.
-
-Cases this correctly does *not* flag: `super(n); this.setup();` — the second statement's `this` is followed by `.`, not `(`, so it never matches the delegation-shaped test and falls through to ordinary `Stmt` parsing (P19). A root class constructor with only `this.foo();` and no delegation at all — same reasoning, `this` followed by `.` at the very start fails the delegation-shaped test in step 1, concluding "no delegation" with no ambiguity.
-
----
-
-## AST shape (parser's output)
+## AST
 
 ```rust
-enum Type {
+pub enum Type {
     Int,
     Bool,
-    String,        // primitive, NOT Class("String") — no methods exist on String at
-                    // all (E_RECEIVER_NOT_CLASS_TYPE forbids calling anything on a
-                    // primitive receiver), no subtyping, and its `=`/`<`/`>` are
-                    // lexicographic value comparisons, not reference equality.
-                    // Modeling it as Class("String") would need MORE special-casing,
-                    // not less: exclusions from method dispatch, from reference
-                    // equality, from cast-target legality, all by hand. As its own
-                    // variant, all of that falls out for free by not matching Class(_).
+    String,
     Void,
     Class(String),
 }
 
-struct Program {
-    classes: Vec<ClassDecl>,
+pub struct Program {
+    pub classes: Vec<ClassDecl>,
 }
 
-struct Param {
-    declared_type: Type,
-    name: String,
-    line: u32,
-    // Every declaration-shaped node in this AST carries its own line; matters for
-    // accurate per-field/per-formal error reporting (E_DUPLICATE_FIELD, E_FIELD_TYPED_VOID,
-    // E_FORMAL_TYPED_VOID, E_LOCAL_SHADOWS_FORMAL, E_FIELD_SHADOWING) — without it,
-    // the checker could only report the enclosing ClassDecl/MethodDecl/ConstructorDecl's
-    // line, which can be far from the actual offending field or formal in a multi-field
-    // class or multi-parameter method. Doesn't affect grading (the harness only
-    // substring-matches the error code, never the line), but the position is still
-    // worth getting right.
+// One entry of a Formals list (P9) -- each entry restates its own type
+// ("int x, bool y"), never grouped, unlike VarDecl below.
+pub struct Formal {
+    pub declared_type: Type,
+    pub identifier: String,
+    pub line: u32,
 }
 
-struct ClassDecl {
-    name: String,
-    extends: Option<String>,   // None = forest root — no implicit "Object" superclass
-    fields: Vec<Param>,
-    constructors: Vec<ConstructorDecl>,
-    // Empty Vec means "the [ ] bracket section was omitted from source" — NOT
-    // "present but empty" (parser rejects a bare `[ ]` as E_MALFORMED_CLASS_DECL,
-    // trigger text: "has empty [ ] brackets"). Root classes may omit the section;
-    // classes with extends: Some(_) must have an explicit, non-empty section
-    // (E_MISSING_CONSTRUCTOR_IN_INHERITING_CLASS).
-    methods: Vec<MethodDecl>,
-    line: u32,
+// One VarDecl (P11) -- kept grouped, matching the grammar exactly: one
+// shared type, one or more identifiers ("int x, y, z;" is a single VarDecl
+// with three identifiers, not three VarDecls). Not flattened at parse time --
+// no parser-side consumer needs a flat per-name view (E_DUPLICATE_LOCAL
+// checks name-by-name against the still-grouped list just fine; the
+// checker-phase E_DUPLICATE_FIELD has no parser-side need at all), so
+// there's nothing to buy by discarding the grouping here. Whoever needs a
+// flat (type, name, line) view later -- the checker, codegen -- expands
+// `identifiers` at the point of use.
+pub struct VarDecl {
+    pub declared_type: Type,
+    pub identifiers: Vec<String>,
+    pub line: u32,
 }
 
-struct ConstructorDecl {
-    formals: Vec<Param>,
-    // Overload by ARITY ONLY. Same arity twice in one class: E_DUPLICATE_CONSTRUCTOR_ARITY.
-    other_constructor_call: Option<OtherConstructorCall>,
-    // Syntactically optional, not semantically optional:
-    //   extends: Some(_) => MUST be Some(SuperCall) or Some(ThisCall), never None
-    //   extends: None     => may be None or Some(ThisCall), never Some(SuperCall)
-    //                        (E_SUPER_IN_ROOT_CLASS)
-    // When present, must be the first statement (grammar-enforced structurally).
-    body: BodyScope,
-    // Empty constructor body (no forwarding call AND no statements) is illegal —
-    // checked semantically; constructor bodies use Stmt*, not Stmt+, so the grammar
-    // allows it.
-    line: u32,
+pub struct ClassDecl {
+    pub class_name: String,
+    pub extends: Option<String>,
+    pub fields: Vec<VarDecl>,
+    pub constructors: Vec<ConstructorDecl>,
+    pub methods: Vec<MethodDecl>,
+    pub line: u32,
 }
 
-struct MethodDecl {
-    ret: Type,
-    name: String,
-    // No overloading — method names unique per class. Overrides must match the
-    // parent's signature exactly (E_OVERRIDE_SIGNATURE_MISMATCH, no covariant returns).
-    formals: Vec<Param>,
-    body: MethodBody,
-    line: u32,
+pub struct ConstructorDecl {
+    pub formals: Vec<Formal>,
+    pub delegation: Option<ConstructorDelegation>,
+    pub body: BodyScope,
+    pub line: u32,
 }
 
-enum OtherConstructorCall {
+pub struct MethodDecl {
+    pub return_type: Type,
+    pub method_name: String,
+    pub formals: Vec<Formal>,
+    pub body: MethodBody,
+    pub line: u32,
+}
+
+pub enum ConstructorDelegation {
     ThisCall(Vec<Expr>, u32),
     SuperCall(Vec<Expr>, u32),
 }
 
-enum MethodBody {
-    User(BodyScope),
-    Io(IoOp),   // never parsed from text
+pub enum MethodBody {
+    UserDefined(BodyScope),
+    Io(IoOp), // never produced by the parser
 }
 
-enum IoOp {
-    ReadInt, ReadBool, ReadString, Eof,
-    PrintInt, PrintBool, PrintString, Println,
-}
-// Rust variant names stay PascalCase; SOURCE-level method names the parser matches
-// against are snake_case (read_int, read_bool, read_string, eof, print_int,
-// print_bool, print_string, println). Live on two synthetic classes injected before
-// checking, never appearing in the source file the student writes:
-//   Input  { read_int, read_bool, read_string, eof }         bound to `in`
-//   Output { print_int, print_bool, print_string, println }  bound to `out` and separately to `err`
-// Two distinct singleton Output instances — one wired to stdout via `out`, a separate
-// one wired to stderr via `err` — not one shared object bound to two names. Matters
-// later for the type checker: out == err must be false.
-
-struct VarDecl {
-    declared_type: Type,
-    names: Vec<String>,   // one VarDecl can declare several names sharing a type
-                           // (`int x, y;`) — duplicate-name checks must expand this
-                           // per-name, not compare whole VarDecl nodes, or a collision
-                           // like `int x;` vs. `bool x, y;` in different branches
-                           // will be missed.
-    line: u32,
+pub enum IoOp {
+    ReadInt,
+    ReadBool,
+    ReadString,
+    Eof,
+    PrintInt,
+    PrintBool,
+    PrintString,
+    Println,
 }
 
-struct BodyScope {
-    locals: Vec<VarDecl>,  // every VarDecl belonging to this method/constructor,
-                            // flattened here by the parser regardless of how deeply
-                            // nested in if/while it was textually declared. Duplicate
-                            // names anywhere in this list — after expanding VarDecl's
-                            // Vec<String> — are E_DUPLICATE_LOCAL, checked by the
-                            // parser as each name is added, no exceptions for
-                            // matching types or mutually-exclusive if/else arms.
-    stmts: Vec<Stmt>,
-    line: u32,
+pub struct BodyScope {
+    pub locals: Vec<VarDecl>,
+    pub stmts: Vec<Stmt>,
+    pub line: u32,
 }
-// Used only for MethodDecl/ConstructorDecl bodies. if/while bodies are plain Vec<Stmt>.
 
-enum Stmt {
+pub enum Stmt {
     Assign(String, Expr, u32),
     Return(Expr, u32),
-    If(Expr, Vec<Stmt>, Vec<Stmt>, u32),   // both branches mandatory — grammar requires else
-    While(Expr, Vec<Stmt>, u32),           // LO's only loop construct
-    Break(u32),                            // legal only inside a while (E_BREAK_OUTSIDE_LOOP
-                                            // otherwise — well-formedness, not a parse error)
+    If(Expr, Vec<Stmt>, Vec<Stmt>, u32),
+    While(Expr, Vec<Stmt>, u32),
+    Break(u32),
     Empty(u32),
     CallStmt(MethodCall),
 }
-// Grammar requires at least one Stmt in a method/if/while body (Stmt+); parser-enforced,
-// syntax error if violated. Constructor bodies use Stmt*, allowed to be empty of
-// statements (though not of forwarding-call+statements together — see ConstructorDecl).
 
-struct MethodCall {
-    receiver: Receiver,
-    name: String,
-    args: Vec<Expr>,
-    line: u32,
+pub struct MethodCall {
+    pub obj_name: ObjName,
+    pub method_name: String,
+    pub actuals: Vec<Expr>,
+    pub line: u32,
 }
-// Shared by Stmt::CallStmt and Expr::Call — identical shape, no duplication.
-// Deliberately narrow: only ever a real instance-method dispatch with a receiver,
-// never a constructor call — New and OtherConstructorCall are separate types that
-// never wrap this.
 
-enum Expr {
+pub enum Expr {
     Num(i32, u32),
     Bool(bool, u32),
     Str(String, u32),
@@ -302,91 +120,1319 @@ enum Expr {
     New(String, Vec<Expr>, u32),
     Call(MethodCall),
     Ternary(Box<Expr>, Box<Expr>, Box<Expr>, u32),
-    Bin(Box<Expr>, BinOp, Box<Expr>, u32),
-    Un(UnOp, Box<Expr>, u32),
+    Binop(Box<Expr>, Binop, Box<Expr>, u32),
+    Unop(Unop, Box<Expr>, u32),
     Cast(Type, Box<Expr>, u32),
-    // Primitive casts illegal. Legal only when one static type is a subtype of the
-    // other — sibling casts between unrelated classes are a COMPILE error
-    // (E_CAST_UNRELATED_TYPES), not just a runtime one. Checker concern, not parser
-    // — the parser accepts any (Type)(Expr) shape and lets the checker judge legality.
     InstanceOf(Box<Expr>, String, u32),
-    // Unlike Cast, no subtype relation required — legal for any pair of class types.
 }
 
-enum Receiver {
+pub enum ObjName {
     Var(String, u32),
     This(u32),
     Super(u32),
-    // super.foo() IS legal in ordinary method bodies, not just constructor forwarding
-    // calls. Resolved STATICALLY against the class the calling method is lexically
-    // defined in, never the receiver's runtime class. Compiles to a direct call,
-    // never virtual dispatch.
     Computed(Box<Expr>, u32),
-    // The receiver is an arbitrary computed expression — (new Circle(5)).area(),
-    // ((Cat) a).purr(). The only way a receiver can be anything other than a simple
-    // name/this/super, and it does get constructed for real (not dead code). LO
-    // forbids direct call-chaining without parens: `a.foo().bar()` is a syntax
-    // error; `(a.foo()).bar()` is required.
 }
 
-enum BinOp { Add, Sub, Mul, Div, Mod, And, Or, Lt, Gt, Eq }
-// & / | short-circuit. String `+` = concat, `*` = repeat (int RHS, left-string-only).
-// String `<`/`>`/`=` = lexicographic value comparison. Class-type `=` is reference
-// equality; `<`/`>` illegal on class types.
-enum UnOp { Not, Neg }
-// Neg (~) on int = negation; on String = reversal; illegal on Bool (use Not).
+pub enum Binop {
+    Add, Sub, Mul, Div, Mod, And, Or, Lt, Gt, Eq,
+}
+
+pub enum Unop {
+    Not, Neg,
+}
 ```
 
-**What each part is:**
+- Every node carries its own `line`.
+- `Type::String` is its own variant, not `Class("String")`.
+- `if`/`while` bodies are bare `Vec<Stmt>` — no wrapper type.
+- `BodyScope` holds every hoisted local for one method/constructor body, flattened regardless of nesting depth.
+- Field and type names match the grammar's own vocabulary: `identifier` (Identifier), `class_name` (ClassName), `method_name` (MethodName), `formals` (Formals), `actuals` (Actuals), `obj_name` (ObjName), `Binop`/`Unop`.
 
-| Type | Represents | Key semantic notes |
-|---|---|---|
-| `Program` | the whole compilation unit | one or more `ClassDecl`s, nothing else at top level |
-| `Param` | one `(declared_type, name)` pair, with its own `line` | shared by `ClassDecl.fields`, `ConstructorDecl.formals`, `MethodDecl.formals` — but `fields` is flattened from `VarDecl`s (grouped names legal, e.g. `int x, y;`), while `formals` comes from `Formals` (already one name per entry) — see the field-list note above |
-| `ClassDecl` | one class | forest root if `extends: None`; empty `constructors` means the bracket section was omitted |
-| `ConstructorDecl` | one constructor | arity-only overload resolution; forwarding-call mandatoriness depends on `extends` |
-| `OtherConstructorCall` | the `this(...)`/`super(...)` call at the top of a constructor | constructor-only, never in a method body; calls another constructor on the same object, no allocation |
-| `MethodBody` | a method's implementation | `User` for real code, `Io` for the 8 built-in I/O methods, never parsed from text |
-| `VarDecl` | one declaration, possibly several names sharing a type | flattened into the enclosing `BodyScope` by the parser regardless of original nesting |
-| `BodyScope` | every hoisted local + top-level statements for one method or constructor | the *only* place `locals` exists in this AST |
-| `Stmt` | one statement | `If`'s `else` branch mandatory; `While` is the only loop; bodies are plain `Vec<Stmt>` |
-| `MethodCall` | a receiver, method name, and arguments | shared shape between statement-position and expression-position calls; instance-method dispatch only |
-| `Expr` | one expression | every compound form was fully parenthesized in source; none of those parens survive parsing |
-| `Receiver` | what a call is invoked on | `Super` resolves statically; `Computed` is required for any non-trivial receiver |
+**`Formal` vs. `VarDecl`:**
+- Two distinct types; neither is flattened at parse time.
+- `Formal` mirrors P9 (`Formals`) exactly: one type, one identifier, per entry — the grammar never groups names here.
+- `VarDecl` mirrors P11 (`VarDecl`) exactly: one type, `Vec<String>` of identifiers — the grammar does group names here (`int x, y, z;`).
+- No per-name flattening: no parser-side consumer needs a flat per-name view badly enough to justify discarding the grammar's own grouped shape.
+- `ClassDecl.fields` and `BodyScope.locals` are both `Vec<VarDecl>` — P4's `( (VarDecl)* )` and P7/P12/P5/P6's `(VarDecl)*` are the same production (P11), reused verbatim at both call sites, not two different productions that happen to look alike.
 
 ---
 
-## Open items
+## Grammar-citation convention
 
-Genuinely unresolved questions — need an answer from course staff, not a team assumption.
-
-1. Fail-fast has no supporting citation anywhere in the source material for any compiler phase. This is a team assumption, adopted for implementation simplicity and for code-review legibility (a fail-fast parser/checker is easier to read than one juggling accumulated-error state). Not expected to be controversial, but not confirmed either.
-2. No error code exists for duplicate names *within one formal-parameter list* (`void foo(int x, int x)`) — the well-formedness section of `error-codes.md` gives `E_LOCAL_SHADOWS_FORMAL` for local-vs-formal and `E_DUPLICATE_LOCAL` for local-vs-local, and nothing covers formal-vs-formal.
-
----
-
-## Notes
-
-Settled facts and implementation guidance — not open questions, just worth recording here rather than leaving implicit.
-
-- Binary-operator operand evaluation order: left-to-right. Never stated explicitly in the language reference the way actual-argument-list order is, but every compound expression in this grammar is mandatorily fully parenthesized, so there's no ambiguity for it to resolve — left-to-right is simply the only sensible reading, not a judgment call.
-- `super(x)`/`this(x)` referencing a local `x` declared later in the same constructor body is legal under the hoisting rules (`x` holds its default value, e.g. `0` for `int`, since a use may precede its declaration). Not special-cased anywhere — this falls out of the ordinary rules and is worth knowing about rather than mistaking for a bug. Good candidate for a contributed test.
-- The parser threads real state through recursive descent that a purely-syntactic parser wouldn't otherwise need: the enclosing class's name (`E_MALFORMED_CONSTRUCTOR`), the current `BodyScope` handle (hoisting, `E_DUPLICATE_LOCAL`), and an "inside a constructor body" flag (the delegation checks). All three are scoped per method/constructor and must never leak across method boundaries — bundle them into one explicit parser-context type threaded through the recursive calls, not separate loose parameters.
-- For the type-checker design: `Type::String` is deliberately its own variant, not `Type::Class(_)`. Correct for dispatch/subtyping/cast-legality — but `String` is still heap-allocated and needs the same shadow-stack rooting and write-barrier treatment as a class-typed local, so "is this local pointer-typed for GC purposes" is `matches!(ty, Type::Class(_) | Type::String)`, not just `Type::Class(_)`.
-- For LO-5 feature selection, if the team has influence over it: generics would directly collide with this design. Cast disambiguation (decision point 4) works *because* `Type` is always exactly one token; a type-argument payload on `Class` would be a breaking change, and angle-bracket syntax would collide with `<`/`>` already being live `Binop` tokens, reintroducing the C++ template-parsing ambiguity. Closures and exceptions would both be smooth, additive extensions by comparison.
+- A function implementing exactly one production gets a one-line header directly above `fn`: `// P<n>: <exact RHS>`, copied verbatim from the grammar table, never paraphrased.
+- A function dispatching over several productions of the same nonterminal gets a header listing every production it covers — `// P<n>-P<m>: <Nonterminal> -> ...` for a contiguous run, `// P<n>/P<m>/...: <Nonterminal> -> ...` when it isn't — and each match arm gets its own precise `// P<n>: <exact RHS>` directly above it.
+- A function with no production of its own (LL(2) lookahead, a shared continuation tail, token-level machinery) gets no `P<n>` header at all — the absence is the signal; there's no separate "not a production" disclaimer to write.
+- Where two or more productions share a prefix and a lookahead call is needed, the comment names the exact production pair (or triple) forcing it — never just "needs lookahead" without saying against what.
+- See "LL(2) decision points" below for the full list; every `peek_ahead1`/`peek_ahead2` call traces to an entry in it.
 
 ---
 
-## Alternate designs considered, not chosen
+## LL(2) decision points
 
-| Option | Rejected because |
-|---|---|
-| Separate concrete/raw syntax tree, pruned into the AST afterward | No source document mentions a CST/parse tree; skipping one is an inferred conclusion, not an explicit course recommendation. The inference holds regardless: the grammar's mandatory full parenthesization removes the only reason (deferred precedence resolution) such a tree would normally exist here. |
-| Parser-combinator or grammar-generator tooling | Course's stated stance against "parser generator escape hatches" — hand-written recursive descent, defensible at the whiteboard. |
-| Backtracking / PEG-style speculative parsing | Grammar is provably resolvable with small, bounded, forward-only lookahead everywhere, including the cast case. |
-| A semantic "known class names" table (the C-style "lexer hack") for cast vs. nested-paren disambiguation | C needs this because its `Type` can be an arbitrarily complex compound declarator; LO's `Type` is always exactly one token, so bounded structural lookahead resolves it without a name table. Would also have broken "the parser never resolves or validates names," which holds for every other identifier in this AST. |
-| Emitting code directly from parser actions, no AST at all (true Wirth-style "codegen during parse") | "Codegen during parse" is not merely historical color — the handout mandates it as a live, active discipline for *this project's own WASM back end* specifically ("This constraint is pedagogical and deliberate"). That discipline governs the WASM emission phase, a different phase from parsing, and doesn't require the *parser* itself to skip building an AST — the course's own compiler is AST-based and multi-pass overall (declaration pre-scan → build/check AST → single emission pass over it), and the WASM back end's one-pass-no-intervening-IR rule operates on the already-built AST, not on raw tokens. |
-| Two parallel AST types — one from the parser, a separately-typed one from the checker | The checker annotates the same tree in place (`Cell`-based fields on the handful of node kinds needing post-check resolution), optionally wrapped in a `Checked` marker once verified. Avoids two hand-written type definitions that have to be kept in lockstep. |
-| Keeping the body-scope type uniform across method, constructor, `if`, and `while`, with hoisting done later by the checker | Considered specifically to hedge against flat-hoisted semantics possibly changing to block-scoped. Hoisting is confirmed permanent by course staff, and separately, exact textual position stopped mattering for legality once "a use may precede its declaration" was confirmed — both original justifications for the hedge no longer apply, so flattening at parse time (this document's current design) is preferred instead. |
-| Merging `VarDecl` into the same list as `Stmt`, with a "reorder declarations to the top" step as a removable pass | Blurs a distinction the grammar makes on purpose (`Block → { (VarDecl)* (Stmt)+ }` is two nonterminal categories, not one interleaved list), and reordering *within* a single block doesn't reproduce cross-block hoisting unless it *also* reaches into nested blocks — the same work as full flattening, just placed worse. |
-| `ConstructorForward` / `IntrinsicOp` / `Preamble` / `LocalScope` / `CallableScope` as final names | See "Naming" table above for the specific reasoning behind each rejection. |
+- `peek()` reads the current token.
+- `peek_ahead1()` reads the next token. `peek_ahead2()` reads the token after that. Two fixed, zero-argument functions, not one function taking a numeric offset — a parameterized `peek_ahead(n)` could silently be called with `n > 2` anywhere, which would blow past the bound this whole section documents without anything visibly different at the call site. With only `peek_ahead1`/`peek_ahead2` existing, looking further ahead would require adding a new function, not just typing a different number — a deliberate, reviewable change instead of a silent one.
+- Every decision point below resolves with `peek_ahead1()` alone, except decision point 3, which additionally needs `peek_ahead2()` for one sub-case. Nothing backtracks.
+
+### 1. Ident-led: `VarDecl` vs. assignment vs. call statement
+
+- Shared prefix: one `Identifier`.
+- P11: `VarDecl -> Type Identifier ( , Identifier)* ;`
+- P17: `Stmt -> Var = Expr ;`
+- P19, via P46 (`ObjName -> Var`): `Stmt -> ObjName . MethodName ( (Actuals)? ) ;`
+- Separates at `peek_ahead1()`: another `Identifier` → P11; `=` → P17; anything else → P19.
+- Code: `is_start_of_var_decl` picks P11 vs. not; `parse_stmt`'s own check on `=` then picks P17 vs. P19.
+
+### 2. `this`-led: bare `this` vs. `this.method(...)`
+
+- Shared prefix: `this`.
+- P20: `Expr -> this`
+- P23, via P47 (`ObjName -> this`): `Expr -> ObjName . MethodName ( (Actuals)? )`
+- Separates at `peek_ahead1()`: `.` → P23; anything else → P20.
+- Code: each of `parse_expr`'s `Ident`/`KwThis`/`LParen` arms checks for `Dot` directly.
+- `super` has no P20-equivalent bare-`Expr` production — only P48 (`ObjName -> super`) exists — so `super` in `Expr` position always goes straight to P23, no lookahead needed.
+
+### 3. `( (`-led: cast vs. an ordinary nested `(`-led `Expr`
+
+- Shared prefix: `( (`.
+- P28: `Expr -> ( Expr )`, where the inner `Expr` itself starts with `(` (recursing into any of P25-P30).
+- P29: `Expr -> ( ( Type ) Expr )`.
+- A primitive-type keyword (P35/P37/P38/P39) at `peek_ahead1()` is unambiguous — resolves immediately.
+- An `Identifier` at `peek_ahead1()` is genuinely ambiguous (`((Circle) obj)` and `((x))` are identical this far) — resolved by `peek_ahead2()`: does `)` follow immediately?
+- Code: `is_cast_type_ahead`.
+- This only decides whether to *attempt* a cast reading — it doesn't fully resolve P28 vs. P29 by itself. `parse_paren_type` then consumes the tentative `(Type)` unconditionally (nothing about that consumption depends on the eventual answer). Full resolution needs exactly one more token, checked explicitly right there in `parse_paren_expr`: `is_start_of_expr()` true (a bare operand immediately follows, no connector) → genuinely P29; false (whatever follows is `)`, `.`, an operator, `?`, or `instanceof` — none of which can start an `Expr`) → not a cast, the tentative type was really P28's `Var`, finished by `parse_paren_suffix` like any other primary_expr (its own `.`/`)`/operator handling covers the `((x).m())`, `((x))`, and `((x) + y)` cases uniformly, with no cast-specific knowledge of any of them).
+- Matches the course text precisely: *"the tokens `(`, `(`, type-or-keyword, `)`, expression, `)` form the cast pattern."*
+- Nested casts (`((Animal)((Dog)obj))`) and casts combined with `instanceof` (`(((Dog) x) instanceof Animal)`, three parens) fall out of this same check applied again one recursion level down — no new machinery.
+- Never consults a name/symbol table — purely structural.
+
+### 4. Constructor delegation position — not an ambiguity between two legal productions
+
+- `this(...)`/`super(...)` immediately followed by `(` in ordinary statement position isn't covered by *any* `Stmt` production — the grammar's only place for that exact shape is the optional prefix inline in P5/P6.
+- So this isn't two productions sharing a prefix — it's a shape that must be actively rejected once it appears anywhere that prefix isn't legal.
+- Same lookahead as decision point 2 (`this`/`super`, then `peek_ahead1()` for `(`), reused inside `parse_stmt` via `misplaced_delegation_error`.
+- Algorithm:
+  1. At the start of constructor-body parsing, check for `this`/`super` directly followed by `(`. If found, record it as the one legitimate delegation slot (which keyword). If not, no delegation was declared — legal, delegation is always optional.
+  2. For the rest of the body, at any nesting depth: position is checked before keyword.
+     - Nested inside any `if`/`while` → `E_DELEGATION_NOT_FIRST_STATEMENT`, unconditionally, even if it's also an opposite-keyword case (nesting wins first).
+     - A literal top-level sibling statement using the opposite keyword from the one recorded → `E_DELEGATION_BOTH_SUPER_AND_THIS`.
+     - Every other top-level-sibling case (none recorded yet, or the same keyword repeated) → `E_DELEGATION_NOT_FIRST_STATEMENT`.
+  3. Anything not delegation-shaped falls through to ordinary `Stmt` parsing.
+- Not flagged: `super(n); this.setup();` (the `this` there is followed by `.`, not `(`) and a root constructor with only `this.foo();` and no delegation at all — both fail the delegation-shaped test at step 1 and parse as ordinary statements.
+
+---
+
+## Parser support types
+
+Threaded through `parse_var_decls_and_stmts`/`parse_block`/`parse_stmt`/`parse_var_decl` so `E_DUPLICATE_LOCAL` hoisting and decision point 4's delegation check both have what they need without a `Parser`-level field (which would leak state across sibling `parse_class_decl`/`parse_method_decl` calls on the same `Parser`).
+
+```rust
+struct ParseContext<'p> {
+    locals: &'p mut Vec<VarDecl>,
+    constructor: Option<ConstructorContext>,
+}
+
+#[derive(Clone, Copy)]
+struct ConstructorContext {
+    at_top_level: bool,
+    delegation: Option<DelegationKeyword>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum DelegationKeyword {
+    This,
+    Super,
+}
+
+#[derive(PartialEq)]
+enum StmtArity {
+    ZeroOrMore,
+    OneOrMore,
+}
+```
+
+Decision point 4's check, called from `parse_stmt` (P13's listing) before every `Stmt` dispatch:
+
+```rust
+// Decision point 4: this()/super() delegation is only legal as the one
+// optional prefix of a constructor's own top-level body (P5/P6) -- not a
+// Stmt production, so it must be actively rejected everywhere else a
+// this(...)/super(...)-shaped fragment appears.
+fn misplaced_delegation_error(&self, ctx: &ParseContext) -> Option<ParseError> {
+    let constructor = ctx.constructor?; // not in a constructor body at all
+    let is_this = self.check(&TokenKind::KwThis);
+    let is_super = self.check(&TokenKind::KwSuper);
+    if !(is_this || is_super) || self.peek_ahead1().kind != TokenKind::LParen {
+        return None; // not delegation-shaped -- ordinary Stmt parsing applies
+    }
+    let code = if !constructor.at_top_level {
+        ErrorCode::EDelegationNotFirstStatement
+    } else {
+        match constructor.delegation {
+            Some(DelegationKeyword::This) if is_super => ErrorCode::EDelegationBothSuperAndThis,
+            Some(DelegationKeyword::Super) if is_this => ErrorCode::EDelegationBothSuperAndThis,
+            _ => ErrorCode::EDelegationNotFirstStatement,
+        }
+    };
+    Some(new_parse_error(code, self.peek().line, "misplaced constructor this()/super() call"))
+}
+```
+
+---
+
+## Grammar walkthrough, P1–P53
+
+For every production: the line as the grammar table states it, then the exact
+parser code that implements it. Where a production is one `match` arm inside a
+larger dispatcher, the snippet is that arm alone, not the whole function — the
+function is shown in full once, at the first production it implements.
+Productions with no content at LO-4 (P2, P3, P8, P24) are omitted.
+
+### P1
+
+**P1**: `Program -> (ClassDecl)*`
+```rust
+pub fn parse_program(tokens: &[Token]) -> Result<Program, ParseError> {
+    let mut parser = Parser { tokens, pos: 0 };
+    let mut classes = Vec::new();
+    while !parser.check(&TokenKind::Eof) {
+        classes.push(parser.parse_class_decl()?);
+    }
+    Ok(Program { classes })
+}
+```
+
+### P4
+
+**P4**: `ClassDecl -> class ClassName (extends ClassName)? ( (VarDecl)* ) ( [ (ConstructorDecl)+ ] )? { (MethodDecl)* }`
+```rust
+fn parse_class_decl(&mut self) -> Result<ClassDecl, ParseError> {
+    let line = self.peek().line;
+    self.expect(TokenKind::KwClass, ErrorCode::EMalformedClassDecl)?;
+    let class_name = self.parse_class_name()?; // P44: ClassName -> Identifier
+
+    let extends = if self.check(&TokenKind::KwExtends) {
+        // "(extends ClassName)?"
+        self.advance();
+        Some(self.parse_class_name()?) // P44: ClassName -> Identifier
+    } else {
+        None
+    };
+
+    self.expect(TokenKind::LParen, ErrorCode::EMalformedClassDecl)?;
+    // "( (VarDecl)* )" -- inlined, same pattern as the (MethodDecl)* and
+    // (ConstructorDecl)+ loops below: no dup-check here (E_DUPLICATE_FIELD is
+    // checker-phase), so there's nothing beyond parsing for a wrapper to add.
+    let mut fields = Vec::new();
+    while !self.check(&TokenKind::RParen) {
+        fields.push(self.parse_var_decl()?); // see P11
+    }
+    self.expect(TokenKind::RParen, ErrorCode::EMalformedClassDecl)?;
+
+    // "( [ (ConstructorDecl)+ ] )?" -- the whole bracket section is optional,
+    // but once `[` is seen at least one ConstructorDecl is required (+, not *).
+    let constructors = if self.check(&TokenKind::LBracket) {
+        self.advance();
+        if self.check(&TokenKind::RBracket) {
+            return Err(new_parse_error(
+                ErrorCode::EMalformedClassDecl,
+                self.peek().line,
+                "empty [ ] constructor section",
+            ));
+        }
+        let mut parsed_constructors = Vec::new();
+        while !self.check(&TokenKind::RBracket) {
+            parsed_constructors.push(self.parse_constructor_decl(&class_name)?); // see P5/P6
+        }
+        self.advance();
+        parsed_constructors
+    } else {
+        Vec::new()
+    };
+
+    self.expect(TokenKind::LBrace, ErrorCode::EMalformedClassDecl)?; // "{ (MethodDecl)* }"
+    let mut methods = Vec::new();
+    while !self.check(&TokenKind::RBrace) {
+        methods.push(self.parse_method_decl()?); // see P7
+    }
+    self.advance();
+
+    Ok(ClassDecl { class_name, extends, fields, constructors, methods, line })
+}
+```
+
+No check is needed here for a misplaced `(`/`[` (or anything else) after the method body closes: `parse_program`'s loop calls `parse_class_decl` again for any non-`Eof` token, and that call's very first line, `self.expect(TokenKind::KwClass, ErrorCode::EMalformedClassDecl)`, already reports `EMalformedClassDecl` for *any* token that isn't `class` — including `(`, `[`, or literally anything else. A dedicated check here (there was one earlier) only changed the error *message*, never the code, so it was pure redundancy once the leading keyword-check was itself fixed to use `EMalformedClassDecl` instead of the generic sentinel.
+
+### P5, P6
+
+**P5**: `ConstructorDecl -> ClassName ( (Formals)? ) { ( this ( (Actuals)? ) ; )? (VarDecl)* (Stmt)* }`
+**P6**: `ConstructorDecl -> ClassName ( (Formals)? ) { ( super ( (Actuals)? ) ; )? (VarDecl)* (Stmt)* }`
+
+One nonterminal, same shape, differing only in the delegation keyword — one function, not two. Both snippets below together implement both P5 and P6; the this/super branch is inside `parse_constructor_delegation`.
+
+```rust
+fn parse_constructor_decl(&mut self, class_name: &str) -> Result<ConstructorDecl, ParseError> {
+    let line = self.peek().line;
+    let constructor_name = self.parse_class_name()?; // P44, via P5/P6: ClassName
+    if constructor_name != class_name {
+        return Err(new_parse_error(
+            ErrorCode::EMalformedConstructor,
+            line,
+            format!(
+                "constructor name '{}' does not match class name '{}'",
+                constructor_name, class_name
+            ),
+        ));
+    }
+    self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
+    let formals = if self.check(&TokenKind::RParen) {
+        Vec::new() // "(Formals)?" -- absent
+    } else {
+        self.parse_formals()?
+    };
+    self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
+
+    // "{ ( this/super ( (Actuals)? ) ; )? (VarDecl)* (Stmt)* }" -- inlined,
+    // same reason as P7's body: this is the only call site for a
+    // ConstructorDecl's own body, nothing to share it with.
+    let body_line = self.peek().line;
+    self.expect(TokenKind::LBrace, ErrorCode::EParsePhaseOther)?; // "{"
+    let delegation = self.parse_constructor_delegation()?; // "( this/super (...) ; )?"
+    let mut locals = Vec::new();
+    let mut ctx = ParseContext {
+        locals: &mut locals,
+        constructor: Some(ConstructorContext {
+            at_top_level: true,
+            delegation: delegation.as_ref().map(|d| match d {
+                ConstructorDelegation::ThisCall(..) => DelegationKeyword::This,
+                ConstructorDelegation::SuperCall(..) => DelegationKeyword::Super,
+            }),
+        }),
+    };
+    let stmts = self.parse_var_decls_and_stmts(&mut ctx, StmtArity::ZeroOrMore)?; // "(VarDecl)* (Stmt)*"
+    self.expect(TokenKind::RBrace, ErrorCode::EParsePhaseOther)?; // "}"
+    let body = BodyScope { locals, stmts, line: body_line };
+    Ok(ConstructorDecl { formals, delegation, body, line })
+}
+
+// P5: ConstructorDecl -> ClassName ( (Formals)? ) { ( this ( (Actuals)? ) ; )? (VarDecl)* (Stmt)* }
+// P6: ConstructorDecl -> ClassName ( (Formals)? ) { ( super ( (Actuals)? ) ; )? (VarDecl)* (Stmt)* }
+fn parse_constructor_delegation(&mut self) -> Result<Option<ConstructorDelegation>, ParseError> {
+    let line = self.peek().line;
+    let is_this = self.check(&TokenKind::KwThis);
+    let is_super = self.check(&TokenKind::KwSuper);
+    if !is_this && !is_super {
+        return Ok(None); // prefix absent -- legal, both productions mark it "?"
+    }
+    if self.peek_ahead1().kind != TokenKind::LParen {
+        return Ok(None); // e.g. this.foo() — not a delegation call
+    }
+    self.advance(); // this/super
+    self.advance(); // "("
+    let args = if self.check(&TokenKind::RParen) {
+        Vec::new() // "(Actuals)?" -- absent
+    } else {
+        self.parse_actuals()?
+    };
+    self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
+    self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?; // ";"
+    Ok(Some(if is_this {
+        ConstructorDelegation::ThisCall(args, line) // P5: ConstructorDecl -> ClassName ( (Formals)? ) { ( this ( (Actuals)? ) ; )? (VarDecl)* (Stmt)* }
+    } else {
+        ConstructorDelegation::SuperCall(args, line) // P6: ConstructorDecl -> ClassName ( (Formals)? ) { ( super ( (Actuals)? ) ; )? (VarDecl)* (Stmt)* }
+    }))
+}
+```
+
+Note: neither P5 nor P6 writes `<Block>` — see P12 for why that matters.
+
+### P7
+
+**P7**: `MethodDecl -> Type MethodName ( (Formals)? ) { (VarDecl)* (Stmt)+ }`
+```rust
+fn parse_method_decl(&mut self) -> Result<MethodDecl, ParseError> {
+    let line = self.peek().line;
+    let return_type = self.parse_type()?; // P7: Type
+    let method_name = self.parse_method_name()?; // P45: MethodName -> Identifier
+    self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?;
+    let formals = if self.check(&TokenKind::RParen) {
+        Vec::new() // "(Formals)?" -- absent
+    } else {
+        self.parse_formals()?
+    };
+    self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
+    // "{ (VarDecl)* (Stmt)+ }" -- written inline in P7 itself, not as a
+    // reference to <Block> (P12). See P12 for why that's a real distinction.
+    // Inlined here rather than factored into its own function: this is P7's
+    // only call site for its own body, so there's nothing else to share it
+    // with -- unlike parse_var_decls_and_stmts (P12's own listing), which
+    // genuinely has three call sites.
+    let body_line = self.peek().line;
+    self.expect(TokenKind::LBrace, ErrorCode::EParsePhaseOther)?; // "{"
+    let mut locals = Vec::new();
+    let mut ctx = ParseContext { locals: &mut locals, constructor: None };
+    let stmts = self.parse_var_decls_and_stmts(&mut ctx, StmtArity::OneOrMore)?; // "(VarDecl)* (Stmt)+"
+    self.expect(TokenKind::RBrace, ErrorCode::EParsePhaseOther)?; // "}"
+    let body_scope = BodyScope { locals, stmts, line: body_line };
+    Ok(MethodDecl {
+        return_type,
+        method_name,
+        formals,
+        body: MethodBody::UserDefined(body_scope),
+        line,
+    })
+}
+```
+
+### P9
+
+**P9**: `Formals -> Type Identifier ( , Type Identifier)*`
+```rust
+// Called only when the caller already checked the next token isn't `)` --
+// the "(Formals)?" optionality lives at the call site (P5/P6/P7), not here.
+fn parse_formals(&mut self) -> Result<Vec<Formal>, ParseError> {
+    let mut formals = Vec::new();
+    loop {
+        let line = self.peek().line;
+        let declared_type = self.parse_type()?; // Type
+        let identifier = self.parse_identifier()?; // Identifier
+        formals.push(Formal { declared_type, identifier, line });
+        if self.check(&TokenKind::Comma) {
+            self.advance(); // "( , Type Identifier)*"
+        } else {
+            break;
+        }
+    }
+    Ok(formals)
+}
+```
+
+### P10
+
+**P10**: `Actuals -> Expr ( , Expr)*`
+```rust
+// Same optionality note as parse_formals: called only when the caller
+// already knows the next token isn't `)`.
+fn parse_actuals(&mut self) -> Result<Vec<Expr>, ParseError> {
+    let mut actuals = vec![self.parse_expr()?]; // Expr
+    while self.check(&TokenKind::Comma) {
+        self.advance(); // "( , Expr)*"
+        actuals.push(self.parse_expr()?);
+    }
+    Ok(actuals)
+}
+```
+
+### P11
+
+**P11**: `VarDecl -> Type Identifier ( , Identifier)* ;`
+
+One pure function for the production itself, used at two call sites (P4's field-parens, inlined in P4's own snippet above; and the body-position loop shown below) — the same production (P11), reused verbatim in two structural positions. `parse_var_decl` does nothing beyond P11's own grammar: no hoisting, no duplicate-check, no context. Neither call site flattens — each `VarDecl` keeps every identifier it declared, matching P11's own grouped shape.
+
+```rust
+fn parse_var_decl(&mut self) -> Result<VarDecl, ParseError> {
+    let line = self.peek().line;
+    let declared_type = self.parse_type()?; // Type
+    let mut identifiers = vec![self.parse_identifier()?]; // Identifier
+    while self.check(&TokenKind::Comma) {
+        self.advance(); // "( , Identifier)*"
+        identifiers.push(self.parse_identifier()?);
+    }
+    self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?; // ";"
+    Ok(VarDecl { declared_type, identifiers, line })
+}
+```
+
+The body-position loop over `(VarDecl)*` is not itself a numbered production — it's the leading half of the shared "(VarDecl)* (Stmt)+/*" tail called from P5/P6, P7, and P12 (shown once, in full, at P12 below, since that's the last of the three call sites this walkthrough reaches). It's also the *only* place hoisting and `E_DUPLICATE_LOCAL` happen: every `VarDecl` this loop reads, at any `if`/`while` nesting depth, calls the same `parse_var_decl` above and then checks + pushes into the one shared `ctx.locals`.
+
+### P12
+
+**P12**: `Block -> { (VarDecl)* (Stmt)+ }`
+
+Only cited by name from P14/P15 (if/while) — P7's own body and P5/P6's own body spell the same-looking shape out inline instead, so they are *not* this production; see their own entries above.
+
+```rust
+fn parse_block(&mut self, ctx: &mut ParseContext) -> Result<Vec<Stmt>, ParseError> {
+    self.expect(TokenKind::LBrace, ErrorCode::EParsePhaseOther)?; // "{"
+    let mut nested_ctx = ParseContext {
+        locals: &mut *ctx.locals, // reborrow, not a new Vec -- this IS the hoist
+        constructor: ctx.constructor.map(|_| ConstructorContext {
+            at_top_level: false,
+            delegation: None,
+        }),
+    };
+    let stmts = self.parse_var_decls_and_stmts(&mut nested_ctx, StmtArity::OneOrMore)?; // "(VarDecl)* (Stmt)+"
+    self.expect(TokenKind::RBrace, ErrorCode::EParsePhaseOther)?; // "}"
+    Ok(stmts)
+}
+```
+
+`delegation` is always reset to `None` here rather than threaded through: it's never read once `at_top_level` is `false`, since `misplaced_delegation_error` only consults `.delegation` inside its `at_top_level` branch.
+
+The AST return type is a bare `Vec<Stmt>`, not a `Block`/`BodyScope` struct: every
+`VarDecl` parsed here is diverted into `ctx.locals` (the enclosing method/constructor's
+`BodyScope`), so by the time this returns, the "(VarDecl)*" part of P12 has always
+already been emptied out elsewhere — nothing is ever left for a `Block`-shaped wrapper
+to hold beyond the `Stmt` list.
+
+`parse_block` is the third and last of the three call sites for the shared
+"(VarDecl)* (Stmt)+/*" tail (P5/P6 and P7 are the other two, shown at their own
+entries above, each just calling it) — shown here in full, since this is where
+hoisting and `E_DUPLICATE_LOCAL` actually happen:
+
+```rust
+// "(VarDecl)* (Stmt)+" (P7, P12) or "(VarDecl)* (Stmt)*" (P5, P6), per
+// `arity` -- shared by P5/P6, P7, and P12. The VarDecl loop is where flat
+// hoisting lives: every VarDecl
+// read here, at any if/while nesting depth, calls the same parse_var_decl
+// (P11) and lands in the one ctx.locals shared across the whole
+// method/constructor body via the reborrow in parse_block above.
+fn parse_var_decls_and_stmts(
+    &mut self,
+    ctx: &mut ParseContext,
+    arity: StmtArity,
+) -> Result<Vec<Stmt>, ParseError> {
+    while self.is_start_of_var_decl() {
+        let decl = self.parse_var_decl()?; // P11, reused verbatim
+        self.hoist(decl, ctx)?;
+    }
+    let mut stmts = Vec::new();
+    while !self.check(&TokenKind::RBrace) {
+        stmts.push(self.parse_stmt(ctx)?); // "(Stmt)+" or "(Stmt)*", per `arity`
+    }
+    if arity == StmtArity::OneOrMore && stmts.is_empty() {
+        return Err(new_parse_error(
+            ErrorCode::EParsePhaseOther,
+            self.peek().line,
+            "expected at least one statement",
+        ));
+    }
+    Ok(stmts)
+}
+
+// The sole E_DUPLICATE_LOCAL site. Checks every identifier in `decl` against
+// both its own siblings ("int x, x;") and every VarDecl already hoisted into
+// ctx.locals, from this body or an enclosing/sibling block, before pushing.
+fn hoist(&self, decl: VarDecl, ctx: &mut ParseContext) -> Result<(), ParseError> {
+    for (i, identifier) in decl.identifiers.iter().enumerate() {
+        // decl.identifiers[..i]: the names in THIS VarDecl seen before this
+        // one ("int x, x;" case). The .any(...) call: does ANY VarDecl
+        // already in ctx.locals -- from this body or an enclosing/sibling
+        // block -- already contain this name?
+        let is_duplicate = decl.identifiers[..i].contains(identifier)
+            || ctx.locals.iter().any(|existing| existing.identifiers.contains(identifier));
+        if is_duplicate {
+            return Err(new_parse_error(
+                ErrorCode::EDuplicateLocal,
+                decl.line,
+                format!("duplicate local '{}'", identifier),
+            ));
+        }
+    }
+    ctx.locals.push(decl);
+    Ok(())
+}
+```
+
+### P13
+
+**P13**: `Stmt -> return Expr ;`
+```rust
+// P13-P19: Stmt -> ...
+fn parse_stmt(&mut self, ctx: &mut ParseContext) -> Result<Stmt, ParseError> {
+    if let Some(delegation_err) = self.misplaced_delegation_error(ctx) {
+        return Err(delegation_err);
+    }
+
+    let line = self.peek().line;
+    match self.peek().kind.clone() {
+        // P13: Stmt -> return Expr ;
+        TokenKind::KwReturn => {
+            self.advance();
+            let expr = self.parse_expr()?;
+            self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?;
+            Ok(Stmt::Return(expr, line))
+        }
+        // P14: Stmt -> if ( Expr ) Block else Block
+        TokenKind::KwIf => self.parse_if_else_stmt(ctx),
+        // P15: Stmt -> while ( Expr ) Block
+        TokenKind::KwWhile => self.parse_while_stmt(ctx),
+        // P16: Stmt -> break ;
+        TokenKind::KwBreak => {
+            self.advance();
+            self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?;
+            Ok(Stmt::Break(line))
+        }
+        // P18: Stmt -> ;
+        TokenKind::Semicolon => {
+            self.advance();
+            Ok(Stmt::Empty(line))
+        }
+        // P17: Stmt -> Var = Expr ;  vs.  P19: Stmt -> ObjName . MethodName (...) ;
+        // Second token decides: another token isn't possible here (Var is just
+        // one Identifier), so it's `=` -> P17, anything else -> P19.
+        TokenKind::Ident(_) => {
+            if self.peek_ahead1().kind == TokenKind::Equals {
+                let name = self.parse_var()?; // P50: Var -> Identifier
+                self.advance(); // =
+                let expr = self.parse_expr()?;
+                self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?;
+                Ok(Stmt::Assign(name, expr, line))
+            } else {
+                self.parse_call_stmt() // P19, ObjName::Var case (P46)
+            }
+        }
+        // P19 continued: ObjName's this/super/(Expr) alternatives (P47-P49)
+        TokenKind::KwThis | TokenKind::KwSuper | TokenKind::LParen => self.parse_call_stmt(),
+        other => Err(new_parse_error(
+            ErrorCode::EParsePhaseOther,
+            line,
+            format!("unexpected token starting statement: {:?}", other),
+        )),
+    }
+}
+```
+
+### P14
+
+**P14**: `Stmt -> if ( Expr ) Block else Block`
+
+Same `parse_stmt` as P13 above (the `TokenKind::KwIf` arm dispatches here), plus its own function. Named `parse_if_else_stmt`, not `parse_if_stmt`: P14 is one production where `else` is mandatory, not a separate optional case — LO has no bare "if without else" form, so the name says what's actually always parsed here.
+
+```rust
+fn parse_if_else_stmt(&mut self, ctx: &mut ParseContext) -> Result<Stmt, ParseError> {
+    let line = self.peek().line;
+    self.advance(); // if
+    self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
+    let cond = self.parse_expr()?; // Expr
+    self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
+    let if_body = self.parse_block(ctx)?; // Block (P12)
+    self.expect(TokenKind::KwElse, ErrorCode::EParsePhaseOther)?; // "else"
+    let else_body = self.parse_block(ctx)?; // Block (P12)
+    Ok(Stmt::If(cond, if_body, else_body, line))
+}
+```
+
+### P15
+
+**P15**: `Stmt -> while ( Expr ) Block`
+```rust
+fn parse_while_stmt(&mut self, ctx: &mut ParseContext) -> Result<Stmt, ParseError> {
+    let line = self.peek().line;
+    self.advance(); // while
+    self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
+    let cond = self.parse_expr()?; // Expr
+    self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
+    let body = self.parse_block(ctx)?; // Block (P12)
+    Ok(Stmt::While(cond, body, line))
+}
+```
+
+### P16
+
+**P16**: `Stmt -> break ;`
+
+The `TokenKind::KwBreak` arm of `parse_stmt` — see P13's full listing above.
+
+### P17
+
+**P17**: `Stmt -> Var = Expr ;`
+
+The `TokenKind::Ident(_)` arm's `if self.peek_ahead1().kind == TokenKind::Equals` branch of `parse_stmt` — see P13's full listing above.
+
+### P18
+
+**P18**: `Stmt -> ;`
+
+The `TokenKind::Semicolon` arm of `parse_stmt` — see P13's full listing above.
+
+### P19
+
+**P19**: `Stmt -> ObjName . MethodName ( (Actuals)? ) ;`
+
+The `TokenKind::Ident`-else-branch and `TokenKind::KwThis | TokenKind::KwSuper | TokenKind::LParen` arms of `parse_stmt` (P13's listing) both call this:
+
+```rust
+fn parse_call_stmt(&mut self) -> Result<Stmt, ParseError> {
+    let line = self.peek().line;
+    let obj_name = self.parse_obj_name()?; // ObjName (P46-49)
+    let call = self.parse_method_call_suffix(obj_name, line)?; // ". MethodName ( (Actuals)? )"
+    self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?; // ";"
+    Ok(Stmt::CallStmt(call))
+}
+
+// P46-P49: ObjName -> ...
+fn parse_obj_name(&mut self) -> Result<ObjName, ParseError> {
+    let line = self.peek().line;
+    match &self.peek().kind {
+        TokenKind::Ident(_) => {
+            let identifier = self.parse_var()?; // P50: Var -> Identifier
+            Ok(ObjName::Var(identifier, line)) // P46: ObjName -> Var
+        }
+        TokenKind::KwThis => {
+            self.advance();
+            Ok(ObjName::This(line)) // P47: ObjName -> this
+        }
+        TokenKind::KwSuper => {
+            self.advance();
+            Ok(ObjName::Super(line)) // P48: ObjName -> super
+        }
+        TokenKind::LParen => {
+            let inner = self.parse_paren_expr()?;
+            Ok(ObjName::Computed(Box::new(inner), line)) // P49: ObjName -> ( Expr )
+        }
+        other => Err(new_parse_error(
+            ErrorCode::EParsePhaseOther,
+            line,
+            format!(
+                "expected an ObjName (identifier, this, super, or parenthesized expression), found {:?}",
+                other
+            ),
+        )),
+    }
+}
+
+// ". MethodName ( (Actuals)? )" -- shared verbatim by P19 (caller appends
+// ";") and P23 (caller doesn't).
+fn parse_method_call_suffix(
+    &mut self,
+    obj_name: ObjName,
+    line: u32,
+) -> Result<MethodCall, ParseError> {
+    self.expect(TokenKind::Dot, ErrorCode::EParsePhaseOther)?; // "."
+    let method_name = self.parse_method_name()?; // P45: MethodName -> Identifier
+    self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
+    let actuals = if self.check(&TokenKind::RParen) {
+        Vec::new() // "(Actuals)?" -- absent
+    } else {
+        self.parse_actuals()?
+    };
+    self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
+    Ok(MethodCall { obj_name, method_name, actuals, line })
+}
+```
+
+### P20
+
+**P20**: `Expr -> this`
+```rust
+// P20-P23, P31, P32: Expr -> ...
+fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+    let line = self.peek().line;
+    match self.peek().kind.clone() {
+        // P32: Expr -> Literal
+        TokenKind::Num(_) | TokenKind::KwTrue | TokenKind::KwFalse | TokenKind::Str(_) => {
+            self.parse_literal()
+        }
+        // P21: Expr -> null
+        TokenKind::KwNull => {
+            self.advance();
+            Ok(Expr::Null(line))
+        }
+        // P22: Expr -> new ClassName ( (Actuals)? )
+        TokenKind::KwNew => self.parse_new_expr(),
+        // P31: Expr -> Var  vs.  P23 via ObjName's Var alternative (P46)
+        TokenKind::Ident(_) => {
+            let identifier = self.parse_var()?; // P50: Var -> Identifier
+            if self.check(&TokenKind::Dot) {
+                let obj_name = ObjName::Var(identifier, line);
+                Ok(Expr::Call(self.parse_method_call_suffix(obj_name, line)?))
+            } else {
+                Ok(Expr::Var(identifier, line))
+            }
+        }
+        // P20: Expr -> this  vs.  P23 via ObjName's this alternative (P47)
+        TokenKind::KwThis => {
+            self.advance();
+            if self.check(&TokenKind::Dot) {
+                Ok(Expr::Call(self.parse_method_call_suffix(ObjName::This(line), line)?))
+            } else {
+                Ok(Expr::This(line))
+            }
+        }
+        // No "Expr -> super" production exists (P20 is `this` only) -- bare
+        // `super` always goes to P23 via ObjName's super alternative (P48).
+        TokenKind::KwSuper => {
+            self.advance();
+            Ok(Expr::Call(self.parse_method_call_suffix(ObjName::Super(line), line)?))
+        }
+        // P25-P30 vs. P23 via ObjName's ( Expr ) alternative (P49)
+        TokenKind::LParen => {
+            let value = self.parse_paren_expr()?;
+            if self.check(&TokenKind::Dot) {
+                let obj_name = ObjName::Computed(Box::new(value), line);
+                Ok(Expr::Call(self.parse_method_call_suffix(obj_name, line)?))
+            } else {
+                Ok(value)
+            }
+        }
+        other => Err(new_parse_error(
+            ErrorCode::EParsePhaseOther,
+            line,
+            format!("unexpected token starting expression: {:?}", other),
+        )),
+    }
+}
+```
+
+### P21
+
+**P21**: `Expr -> null`
+
+The `TokenKind::KwNull` arm of `parse_expr` — see P20's full listing above.
+
+### P22
+
+**P22**: `Expr -> new ClassName ( (Actuals)? )`
+
+The `TokenKind::KwNew` arm of `parse_expr` (P20's listing) calls this:
+
+```rust
+fn parse_new_expr(&mut self) -> Result<Expr, ParseError> {
+    let line = self.peek().line;
+    self.advance(); // "new"
+    let class_name = self.parse_class_name()?; // P44: ClassName -> Identifier
+    self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
+    let actuals = if self.check(&TokenKind::RParen) {
+        Vec::new() // "(Actuals)?" -- absent
+    } else {
+        self.parse_actuals()?
+    };
+    self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
+    Ok(Expr::New(class_name, actuals, line))
+}
+```
+
+### P23
+
+**P23**: `Expr -> ObjName . MethodName ( (Actuals)? )`
+
+`parse_expr`'s `Ident`/`KwThis`/`KwSuper`/`LParen` arms (P20's listing) each check for `Dot` directly and, if present, build their own `ObjName` and call `parse_method_call_suffix` -- resolving P31-vs-P23 and P20-vs-P23 explicitly at each call site rather than through a shared helper, since each caller already holds the exact `ObjName`/bare-value pair it needs and the only decision left is a single `check(&TokenKind::Dot)`.
+
+A second, independent call site is `parse_paren_suffix`'s `check(&TokenKind::Dot)` (P25's listing) -- the same P23 resolution, reached one recursion level down, for a receiver that turned out to be `((x).m())` rather than a cast.
+
+`parse_method_call_suffix` (the ". MethodName ( (Actuals)? )" tail) is shown once, at P19.
+
+### P25
+
+**P25**: `Expr -> ( Expr ? Expr : Expr )`
+```rust
+// P25-P30: Expr -> ...
+fn parse_paren_expr(&mut self) -> Result<Expr, ParseError> {
+    let line = self.peek().line;
+    self.advance(); // consume outer '('
+
+    if let Some(op) = Self::to_unop(&self.peek().kind) {
+        // P27: Expr -> ( Unop Expr )
+        self.advance(); // "~" or "!"
+        let operand = self.parse_expr()?;
+        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
+        return Ok(Expr::Unop(op, Box::new(operand), line));
+    }
+
+    // is_cast_type_ahead only says whether attempting a P29 reading is worth
+    // it -- it isn't yet known to be a real cast until we see what follows
+    // the tentative "(Type)" below.
+    if self.is_cast_type_ahead() {
+        let ty = self.parse_paren_type()?; // consumes "( Type )"
+
+        return match ty {
+            Type::Class(identifier) if !self.is_start_of_expr() => {
+                // P28: Expr -> ( Expr ), via P31: Expr -> Var -- no operand
+                // follows, so the tentative type was really just a
+                // parenthesized Var, not a cast.
+                self.parse_paren_suffix(Expr::Var(identifier, line), line)
+            }
+            _ => {
+                // P29: Expr -> ( ( Type ) Expr )
+                let value = self.parse_expr()?;
+                self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
+                Ok(Expr::Cast(ty, Box::new(value), line))
+            }
+        };
+    }
+
+    // Whatever's left (P25, P26, P28, P30's operand) is an ordinary Expr.
+    let primary_expr = self.parse_expr()?;
+    self.parse_paren_suffix(primary_expr, line)
+}
+
+// Shared tail for whatever follows a primary_expr while still inside an
+// unclosed enclosing "(": an optional P23 ". MethodName(...)" postfix (via
+// P49: ObjName -> ( Expr )), then either the closing ")" (P28) or an
+// operator continuation (P25/P26/P30, via parse_operator_suffix, which
+// itself consumes the ")").
+fn parse_paren_suffix(&mut self, primary_expr: Expr, line: u32) -> Result<Expr, ParseError> {
+    let value = if self.check(&TokenKind::Dot) {
+        let obj_name = ObjName::Computed(Box::new(primary_expr), line);
+        Expr::Call(self.parse_method_call_suffix(obj_name, line)?) // P23: Expr -> ObjName . MethodName ( (Actuals)? ), via P49: ObjName -> ( Expr )
+    } else {
+        primary_expr
+    };
+    if self.check(&TokenKind::RParen) {
+        // P28: Expr -> ( Expr )
+        self.advance();
+        Ok(value)
+    } else {
+        self.parse_operator_suffix(value, line)
+    }
+}
+
+// first(Expr), i.e. every token that can legally start an Expr (P20's own
+// dispatch, minus its error fallback). Tests only the current token; not a
+// peek_ahead call, no lookahead beyond it.
+fn is_start_of_expr(&self) -> bool {
+    matches!(
+        self.peek().kind,
+        TokenKind::Num(_)
+            | TokenKind::KwTrue
+            | TokenKind::KwFalse
+            | TokenKind::Str(_)
+            | TokenKind::KwNull
+            | TokenKind::KwNew
+            | TokenKind::Ident(_)
+            | TokenKind::KwThis
+            | TokenKind::KwSuper
+            | TokenKind::LParen
+    )
+}
+
+// P25/P26/P30: Expr -> ... (continuation after the caller's own first Expr)
+fn parse_operator_suffix(&mut self, primary_expr: Expr, line: u32) -> Result<Expr, ParseError> {
+    match self.peek().kind.clone() {
+        TokenKind::Question => {
+            // P25: Expr -> ( Expr ? Expr : Expr )
+            self.advance();
+            let if_expr = self.parse_expr()?;
+            self.expect(TokenKind::Colon, ErrorCode::EParsePhaseOther)?;
+            let else_expr = self.parse_expr()?;
+            self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
+            Ok(Expr::Ternary(Box::new(primary_expr), Box::new(if_expr), Box::new(else_expr), line))
+        }
+        TokenKind::KwInstanceof => {
+            // P30: Expr -> ( Expr instanceof ClassName )
+            self.advance();
+            let class_name = self.parse_class_name()?; // P44: ClassName -> Identifier
+            self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
+            Ok(Expr::InstanceOf(Box::new(primary_expr), class_name, line))
+        }
+        other => {
+            if let Some(op) = Self::to_binop(&other) {
+                // P26: Expr -> ( Expr Binop Expr ), Binop -> [+-*/%&|<>=] (P33)
+                self.advance();
+                let right = self.parse_expr()?;
+                self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
+                Ok(Expr::Binop(Box::new(primary_expr), op, Box::new(right), line))
+            } else {
+                Err(new_parse_error(
+                    ErrorCode::EParsePhaseOther,
+                    self.peek().line,
+                    format!("expected ?, instanceof, an operator, or ) here, found {:?}", other),
+                ))
+            }
+        }
+    }
+}
+```
+
+### P26
+
+**P26**: `Expr -> ( Expr Binop Expr )`
+
+Same `parse_paren_expr` / `parse_operator_suffix` as P25 above (the `other` arm, guarded by `to_binop`), plus the P33 lookup table:
+
+```rust
+// P33: Binop -> [+-*/%&|<>=]
+fn to_binop(kind: &TokenKind) -> Option<Binop> {
+    match kind {
+        TokenKind::Plus => Some(Binop::Add),
+        TokenKind::Minus => Some(Binop::Sub),
+        TokenKind::Star => Some(Binop::Mul),
+        TokenKind::Slash => Some(Binop::Div),
+        TokenKind::Percent => Some(Binop::Mod),
+        TokenKind::Amp => Some(Binop::And),
+        TokenKind::Pipe => Some(Binop::Or),
+        TokenKind::Lt => Some(Binop::Lt),
+        TokenKind::Gt => Some(Binop::Gt),
+        TokenKind::Equals => Some(Binop::Eq),
+        _ => None,
+    }
+}
+```
+
+### P27
+
+**P27**: `Expr -> ( Unop Expr )`
+
+The `Tilde`/`Bang` check at the top of `parse_paren_expr` — see P25's full listing above.
+
+### P28
+
+**P28**: `Expr -> ( Expr )`
+
+One spot: the `if self.check(&TokenKind::RParen) { ... }` inside `parse_paren_suffix` (P25's listing) -- reached both from the ordinary path (`parse_paren_expr`'s bottom) and from the not-a-cast path (`is_cast_type_ahead` turned out not to pan out, e.g. `((Ident))`).
+
+### P29
+
+**P29**: `Expr -> ( ( Type ) Expr )`
+```rust
+// Lookahead for the "( (" prefix: a primitive-type keyword is unambiguous;
+// an Identifier needs peek_ahead2() (does `)` follow immediately?).
+fn is_cast_type_ahead(&self) -> bool {
+    if !self.check(&TokenKind::LParen) {
+        return false;
+    }
+    match &self.peek_ahead1().kind {
+        TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid => true,
+        TokenKind::Ident(_) => self.peek_ahead2().kind == TokenKind::RParen,
+        _ => false,
+    }
+}
+
+// Consumes "( Type )" once is_cast_type_ahead() says attempting P29 is
+// worth it. See P25's full listing above.
+fn parse_paren_type(&mut self) -> Result<Type, ParseError> {
+    self.advance(); // second '('
+    let ty = if let Some(ty) = self.try_parse_primitive_type() {
+        ty
+    } else {
+        Type::Class(self.parse_class_name()?) // P44, the tentative cast target
+    };
+    self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // closes "(Type)"
+    Ok(ty)
+}
+```
+
+`is_cast_type_ahead` only decides whether attempting a cast reading is *worth it*. `parse_paren_type` then consumes the tentative `(Type)` unconditionally — it doesn't decide anything either, since the same tokens are needed whichever way this resolves (either becoming the `Cast`'s `Type` directly, or reinterpreted into a `Var` when `is_start_of_expr` says no operand follows). The actual "is this a cast, or not" decision happens only once, in the `match` right after `parse_paren_type()?` returns, in `parse_paren_expr` (shown in full at P25 above): a bare operand immediately following means P29; anything else means the tentative type was really P28's `Var`, finished by `parse_paren_suffix` exactly like any other primary_expr.
+
+### P30
+
+**P30**: `Expr -> ( Expr instanceof ClassName )`
+
+The `TokenKind::KwInstanceof` arm of `parse_operator_suffix` — see P25's full listing above.
+
+### P31
+
+**P31**: `Expr -> Var`
+
+The `TokenKind::Ident(_)` arm of `parse_expr`, no-`Dot` case — see P20's full listing above.
+
+### P32
+
+**P32**: `Expr -> Literal`
+
+`Literal` is its own nonterminal (P40-P43 below are its four alternatives), so it gets its own procedure rather than being folded into `parse_expr` directly:
+
+```rust
+// P32: Expr -> Literal; P40-P43: Literal -> ...
+fn parse_literal(&mut self) -> Result<Expr, ParseError> {
+    let line = self.peek().line;
+    match self.peek().kind.clone() {
+        TokenKind::Num(n) => {
+            self.advance(); // P40: Literal -> Num
+            Ok(Expr::Num(n, line))
+        }
+        TokenKind::KwTrue => {
+            self.advance(); // P41: Literal -> true
+            Ok(Expr::Bool(true, line))
+        }
+        TokenKind::KwFalse => {
+            self.advance(); // P42: Literal -> false
+            Ok(Expr::Bool(false, line))
+        }
+        TokenKind::Str(s) => {
+            self.advance(); // P43: Literal -> String
+            Ok(Expr::Str(s, line))
+        }
+        other => Err(new_parse_error(
+            ErrorCode::EParsePhaseOther,
+            line,
+            format!("expected a literal, found {:?}", other),
+        )),
+    }
+}
+```
+
+Called from `parse_expr`'s `Num`/`KwTrue`/`KwFalse`/`Str` arms — see P20's listing above.
+
+### P33
+
+**P33**: `Binop -> [+-*/%&|<>=]`
+
+`to_binop` — see P26's full listing above.
+
+### P34
+
+**P34**: `Unop -> [~!]`
+
+`Unop` is its own nonterminal, so — matching P33's `to_binop` — it gets its own classifier rather than an inline token check:
+
+```rust
+// P34: Unop -> [~!]
+fn to_unop(kind: &TokenKind) -> Option<Unop> {
+    match kind {
+        TokenKind::Tilde => Some(Unop::Neg),
+        TokenKind::Bang => Some(Unop::Not),
+        _ => None,
+    }
+}
+```
+
+Called from `parse_paren_expr` — see P25's full listing above.
+
+### P35
+
+**P35**: `Type -> void`
+```rust
+// P35/P37/P38/P39: Type -> void | int | bool | String
+fn try_parse_primitive_type(&mut self) -> Option<Type> {
+    let ty = match &self.peek().kind {
+        TokenKind::KwInt => Type::Int,       // P37: Type -> int
+        TokenKind::KwBool => Type::Bool,     // P38: Type -> bool
+        TokenKind::KwString => Type::String, // P39: Type -> String
+        TokenKind::KwVoid => Type::Void,     // P35: Type -> void
+        _ => return None,
+    };
+    self.advance();
+    Some(ty)
+}
+```
+
+### P36
+
+**P36**: `Type -> ClassName`
+```rust
+// P35-P39: Type -> ...
+fn parse_type(&mut self) -> Result<Type, ParseError> {
+    if let Some(ty) = self.try_parse_primitive_type() {
+        return Ok(ty);
+    }
+    // P36: Type -> ClassName
+    let class_name = self.parse_class_name()?; // P44: ClassName -> Identifier
+    Ok(Type::Class(class_name))
+}
+```
+
+### P37
+
+**P37**: `Type -> int`
+
+`try_parse_primitive_type`'s `KwInt` arm — see P35's full listing above.
+
+### P38
+
+**P38**: `Type -> bool`
+
+`try_parse_primitive_type`'s `KwBool` arm — see P35's full listing above.
+
+### P39
+
+**P39**: `Type -> String`
+
+`try_parse_primitive_type`'s `KwString` arm — see P35's full listing above.
+
+### P40
+
+**P40**: `Literal -> Num`
+
+The `TokenKind::Num(n)` arm of `parse_literal` — see P32's full listing above.
+
+### P41
+
+**P41**: `Literal -> true`
+
+The `TokenKind::KwTrue` arm of `parse_literal` — see P32's full listing above.
+
+### P42
+
+**P42**: `Literal -> false`
+
+The `TokenKind::KwFalse` arm of `parse_literal` — see P32's full listing above.
+
+### P43
+
+**P43**: `Literal -> String`
+
+The `TokenKind::Str(s)` arm of `parse_literal` — see P32's full listing above.
+
+### P44
+
+**P44**: `ClassName -> Identifier`
+
+`ClassName`, `MethodName` (P45), and `Var` (P50) are three distinct nonterminals — each derives from `Identifier` and adds no shape of its own, but "identical shape" isn't "the same nonterminal": each gets its own procedure, all three built on the one shared token-level primitive that actually consumes an `Identifier` token (`parse_identifier`, shown in "Token-level helpers" below, since P53 itself is lexical, not a parser production).
+
+```rust
+// P44: ClassName -> Identifier
+fn parse_class_name(&mut self) -> Result<String, ParseError> {
+    self.parse_identifier()
+}
+```
+
+### P45
+
+**P45**: `MethodName -> Identifier`
+
+```rust
+// P45: MethodName -> Identifier
+fn parse_method_name(&mut self) -> Result<String, ParseError> {
+    self.parse_identifier()
+}
+```
+
+### P46
+
+**P46**: `ObjName -> Var`
+
+The `TokenKind::Ident(_)` arm of `parse_obj_name` — see P19's full listing above. Calls `parse_var` (P50).
+
+### P47
+
+**P47**: `ObjName -> this`
+
+The `TokenKind::KwThis` arm of `parse_obj_name` — see P19's full listing above.
+
+### P48
+
+**P48**: `ObjName -> super`
+
+The `TokenKind::KwSuper` arm of `parse_obj_name` — see P19's full listing above.
+
+### P49
+
+**P49**: `ObjName -> ( Expr )`
+
+The `TokenKind::LParen` arm of `parse_obj_name` — see P19's full listing above.
+
+### P50
+
+**P50**: `Var -> Identifier`
+
+```rust
+// P50: Var -> Identifier
+fn parse_var(&mut self) -> Result<String, ParseError> {
+    self.parse_identifier()
+}
+```
+
+### P51, P52, P53
+
+**P51**: `Num -> ([0-9])+`
+**P52**: `String -> " (string char)* "`
+**P53**: `Identifier -> [a-zA-Z]([a-zA-Z0-9'_'])*`
+
+Lexical productions — implemented by the lexer (`lexer.rs`/`lexer_design.md`), not the parser. The parser only ever consumes the already-classified `Token::Num`/`Token::Str`/`Token::Ident` produced by `tokenize`.
+
+---
+
+## Token-level helpers
+
+Shared machinery every function above calls into; not itself a numbered production, so not part of the P1–P53 walkthrough, but included here since several entries reference it.
+
+```rust
+fn peek(&self) -> &Token {
+    &self.tokens[self.pos]
+}
+
+// Two fixed functions, not one parameterized by an offset -- a bare
+// `peek_ahead(n: usize)` could be called with any n, silently exceeding the
+// bound this file documents. Only these two exist; looking further ahead
+// requires visibly adding a third.
+fn peek_ahead1(&self) -> &Token {
+    debug_assert!(self.peek().kind != TokenKind::Eof);
+    &self.tokens[self.pos + 1]
+}
+
+fn peek_ahead2(&self) -> &Token {
+    debug_assert!(self.peek().kind != TokenKind::Eof);
+    &self.tokens[self.pos + 2]
+}
+
+fn check(&self, kind: &TokenKind) -> bool {
+    &self.peek().kind == kind
+}
+
+fn advance(&mut self) -> Token {
+    let tok = self.tokens[self.pos].clone();
+    if self.pos + 1 < self.tokens.len() {
+        self.pos += 1;
+    }
+    tok
+}
+
+fn expect(&mut self, kind: TokenKind, code: ErrorCode) -> Result<Token, ParseError> {
+    if self.check(&kind) {
+        Ok(self.advance())
+    } else {
+        Err(new_parse_error(
+            code,
+            self.peek().line,
+            format!("expected {:?}, found {:?}", kind, self.peek().kind),
+        ))
+    }
+}
+
+// P53: Identifier -> [a-zA-Z]([a-zA-Z0-9'_'])* is lexical, not a parser
+// production -- this consumes the lexer's already-classified Identifier
+// token. Shared by parse_class_name (P44), parse_method_name (P45), and
+// parse_var (P50): three distinct nonterminals, each with its own procedure,
+// all built on this one token-level primitive.
+fn parse_identifier(&mut self) -> Result<String, ParseError> {
+    let line = self.peek().line;
+    match self.peek().kind.clone() {
+        TokenKind::Ident(identifier) => {
+            self.advance();
+            Ok(identifier)
+        }
+        kind if Self::is_keyword(&kind) => Err(new_parse_error(
+            ErrorCode::EReservedKeywordAsIdentifier,
+            line,
+            format!("expected an identifier, found reserved keyword {:?}", kind),
+        )),
+        other => Err(new_parse_error(
+            ErrorCode::EParsePhaseOther,
+            line,
+            format!("expected an identifier, found {:?}", other),
+        )),
+    }
+}
+
+fn is_keyword(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::KwInt
+            | TokenKind::KwBool
+            | TokenKind::KwString
+            | TokenKind::KwVoid
+            | TokenKind::KwClass
+            | TokenKind::KwExtends
+            | TokenKind::KwThis
+            | TokenKind::KwSuper
+            | TokenKind::KwNull
+            | TokenKind::KwNew
+            | TokenKind::KwReturn
+            | TokenKind::KwIf
+            | TokenKind::KwElse
+            | TokenKind::KwWhile
+            | TokenKind::KwBreak
+            | TokenKind::KwTrue
+            | TokenKind::KwFalse
+            | TokenKind::KwInstanceof
+    )
+}
+
+// The LL(2) lookahead that tells P11 (VarDecl) apart from P17 (assignment)
+// and P19 (call statement) at the top of a body.
+fn is_start_of_var_decl(&self) -> bool {
+    match &self.peek().kind {
+        TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid => true,
+        TokenKind::Ident(_) => matches!(self.peek_ahead1().kind, TokenKind::Ident(_)),
+        _ => false,
+    }
+}
+```
+
+Plus one free function outside `impl Parser`:
+
+```rust
+fn new_parse_error(code: ErrorCode, line: u32, message: impl Into<String>) -> ParseError {
+    ParseError { code, line, message: message.into() }
+}
+```

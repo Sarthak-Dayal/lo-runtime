@@ -2,8 +2,16 @@
 
 Implements everything decided in `type_checker_design.md`, against the `compiler/`
 crate as it exists on `parser/phase-1-implementation` (`ast.rs`, `lexer.rs`,
-`parser.rs`, `token.rs`, `main.rs`). Adds one new file and makes small, explicitly
-flagged additions to `ast.rs`.
+`parser.rs`, `token.rs`, `main.rs`). Adds one new file. `ast.rs` stays untouched —
+the typed AST introduced this revision is a wholly separate set of types living in
+`sema.rs`, not a modification of the parser's output type.
+
+**Revision note:** this supersedes the previous draft after a 23-comment team review
+across two reviewers. The biggest change is architectural (the checker now produces
+a genuine `TypedProgram`, not the same untyped tree wrapped in a marker); the rest are
+concrete, confirmed bugs the review found, plus a real algorithmic fix to the ternary
+type rule (least common ancestor, not a bidirectional subtype check). Every fix below
+is cross-referenced to what was wrong before
 
 ---
 
@@ -12,28 +20,31 @@ flagged additions to `ast.rs`.
 | File | Change |
 |---|---|
 | `compiler/src/sema.rs` | New. Everything below. |
-| `compiler/src/ast.rs` | **Untouched.** An earlier draft of this plan added `Cell`-based annotation fields here for a codegen phase that doesn't exist yet — cut per `type_checker_design.md`'s "What downstream phases get": `check_program` hands back the `ClassTable` instead, and nothing needs to be cached on the AST itself. |
+| `compiler/src/ast.rs` | **Untouched**, still. The typed-AST decision resurrects some of what an even earlier draft tried to do via `Cell` fields on `ast.rs` — but as a *separate* type family in `sema.rs`, not by mutating the parser's types. See design doc's "Alternate designs" for why those are two different objections and only one of them still applies. |
 | `compiler/src/main.rs` | Add `mod sema;` and wire `sema::check_program` after parsing. |
 
 ---
 
 ## Decisions resolved for this implementation
 
-These were open items in `type_checker_design.md`, or surfaced while writing this
-plan. Picking something concrete now so there's nothing left for an implementer to
-guess.
-
 | Item | Decision |
 |---|---|
-| `=`/`<`/`>` on class-typed operands (design's Open item #1) | **Not legal**, following LO-2 §3.1's literal "no other operand combination is legal." `(out = err)` is `E_BINOP_TYPE_MISMATCH` under this implementation. If course staff confirms reference equality was intended, this is a single extra match arm to add later (see `check_binop`) — not a structural change. |
-| Ternary result type for related-but-unequal class types (design's Open item #2) | Same bidirectional check as casts: if the branch types are equal, that's the result; if primitives, they must match exactly (no widening between primitives); if one class type is a subtype of the other, the result is the wider (supertype) one; otherwise `E_CONDITIONAL_TYPE_MISMATCH`. |
-| `null` as an expression's type | `check_expr` returns `ExprType`, not `ast::Type` directly — `ExprType::Concrete(Type)` or `ExprType::NullLiteral`. Every compatibility check (assignment, return, actual-argument, ternary) matches on this instead of comparing `Type` values directly, since `null` has no `Type` of its own but is compatible with any class type. |
-| **Gap found, not in `type_checker_design.md`:** no published code for *"first statement of an inheriting class's constructor is neither `super(...)` nor `this(...)`"* (LO-4 §4.1) | Filed under `E_INHERITANCE_CHECK_OTHER` for now, alongside the already-known `E_BREAK_OUTSIDE_LOOP` gap — both go on the same course-staff reconciliation list. |
-| Implicit-constructor synthesis | Done once, in `gather_declarations` (Pass 1): if `class_decl.constructors.is_empty()` and `class_decl.extends.is_none()`, synthesize one `ConstructorSig { arity: own_fields.len(), params: own_fields' types, .. }` directly into `ClassInfo.own_constructors`. (If `extends.is_some()` and `constructors.is_empty()`, that's `E_MISSING_CONSTRUCTOR_IN_INHERITING_CLASS` instead — never synthesized.) Body-checking in Pass 4 only ever walks *explicit* `ConstructorDecl`s, since an implicit constructor has no body AST to check — its correctness is definitional (`this.f = f` for each same-named, same-typed formal). |
-| Constructor delegation arity failures use `E_DELEGATION_ARITY_MISMATCH`, never the general `E_ARITY_MISMATCH` | The vocabulary's own text for `E_ARITY_MISMATCH` explicitly lists `super(...)`/`this(...)` alongside ordinary calls and `new` — the two codes genuinely overlap for the delegation case (this was missed in the design doc's first pass; now in its Open items). This implementation resolves the overlap by always preferring the more specific code for a delegation failure, matching how every other narrower/general pair in the vocabulary (e.g. the `..._OTHER` sentinels) is meant to be read. |
-| `ConstructorSig` carries `this_target_arity: Option<usize>` | A **correction**, not the original plan: an earlier draft had `check_delegation`'s cycle detector call a helper fed `&ClassTable`, while claiming in prose that the helper "needs the raw `ClassDecl`" — those two statements contradict each other, and as drafted the helper had no way to actually work. Fixed by capturing each constructor's `this(...)` target arity (if any) directly in `ConstructorSig` during Pass 1, so Pass 4's cycle check reads it straight off `ClassTable` with no second data source needed. |
-| `ClassTable` carries an explicit `order: Vec<String>` (source declaration order) | `resolve_inheritance` originally iterated `table.classes.keys()` — a `HashMap`, unordered. For a program with more than one independent violation, that made *which* error/code came back nondeterministic across runs, which is a real problem when the whole grading strategy is fail-fast + substring-matching a specific code. `gather_declarations` already sees classes in source order (`&program.classes`, a `Vec`); it now also records that order for `resolve_inheritance` to reuse, matching the ordering `gather_declarations`/`check_bodies` already had for free. |
-| Reserved-name checks moved earlier where needed | Two related fixes to what an earlier draft got backwards or skipped entirely — see the `gather_declarations` and `Scope::build` code below and the inline comments on each. |
+| Typed AST vs. `Checked(Program)` | **Reversed from the previous draft** — see design doc. `check_program(Program) -> Result<(TypedProgram, ClassTable), TypeError>`. |
+| Preamble injection: inside or outside `check_program` | **Reversed from the previous draft's design doc** (the implementation already did this; the design doc said otherwise, and that inconsistency itself was one of the review comments). Settled: inside. There is exactly one way to obtain a `TypedProgram`, and it always includes the preamble. |
+| Ternary result type | **Corrected, not just resolved.** Least common ancestor over the precomputed ancestor chains, not a bidirectional `is_subtype` check. The old check was a confirmed bug: `Cat`/`Dog` siblings under `Animal` would incorrectly fail with `E_CONDITIONAL_TYPE_MISMATCH` instead of resolving to `Animal`. See `least_common_ancestor` below. |
+| Cast applied to `null` | **Fixed — confirmed bug.** §4.4.4 says this always succeeds, typed as the target, no runtime check. The previous draft's pattern match on `ExprType::Concrete(Type::Class(_))` for cast sources rejected `NullLiteral` outright. Now accepted, classified `CastDirection::Upcast` (see design doc for why that's the right direction to report for a null source). |
+| `instanceof` with a `null` source | **Fixed — confirmed bug.** §4.3.6 says this is legal, always `false` at runtime. Same missing-`NullLiteral`-arm bug as the cast case. |
+| `E_VOID_CALL_IN_EXPRESSION` | **Fixed — a claimed check that was never actually implemented.** The design doc's Algorithm 9 always described both directions of the void/non-void duality as checked at their respective call sites; the code only ever implemented the statement side (`E_NONVOID_CALL_AS_STATEMENT`). `check_expr`'s `Expr::Call` handling now checks the other direction explicitly. |
+| Return-path completeness | **Corrected.** Rule is "does *any* statement in the sequence definitely return," not "does the *last* one." See `definitely_returns` below — this was a real algorithmic error, not a style choice, per course lecture material. |
+| Local variable declared types | **Fixed — confirmed gap.** `Scope::build` never validated a local's declared type at all — an unknown class (`Foo x;` for nonexistent `Foo`) or `void` (`void x;`) both passed silently. `Scope::build` now takes `&ClassTable` and runs the same `check_type_reference` Pass 2a uses, plus rejects `Type::Void` before inserting a name. `E_LOCAL_TYPED_VOID` is invented (see design doc Notes) since no dedicated code exists. |
+| Duplicate formal parameter names | **Fixed — confirmed gap, and a real correctness bug, not just a missing diagnostic.** Formals were inserted into `Scope`'s `HashMap` by name with no duplicate check; `void foo(int x, int x)` silently kept only the second `x`'s binding. Fixed in Pass 1 (`gather_declarations`), consolidated into one `check_formals_well_formed` helper shared by method and constructor parameter lists — Pass 1 already walks every parameter list once for void/reserved-name checks, so the duplicate check belongs there, not in a second walk in `Scope::build`. `E_DUPLICATE_FORMAL` is invented (matches a gap `parser_design.md` independently flagged). |
+| Empty explicit constructor bodies | **Fixed — confirmed gap.** LO-3 §3.3.4: a constructor body with no delegation and no statements is a compile error, even though the grammar's `(Stmt)*` permits it syntactically. Checked once per explicit constructor in `check_bodies`, filed under `E_WELL_FORMEDNESS_OTHER` (no dedicated code exists). |
+| `new Input()` / `new Output()` | **Fixed — confirmed gap.** §4.6: only the synthesized wrapper instantiates the preamble classes. Every declared class now carries a `ClassKind` (`User`/`Preamble`); `Expr::New` rejects a `Preamble`-kind target, filed under `E_TYPE_CHECK_OTHER`. |
+| `extends Input`/`extends Output` | **Fixed — confirmed gap.** Checked in `resolve_inheritance` alongside the existing extends-target-resolves check, filed under `E_INHERITANCE_CHECK_OTHER`. |
+| `extends Main` | **Fixed — confirmed gap.** The prior draft only checked that *Main itself* has no `extends` clause (`E_MAIN_CLASS_EXTENDS`); §3.4.6 states the rule in both directions — nothing may extend Main either. Checked in the same place as the Preamble-extends check, filed under `E_ENTRY_POINT_OTHER` since it's about protecting Main's role specifically. |
+| `super.method(...)` inside a constructor body | **Fixed — confirmed gap.** §4.1 introduces `super.method(...)` specifically as a method-body form; constructor-body delegation has its own dedicated form, `super(...)` (no dot). Nothing in the grammar stops a constructor's own statement list from containing an ordinary `MethodCall` with `Receiver::Super`, so this needed an explicit `ctx.in_constructor` check inside `resolve_receiver`'s `Super` arm — it does not fall out of anything else. Filed under `E_INHERITANCE_CHECK_OTHER`. |
+| Pass structure vs. the vocabulary's own §5 phase taxonomy | **Considered, not adopted** — see design doc Open item 6 for the full reasoning (data-dependency order vs. error-kind categorization genuinely don't coincide). The rule-mapping table in the design doc is the cross-reference the suggestion was really asking for. |
+| Struct field ordering (`line` last) | Minor, but fixed: `ConstructorSig` had `line` in the middle; every `ast.rs` struct puts `line` last, and this document's own structs now match. |
 
 ---
 
@@ -43,7 +54,7 @@ guess.
 
 ```rust
 use crate::ast::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeError {
@@ -65,13 +76,15 @@ pub enum ErrorCode {
     EReservedClassName,
     EDuplicateField,
     EDuplicateMethod,
+    EDuplicateFormal,        // invented — see design doc Notes
     EDuplicateConstructorArity,
     EFieldTypedVoid,
     EFormalTypedVoid,
+    ELocalTypedVoid,         // invented — see design doc Notes
     EReturnInVoidMethod,
     EReturnMissing,
     EReturnInConstructor,
-    EBreakOutsideLoop,     // not in the published vocabulary — see design doc Open items
+    EBreakOutsideLoop,       // invented — see design doc Notes
     EWellFormednessOther,
     // name resolution
     EUnknownVariable,
@@ -128,9 +141,11 @@ impl ErrorCode {
             EReservedClassName => "E_RESERVED_CLASS_NAME",
             EDuplicateField => "E_DUPLICATE_FIELD",
             EDuplicateMethod => "E_DUPLICATE_METHOD",
+            EDuplicateFormal => "E_DUPLICATE_FORMAL",
             EDuplicateConstructorArity => "E_DUPLICATE_CONSTRUCTOR_ARITY",
             EFieldTypedVoid => "E_FIELD_TYPED_VOID",
             EFormalTypedVoid => "E_FORMAL_TYPED_VOID",
+            ELocalTypedVoid => "E_LOCAL_TYPED_VOID",
             EReturnInVoidMethod => "E_RETURN_IN_VOID_METHOD",
             EReturnMissing => "E_RETURN_MISSING",
             EReturnInConstructor => "E_RETURN_IN_CONSTRUCTOR",
@@ -180,9 +195,10 @@ impl ErrorCode {
     }
 }
 
-/// The internal type of a checked expression. Distinct from `ast::Type` because
-/// `null` has no declared type of its own but is compatible with any class type —
-/// see "Decisions resolved for this implementation."
+/// Internal comparison currency during checking — never part of the typed AST
+/// itself. `null` has no `Type` of its own but is compatible with any class type;
+/// every compatibility check (assignment, return, actual-argument, ternary) matches
+/// on this instead of comparing `Type` values directly.
 #[derive(Debug, Clone, PartialEq)]
 enum ExprType {
     Concrete(Type),
@@ -190,32 +206,163 @@ enum ExprType {
 }
 ```
 
+### The typed AST
+
+New this revision, replacing the previous draft's `Checked(Program)` entirely — see
+design doc for the full rationale. Every field here is non-optional by construction:
+a node only exists in this tree once whatever it represents has already been fully
+checked.
+
+```rust
+pub struct TypedProgram {
+    pub classes: Vec<TypedClassDecl>,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ClassKind { User, Preamble }
+
+pub struct TypedClassDecl {
+    pub name: String,
+    pub kind: ClassKind,
+    pub extends: Option<String>,
+    pub fields: Vec<Param>,
+    pub constructors: Vec<TypedConstructor>,
+    pub methods: Vec<TypedMethodDecl>,
+}
+
+pub enum TypedConstructor {
+    Explicit {
+        params: Vec<Param>,
+        delegation: Option<TypedDelegation>,
+        locals: Vec<(String, Type)>,
+        stmts: Vec<TypedStmt>,
+    },
+    Implicit {
+        fields: Vec<(String, Type)>, // this.field_i = formal_i, in field order
+    },
+}
+
+pub enum TypedDelegation {
+    This { args: Vec<TypedExpr> },
+    Super { args: Vec<TypedExpr> },
+}
+
+pub struct TypedMethodDecl {
+    pub name: String,
+    pub return_type: Type,
+    pub params: Vec<Param>,
+    pub body: TypedMethodBody,
+}
+
+pub enum TypedMethodBody {
+    UserDefined { locals: Vec<(String, Type)>, stmts: Vec<TypedStmt> },
+    Io(IoOp),
+}
+
+#[derive(Clone)]
+pub enum BindingInfo {
+    Local(Type),
+    Formal(Type),
+    Field { owner: String, ty: Type },
+}
+
+impl BindingInfo {
+    pub fn ty(&self) -> &Type {
+        match self {
+            BindingInfo::Local(t) | BindingInfo::Formal(t) => t,
+            BindingInfo::Field { ty, .. } => ty,
+        }
+    }
+}
+
+pub enum TypedStmt {
+    Assign { target: String, binding: BindingInfo, value: TypedExpr },
+    Return(TypedExpr),
+    If(TypedExpr, Vec<TypedStmt>, Vec<TypedStmt>),
+    While(TypedExpr, Vec<TypedStmt>),
+    Break,
+    Empty,
+    CallStmt(TypedMethodCall),
+}
+
+pub struct TypedMethodCall {
+    pub receiver: TypedReceiver,
+    pub name: String,
+    pub owner: String,           // the class whose effective_methods entry resolved this
+    pub args: Vec<TypedExpr>,
+    pub return_type: Type,
+}
+
+pub enum TypedReceiver {
+    This(String),                              // enclosing class name
+    Super,                                     // owner lives on the enclosing TypedMethodCall
+    Var { name: String, binding: BindingInfo },
+    Computed(Box<TypedExpr>),
+}
+
+pub enum TypedExpr {
+    Num(i32),
+    Bool(bool),
+    Str(String),
+    Null,                                       // deliberately no Type — see design doc
+    This(String),
+    Var { name: String, binding: BindingInfo },
+    New { class: String, args: Vec<TypedExpr> },
+    Call(TypedMethodCall),
+    Ternary { cond: Box<TypedExpr>, then_branch: Box<TypedExpr>, else_branch: Box<TypedExpr>, ty: Type },
+    Binary { lhs: Box<TypedExpr>, op: BinaryOp, rhs: Box<TypedExpr>, ty: Type },
+    Unary { op: UnaryOp, operand: Box<TypedExpr>, ty: Type },
+    Cast { target: Type, operand: Box<TypedExpr>, direction: CastDirection },
+    InstanceOf { operand: Box<TypedExpr>, class: String },
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum CastDirection { Upcast, Downcast }
+
+/// The type of a checked `TypedExpr`, as `ExprType` (never `Option`-wrapped on the
+/// node itself — this is purely a read-back helper for compatibility checks).
+fn typed_of(e: &TypedExpr) -> ExprType {
+    match e {
+        TypedExpr::Null => ExprType::NullLiteral,
+        TypedExpr::Num(_) => ExprType::Concrete(Type::Int),
+        TypedExpr::Bool(_) => ExprType::Concrete(Type::Bool),
+        TypedExpr::Str(_) => ExprType::Concrete(Type::String),
+        TypedExpr::This(c) => ExprType::Concrete(Type::Class(c.clone())),
+        TypedExpr::Var { binding, .. } => ExprType::Concrete(binding.ty().clone()),
+        TypedExpr::New { class, .. } => ExprType::Concrete(Type::Class(class.clone())),
+        TypedExpr::Call(call) => ExprType::Concrete(call.return_type.clone()),
+        TypedExpr::Ternary { ty, .. }
+        | TypedExpr::Binary { ty, .. }
+        | TypedExpr::Unary { ty, .. } => ExprType::Concrete(ty.clone()),
+        TypedExpr::Cast { target, .. } => ExprType::Concrete(target.clone()),
+        TypedExpr::InstanceOf { .. } => ExprType::Concrete(Type::Bool),
+    }
+}
+```
+
 ### Class table
 
-Fields and methods below are `pub` (`pub(crate)` at minimum) even though nothing in
-*this* implementation plan needs them to be — `check_program` hands `ClassTable` back
-to the caller precisely so a future codegen implementation can call these same
-lookups instead of rebuilding its own, and a private struct full of private methods
-couldn't actually be reused by another module. The exact public surface is provisional
-and codegen's own implementation plan can narrow or extend it once it exists; the
-point for now is just that "reuse this instead of re-deriving it" is actually possible.
+`ClassTable`'s useful surface stays `pub` so a future codegen phase can reuse
+`is_subtype`, `least_common_ancestor`-shaped lookups, and `effective_methods` for
+vtable slot assignment, without re-deriving them from scratch.
 
 ```rust
 pub struct ClassTable {
     classes: HashMap<String, ClassInfo>,
-    order: Vec<String>, // source declaration order — see "Decisions resolved"
+    order: Vec<String>, // source declaration order
 }
 
 pub struct ClassInfo {
     pub decl_line: u32,
+    pub kind: ClassKind,
     pub parent: Option<String>,
-    own_fields: Vec<(String, Type, u32)>,        // (name, type, decl line)
+    own_fields: Vec<(String, Type, u32)>,
     own_methods: Vec<MethodSig>,
     own_constructors: Vec<ConstructorSig>,
 
-    pub ancestors: Vec<String>,                       // filled by resolve_inheritance; does NOT include self, root-terminated
+    pub ancestors: Vec<String>,                       // does NOT include self, root-terminated
     pub effective_fields: Vec<(String, Type, String)>, // (name, type, owner), parent-first
-    pub effective_methods: HashMap<String, (String, MethodSig)>, // name -> (owner, sig)
+    pub effective_methods: HashMap<String, (String, MethodSig)>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -230,15 +377,10 @@ pub struct MethodSig {
 struct ConstructorSig {
     arity: usize,
     params: Vec<Type>,
-    line: u32,
-    /// `Some(target_arity)` iff this constructor's own delegation is `this(...)`
-    /// targeting a constructor of `target_arity` in the same class. `None` for
-    /// `super(...)`, no delegation at all, or a `this(...)` whose target doesn't
-    /// exist (that failure is reported separately, by arity lookup, not by this
-    /// field being absent). Exists purely so delegation-cycle detection (Pass 4)
-    /// can read the whole class's `this(...)` graph straight off `ClassTable`,
-    /// with no second pass over the AST needed.
-    this_target_arity: Option<usize>,
+    this_target_arity: Option<usize>, // Some(n) iff this ctor's own delegation is
+                                       // this(...) targeting the n-arity constructor
+                                       // of the same class — see check_delegation_cycle.
+    line: u32,                        // last, matching every ast.rs struct's convention
 }
 
 impl ClassTable {
@@ -250,50 +392,48 @@ impl ClassTable {
         self.classes.contains_key(name)
     }
 
-    /// `a <: b` — is `a` `b` itself or a descendant of it, per the precomputed
-    /// ancestor chain. Never called with `Type::String` on either side (see design
-    /// doc's "Preconditions"); callers guard that before reaching here.
+    /// `a <: b` — is `a` `b` itself or a descendant of it. Never called with
+    /// `Type::String` on either side; callers guard that before reaching here.
     pub fn is_subtype(&self, a: &str, b: &str) -> bool {
         a == b || self.classes.get(a).is_some_and(|info| info.ancestors.iter().any(|anc| anc == b))
-    }
-
-    /// A cast is legal iff one side is a subtype of the other (either direction —
-    /// upcast or downcast). This checker only needs legality, not *which* direction:
-    /// whether the cast is a no-op (upcast) or needs a runtime `lo_cast_check`
-    /// (downcast) is a codegen concern, decided later by codegen re-running this same
-    /// `is_subtype` check on its own — see design doc, "What downstream phases get."
-    pub fn cast_is_legal(&self, target: &str, source: &str) -> bool {
-        self.is_subtype(source, target) || self.is_subtype(target, source)
     }
 }
 ```
 
-`ConstructorSig`/`own_fields`/`own_methods`/`own_constructors` stay private: they're
-Pass-1-internal representations (arity/param lists without names, `this_target_arity`
-existing purely for the cycle check) that a consumer would want restated more usefully
-anyway — `effective_fields`/`effective_methods` are the actually-useful, already-merged
-view of a class, and those are the fields made `pub`.
-
-### Generic cycle detector (design doc, Algorithms §4)
+### Least common ancestor (design doc, Algorithms §7)
 
 ```rust
-/// DFS with a "currently on this path" set. `edges(node)` returns every node `node`
-/// points to. Returns the first back-edge found, as `(from, to)`, or `None` if
-/// acyclic. Used for both `extends` cycles and `this(...)` delegation cycles.
+/// `b`'s own chain, walked from `b` upward, is monotonically "more general" moving
+/// away from `b` — so the first class in that walk that also appears anywhere in
+/// `a`'s chain is the *closest* common ancestor, not just *a* common one. Correct
+/// because LO-4 inheritance is a forest of simple upward chains (single inheritance,
+/// no diamonds). `None` means `a` and `b` are in genuinely disjoint hierarchies.
+fn least_common_ancestor(a: &str, b: &str, table: &ClassTable) -> Option<String> {
+    let chain_a: HashSet<&str> = std::iter::once(a)
+        .chain(table.get(a)?.ancestors.iter().map(String::as_str))
+        .collect();
+    std::iter::once(b)
+        .chain(table.get(b)?.ancestors.iter().map(String::as_str))
+        .find(|c| chain_a.contains(c))
+        .map(String::from)
+}
+```
+
+### Generic cycle detector (unchanged from the previous draft — design doc, Algorithms §4)
+
+```rust
+/// DFS with a "currently on this path" set. Returns the first back-edge found, as
+/// `(from, to)`, or `None` if acyclic. Used for both `extends` cycles and `this(...)`
+/// delegation cycles.
 fn find_cycle<'a, N, F>(nodes: impl Iterator<Item = &'a N>, edges: F) -> Option<(N, N)>
 where
     N: Eq + std::hash::Hash + Clone + 'a,
     F: Fn(&N) -> Vec<N>,
 {
-    let mut visited: std::collections::HashSet<N> = std::collections::HashSet::new();
+    let mut visited: HashSet<N> = HashSet::new();
     let mut on_path: Vec<N> = Vec::new();
 
-    fn visit<N, F>(
-        node: &N,
-        edges: &F,
-        visited: &mut std::collections::HashSet<N>,
-        on_path: &mut Vec<N>,
-    ) -> Option<(N, N)>
+    fn visit<N, F>(node: &N, edges: &F, visited: &mut HashSet<N>, on_path: &mut Vec<N>) -> Option<(N, N)>
     where
         N: Eq + std::hash::Hash + Clone,
         F: Fn(&N) -> Vec<N>,
@@ -327,13 +467,17 @@ where
 
 ### Preamble injection
 
+Unchanged in mechanism from the previous draft — the change is that `check_program`
+now calls this itself (see "Entry point" below) rather than requiring a caller to
+remember to.
+
 ```rust
 /// Synthesizes `Input`/`Output` as ordinary `ClassDecl`s with `MethodBody::Io`
-/// bodies, and prepends them to `program.classes`. Called once, before
-/// `check_program`. Line `0` marks a synthesized declaration — never emitted by the
-/// parser, so it can't collide with a real diagnostic's line number in practice, but
-/// diagnostics about the preamble itself (there should never be any) would read `@0`.
-pub fn inject_preamble(program: &mut Program) {
+/// bodies, and prepends them to `program.classes`. Line `0` marks a synthesized
+/// declaration — never emitted by the parser (the lexer starts counting at line 1) —
+/// which `gather_declarations` uses both to exempt these two from the reserved-name
+/// check and to mark them `ClassKind::Preamble`.
+fn inject_preamble(program: &mut Program) {
     let io_method = |name: &str, return_type: Type, params: Vec<Param>, op: IoOp| MethodDecl {
         return_type,
         name: name.to_string(),
@@ -376,7 +520,7 @@ pub fn inject_preamble(program: &mut Program) {
 }
 
 /// The three pre-bound program-scope names. Checked as a final resolution tier,
-/// after locals/formals/fields all miss — see design doc, Algorithms §5.
+/// after locals/formals/fields all miss.
 fn preamble_binding(name: &str) -> Option<Type> {
     match name {
         "in" => Some(Type::Class("Input".to_string())),
@@ -400,19 +544,38 @@ fn check_not_reserved_var_name(name: &str, line: u32) -> Result<(), TypeError> {
     Ok(())
 }
 
-pub fn gather_declarations(program: &Program) -> Result<ClassTable, TypeError> {
+/// Shared by method and constructor parameter lists: no void-typed formal, no
+/// reserved name, no duplicate name within this one list. Consolidated into one
+/// helper (this revision) rather than two copy-pasted loops, which is also what
+/// let the missing duplicate-formal check (`E_DUPLICATE_FORMAL`, invented — see
+/// design doc Notes) get added in one place instead of two.
+fn check_formals_well_formed(params: &[Param]) -> Result<(), TypeError> {
+    let mut seen = HashSet::new();
+    for p in params {
+        if p.declared_type == Type::Void {
+            return Err(TypeError::new(ErrorCode::EFormalTypedVoid, p.line,
+                format!("formal '{}' cannot have type void", p.name)));
+        }
+        check_not_reserved_var_name(&p.name, p.line)?;
+        if !seen.insert(p.name.clone()) {
+            return Err(TypeError::new(ErrorCode::EDuplicateFormal, p.line,
+                format!("duplicate formal parameter '{}'", p.name)));
+        }
+    }
+    Ok(())
+}
+
+fn gather_declarations(program: &Program) -> Result<ClassTable, TypeError> {
     let mut classes = HashMap::new();
     let mut order = Vec::new();
 
     for class in &program.classes {
-        // Reserved-name check MUST run before the duplicate-name check below. Both
-        // Input and Output are already present in `classes` by the time any user
-        // class is visited here (inject_preamble always runs first), so a user's
-        // `class Input() {}` would otherwise collide with EDuplicateClassName before
-        // this arm is ever reached — the wrong code for what the vocabulary
-        // specifically calls out as E_RESERVED_CLASS_NAME. `class.line != 0` exempts
-        // the two synthesized classes themselves (see inject_preamble) — no real
-        // source line is ever 0, since the lexer starts counting at 1.
+        // Reserved-name check MUST run before the duplicate-name check: both Input
+        // and Output are already present in `classes` by the time any user class is
+        // visited (inject_preamble always runs first), so a user's `class Input(){}`
+        // would otherwise collide with EDuplicateClassName before this arm is ever
+        // reached — the wrong code for what the vocabulary specifically names
+        // E_RESERVED_CLASS_NAME.
         if RESERVED_CLASS_NAMES.contains(&class.name.as_str()) && class.line != 0 {
             return Err(TypeError::new(ErrorCode::EReservedClassName, class.line,
                 format!("class name '{}' is reserved", class.name)));
@@ -442,13 +605,7 @@ pub fn gather_declarations(program: &Program) -> Result<ClassTable, TypeError> {
                 return Err(TypeError::new(ErrorCode::EDuplicateMethod, method.line,
                     format!("duplicate method '{}'", method.name)));
             }
-            for p in &method.params {
-                if p.declared_type == Type::Void {
-                    return Err(TypeError::new(ErrorCode::EFormalTypedVoid, p.line,
-                        format!("formal '{}' cannot have type void", p.name)));
-                }
-                check_not_reserved_var_name(&p.name, p.line)?;
-            }
+            check_formals_well_formed(&method.params)?;
             own_methods.push(MethodSig {
                 name: method.name.clone(),
                 params: method.params.iter().map(|p| p.declared_type.clone()).collect(),
@@ -464,13 +621,7 @@ pub fn gather_declarations(program: &Program) -> Result<ClassTable, TypeError> {
                 return Err(TypeError::new(ErrorCode::EDuplicateConstructorArity, ctor.line,
                     format!("class '{}' already has a constructor of arity {}", class.name, arity)));
             }
-            for p in &ctor.params {
-                if p.declared_type == Type::Void {
-                    return Err(TypeError::new(ErrorCode::EFormalTypedVoid, p.line,
-                        format!("formal '{}' cannot have type void", p.name)));
-                }
-                check_not_reserved_var_name(&p.name, p.line)?;
-            }
+            check_formals_well_formed(&ctor.params)?;
             let this_target_arity = match &ctor.delegation {
                 Some(ConstructorDelegation::ThisCall(args, _)) => Some(args.len()),
                 _ => None,
@@ -478,28 +629,26 @@ pub fn gather_declarations(program: &Program) -> Result<ClassTable, TypeError> {
             own_constructors.push(ConstructorSig {
                 arity,
                 params: ctor.params.iter().map(|p| p.declared_type.clone()).collect(),
-                line: ctor.line,
                 this_target_arity,
+                line: ctor.line,
             });
         }
         // Implicit constructor: only for a root (non-extending) class with no
-        // explicit constructor section at all. An inheriting class with none is
-        // E_MISSING_CONSTRUCTOR_IN_INHERITING_CLASS, checked in resolve_inheritance
-        // once `extends` targets are known to resolve — deliberately not re-derived
-        // here from `class.extends.is_some()` alone, to keep "is this class's
-        // hierarchy well-formed at all" answered in one place.
+        // explicit constructor section. An inheriting class with none is
+        // E_MISSING_CONSTRUCTOR_IN_INHERITING_CLASS, checked in resolve_inheritance.
         if own_constructors.is_empty() && class.extends.is_none() {
             own_constructors.push(ConstructorSig {
                 arity: own_fields.len(),
                 params: own_fields.iter().map(|(_, t, _)| t.clone()).collect(),
-                line: class.line,
                 this_target_arity: None, // implicit constructors never delegate
+                line: class.line,
             });
         }
 
         order.push(class.name.clone());
         classes.insert(class.name.clone(), ClassInfo {
             decl_line: class.line,
+            kind: if class.line == 0 { ClassKind::Preamble } else { ClassKind::User },
             parent: class.extends.clone(),
             own_fields,
             own_methods,
@@ -516,18 +665,16 @@ pub fn gather_declarations(program: &Program) -> Result<ClassTable, TypeError> {
 
 Locals aren't reachable from `gather_declarations` at all — `BodyScope` lives inside
 `MethodDecl.body`/`ConstructorDecl.body`, which this pass never opens. Their
-reserved-name check happens in `Scope::build` (Pass 4) instead — see below.
+reserved-name, void, and type-reference checks all happen in `Scope::build` (Pass 4)
+instead — see below.
 
 ### Pass 2 — `resolve_inheritance`
 
 ```rust
-pub fn resolve_inheritance(table: &mut ClassTable) -> Result<(), TypeError> {
-    // 2a: every type reference (extends target, field/formal/return types) resolves.
+fn resolve_inheritance(table: &mut ClassTable) -> Result<(), TypeError> {
     // Iterates `table.order` (source declaration order), NOT `table.classes.keys()`
     // — a `HashMap`'s key order is unspecified, which would make *which* error comes
     // back nondeterministic across runs for a program with more than one violation.
-    // `gather_declarations` already had this order for free; `resolve_inheritance`
-    // just reuses it instead of re-deriving something weaker from the map.
     let names: Vec<String> = table.order.clone();
     for name in &names {
         let info = table.classes.get(name).unwrap();
@@ -536,10 +683,18 @@ pub fn resolve_inheritance(table: &mut ClassTable) -> Result<(), TypeError> {
                 return Err(TypeError::new(ErrorCode::EUnknownClass, info.decl_line,
                     format!("class '{}' extends unknown class '{}'", name, parent)));
             }
+            // Nothing may extend Main (§3.4.6) or a non-extensible preamble class
+            // (§4.6) — both gaps found in review, neither checked before this pass.
+            if parent == "Main" {
+                return Err(TypeError::new(ErrorCode::EEntryPointOther, info.decl_line,
+                    format!("class '{}' may not extend 'Main'", name)));
+            }
+            if table.classes[parent].kind == ClassKind::Preamble {
+                return Err(TypeError::new(ErrorCode::EInheritanceCheckOther, info.decl_line,
+                    format!("class '{}' may not extend the non-extensible class '{}'", name, parent)));
+            }
         }
         if info.parent.is_some() && info.own_constructors.is_empty() {
-            // Can only be empty here if it was never synthesized (extends.is_some())
-            // — see gather_declarations.
             return Err(TypeError::new(ErrorCode::EMissingConstructorInInheritingClass,
                 info.decl_line,
                 format!("class '{}' extends a parent but declares no constructor", name)));
@@ -556,7 +711,6 @@ pub fn resolve_inheritance(table: &mut ClassTable) -> Result<(), TypeError> {
         }
     }
 
-    // 2b: no extends cycle.
     if let Some((from, _to)) = find_cycle(names.iter(), |n| {
         table.classes.get(n).and_then(|i| i.parent.clone()).into_iter().collect()
     }) {
@@ -565,8 +719,7 @@ pub fn resolve_inheritance(table: &mut ClassTable) -> Result<(), TypeError> {
             format!("inheritance cycle involving class '{}'", from)));
     }
 
-    // 2c: effective fields/methods, parent-first, memoized post-order over the forest.
-    let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut done: HashSet<String> = HashSet::new();
     for name in &names {
         compute_effective(name, table, &mut done)?;
     }
@@ -584,17 +737,13 @@ fn check_type_reference(ty: &Type, table: &ClassTable, line: u32, ctx: &str) -> 
     Ok(())
 }
 
-fn compute_effective(
-    name: &str,
-    table: &mut ClassTable,
-    done: &mut std::collections::HashSet<String>,
-) -> Result<(), TypeError> {
+fn compute_effective(name: &str, table: &mut ClassTable, done: &mut HashSet<String>) -> Result<(), TypeError> {
     if done.contains(name) {
         return Ok(());
     }
     let parent = table.classes[name].parent.clone();
 
-    let (mut ancestors, mut effective_fields, mut effective_methods) = match &parent {
+    let (ancestors, mut effective_fields, mut effective_methods) = match &parent {
         None => (vec![], vec![], HashMap::new()),
         Some(p) => {
             compute_effective(p, table, done)?;
@@ -616,18 +765,17 @@ fn compute_effective(
     }
 
     for m in &info.own_methods {
-        match effective_methods.get(&m.name) {
-            Some((_, existing)) if existing.params != m.params || existing.return_type != m.return_type => {
+        if let Some((_, existing)) = effective_methods.get(&m.name) {
+            if existing.params != m.params || existing.return_type != m.return_type {
                 return Err(TypeError::new(ErrorCode::EOverrideSignatureMismatch, m.line,
                     format!("'{}' overrides an ancestor method with a different signature", m.name)));
             }
-            _ => {}
         }
         effective_methods.insert(m.name.clone(), (name.to_string(), m.clone()));
     }
 
     let info = table.classes.get_mut(name).unwrap();
-    info.ancestors = ancestors.clone();
+    info.ancestors = ancestors;
     info.effective_fields = effective_fields;
     info.effective_methods = effective_methods;
     done.insert(name.to_string());
@@ -635,17 +783,12 @@ fn compute_effective(
 }
 ```
 
-Note the borrow-checker-driven shape: `compute_effective` reads the parent's already-
-computed data by *cloning* it into locals before taking a fresh mutable borrow of the
-child's slot — Rust won't allow holding an immutable borrow of `table.classes[parent]`
-across the recursive call that also needs `&mut table`. This is the natural
-consequence of "memoized clone-then-extend" (design doc, Algorithms §1) rather than a
-workaround for it — the clone was already the intended operation, not incidental.
-
 ### Pass 3 — `check_entry_point`
 
+Unchanged from the previous draft.
+
 ```rust
-pub fn check_entry_point(table: &ClassTable) -> Result<(), TypeError> {
+fn check_entry_point(table: &ClassTable) -> Result<(), TypeError> {
     let main = table.get("Main").ok_or_else(|| {
         TypeError::new(ErrorCode::ENoMainClass, 0, "no class named 'Main' declared")
     })?;
@@ -674,18 +817,23 @@ pub fn check_entry_point(table: &ClassTable) -> Result<(), TypeError> {
 }
 ```
 
-### `Scope` and name resolution (design doc, Algorithms §5)
+### `Scope` and name resolution
 
 ```rust
 struct Scope {
     bindings: HashMap<String, Type>,
-    formal_names: std::collections::HashSet<String>,
+    formal_names: HashSet<String>,
 }
 
 impl Scope {
-    fn build(params: &[Param], locals: &[VarDecl]) -> Result<Scope, TypeError> {
+    /// Now takes `&ClassTable` — a confirmed gap in the previous draft, which
+    /// inserted `decl.declared_type` straight into the map with no validation at
+    /// all, so an unknown class (`Foo x;`, `Foo` never declared) or `void` (`void
+    /// x;`) both passed silently. Duplicate FORMAL names are Pass 1's job
+    /// (`check_formals_well_formed`), not rechecked here.
+    fn build(params: &[Param], locals: &[VarDecl], table: &ClassTable) -> Result<Scope, TypeError> {
         let mut bindings = HashMap::new();
-        let mut formal_names = std::collections::HashSet::new();
+        let mut formal_names = HashSet::new();
         for p in params {
             bindings.insert(p.name.clone(), p.declared_type.clone());
             formal_names.insert(p.name.clone());
@@ -694,6 +842,11 @@ impl Scope {
         // E_DUPLICATE_LOCAL) and each VarDecl may name several identifiers sharing
         // one type ("int a, b;") — flatten per name.
         for decl in locals {
+            if decl.declared_type == Type::Void {
+                return Err(TypeError::new(ErrorCode::ELocalTypedVoid, decl.line,
+                    "a local variable cannot have type void"));
+            }
+            check_type_reference(&decl.declared_type, table, decl.line, "local declaration")?;
             for name in &decl.names {
                 check_not_reserved_var_name(name, decl.line)?;
                 if formal_names.contains(name) {
@@ -707,25 +860,29 @@ impl Scope {
     }
 }
 
-/// Locals/formals → fields → `in`/`out`/`err`, first match wins (design doc,
-/// Algorithms §5). Returns only the resolved `Type` — nothing needs to know *which*
-/// tier resolved it; a future codegen pass that does care can ask `scope` and
-/// `table.get(class_name)` the same two questions itself when it gets there.
-fn resolve_name(name: &str, scope: &Scope, class_name: &str, table: &ClassTable) -> Option<Type> {
+/// Locals/formals → fields → `in`/`out`/`err`, first match wins. Returns
+/// `BindingInfo` (type *and* kind — this revision's change) so callers can put the
+/// binding kind directly on the typed node without a second lookup.
+fn resolve_name(name: &str, scope: &Scope, class_name: &str, table: &ClassTable) -> Option<BindingInfo> {
     if let Some(t) = scope.bindings.get(name) {
-        return Some(t.clone());
+        return Some(if scope.formal_names.contains(name) {
+            BindingInfo::Formal(t.clone())
+        } else {
+            BindingInfo::Local(t.clone())
+        });
     }
     let info = table.get(class_name)?;
-    if let Some((_, t, _)) = info.effective_fields.iter().find(|(n, ..)| n == name) {
-        return Some(t.clone());
+    if let Some((_, t, owner)) = info.effective_fields.iter().find(|(n, ..)| n == name) {
+        return Some(BindingInfo::Field { owner: owner.clone(), ty: t.clone() });
     }
-    preamble_binding(name)
+    preamble_binding(name).map(|t| BindingInfo::Field { owner: "<preamble>".to_string(), ty: t })
 }
 ```
 
 ### Pass 4 — body checking
 
 ```rust
+#[derive(Clone, Copy)]
 struct BodyCtx<'a> {
     class_name: &'a str,
     return_type: &'a Type,
@@ -733,51 +890,112 @@ struct BodyCtx<'a> {
     in_constructor: bool,
 }
 
-pub fn check_bodies(program: &Program, table: &ClassTable) -> Result<(), TypeError> {
+fn check_bodies(program: &Program, table: &ClassTable) -> Result<TypedProgram, TypeError> {
+    let mut typed_classes = Vec::with_capacity(program.classes.len());
+
     for class in &program.classes {
+        let info = table.get(&class.name).unwrap();
+
+        let mut typed_methods = Vec::with_capacity(class.methods.len());
         for method in &class.methods {
             let body = match &method.body {
+                MethodBody::Io(op) => {
+                    typed_methods.push(TypedMethodDecl {
+                        name: method.name.clone(),
+                        return_type: method.return_type.clone(),
+                        params: method.params.clone(),
+                        body: TypedMethodBody::Io(op.clone()),
+                    });
+                    continue;
+                }
                 MethodBody::UserDefined(b) => b,
-                MethodBody::Io(_) => continue, // preamble methods have no body to check
             };
-            let scope = Scope::build(&method.params, &body.locals)?;
-            let ctx = BodyCtx {
-                class_name: &class.name,
-                return_type: &method.return_type,
-                in_loop: false,
-                in_constructor: false,
-            };
+            let scope = Scope::build(&method.params, &body.locals, table)?;
+            let ctx = BodyCtx { class_name: &class.name, return_type: &method.return_type, in_loop: false, in_constructor: false };
+            let mut typed_stmts = Vec::with_capacity(body.stmts.len());
             for stmt in &body.stmts {
-                check_stmt(stmt, &scope, &ctx, table)?;
+                typed_stmts.push(check_stmt(stmt, &scope, &ctx, table)?);
             }
             if method.return_type != Type::Void && !definitely_returns(&body.stmts) {
                 return Err(TypeError::new(ErrorCode::EReturnMissing, method.line,
                     format!("'{}' does not return on every path", method.name)));
             }
+            typed_methods.push(TypedMethodDecl {
+                name: method.name.clone(),
+                return_type: method.return_type.clone(),
+                params: method.params.clone(),
+                body: TypedMethodBody::UserDefined { locals: flatten_locals(&body.locals), stmts: typed_stmts },
+            });
         }
 
-        check_delegation_cycle(&class.name, table)?; // once per class, not once per constructor
-        for ctor in &class.constructors {
-            let scope = Scope::build(&ctor.params, &ctor.body.locals)?;
-            check_delegation(ctor, &class.name, &scope, table)?;
-            let ctx = BodyCtx {
-                class_name: &class.name,
-                return_type: &Type::Void, // unused: constructors can't `return <Expr>;`
-                in_loop: false,
-                in_constructor: true,
-            };
-            for stmt in &ctor.body.stmts {
-                check_stmt(stmt, &scope, &ctx, table)?;
+        let typed_constructors = if class.constructors.is_empty() {
+            // Only reachable when extends.is_none() — resolve_inheritance already
+            // rejected an inheriting class with no explicit constructor section.
+            // Synthesizing the full field-assignment form here (this revision),
+            // not just a bare signature, so the interpreter/codegen don't have to
+            // separately "know" what an implicit constructor does.
+            let fields = info.own_fields.iter().map(|(n, t, _)| (n.clone(), t.clone())).collect();
+            vec![TypedConstructor::Implicit { fields }]
+        } else {
+            check_delegation_cycle(&class.name, table)?; // once per class
+            let mut typed_ctors = Vec::with_capacity(class.constructors.len());
+            for ctor in &class.constructors {
+                // LO-3 §3.3.4: a constructor with no delegation and no statements is
+                // a compile error, even though the grammar's (Stmt)* permits it
+                // syntactically. Confirmed gap — nothing checked this before.
+                if ctor.delegation.is_none() && ctor.body.stmts.is_empty() {
+                    return Err(TypeError::new(ErrorCode::EWellFormednessOther, ctor.line,
+                        "constructor body must contain a delegation or at least one statement"));
+                }
+                let scope = Scope::build(&ctor.params, &ctor.body.locals, table)?;
+                let typed_delegation = check_delegation(ctor, &class.name, &scope, table)?;
+                let ctx = BodyCtx { class_name: &class.name, return_type: &Type::Void, in_loop: false, in_constructor: true };
+                let mut typed_stmts = Vec::with_capacity(ctor.body.stmts.len());
+                for stmt in &ctor.body.stmts {
+                    typed_stmts.push(check_stmt(stmt, &scope, &ctx, table)?);
+                }
+                typed_ctors.push(TypedConstructor::Explicit {
+                    params: ctor.params.clone(),
+                    delegation: typed_delegation,
+                    locals: flatten_locals(&ctor.body.locals),
+                    stmts: typed_stmts,
+                });
             }
-        }
+            typed_ctors
+        };
+
+        typed_classes.push(TypedClassDecl {
+            name: class.name.clone(),
+            kind: info.kind,
+            extends: class.extends.clone(),
+            fields: class.fields.clone(),
+            constructors: typed_constructors,
+            methods: typed_methods,
+        });
     }
-    Ok(())
+
+    Ok(TypedProgram { classes: typed_classes })
 }
 
+fn flatten_locals(locals: &[VarDecl]) -> Vec<(String, Type)> {
+    locals.iter()
+        .flat_map(|d| d.names.iter().map(move |n| (n.clone(), d.declared_type.clone())))
+        .collect()
+}
+
+/// **Corrected this revision.** The rule is "does *any* statement in the sequence
+/// definitely return," not "does the *last* one" — per course lecture material, an
+/// unconditional return followed by (unreachable) further statements still makes the
+/// enclosing sequence return. The previous draft only checked `stmts.last()`.
 fn definitely_returns(stmts: &[Stmt]) -> bool {
-    match stmts.last() {
-        Some(Stmt::Return(..)) => true,
-        Some(Stmt::If(_, then_b, else_b, _)) => definitely_returns(then_b) && definitely_returns(else_b),
+    stmts.iter().any(stmt_returns)
+}
+
+fn stmt_returns(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(..) => true,
+        Stmt::If(_, then_b, else_b, _) => definitely_returns(then_b) && definitely_returns(else_b),
+        Stmt::While(..) => false, // can't prove the loop body runs at all
         _ => false,
     }
 }
@@ -786,20 +1004,20 @@ fn definitely_returns(stmts: &[Stmt]) -> bool {
 ### Statement checking
 
 ```rust
-fn check_stmt(stmt: &Stmt, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> Result<(), TypeError> {
-    match stmt {
-        Stmt::Empty(_) => Ok(()),
+fn check_stmt(stmt: &Stmt, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> Result<TypedStmt, TypeError> {
+    Ok(match stmt {
+        Stmt::Empty(_) => TypedStmt::Empty,
 
         Stmt::Assign(name, expr, line) => {
-            let target_ty = resolve_name(name, scope, ctx.class_name, table)
+            let binding = resolve_name(name, scope, ctx.class_name, table)
                 .ok_or_else(|| TypeError::new(ErrorCode::EUnknownVariable, *line,
                     format!("unknown variable '{}'", name)))?;
-            let value_ty = check_expr(expr, scope, ctx, table)?;
-            if !assignment_compatible(&value_ty, &target_ty, table) {
+            let typed_value = check_expr(expr, scope, ctx, table)?;
+            if !assignment_compatible(&typed_of(&typed_value), binding.ty(), table) {
                 return Err(TypeError::new(ErrorCode::EAssignTypeMismatch, *line,
                     format!("cannot assign to '{}'", name)));
             }
-            Ok(())
+            TypedStmt::Assign { target: name.clone(), binding, value: typed_value }
         }
 
         Stmt::Return(expr, line) => {
@@ -811,26 +1029,26 @@ fn check_stmt(stmt: &Stmt, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> 
                 return Err(TypeError::new(ErrorCode::EReturnInVoidMethod, *line,
                     "a void method may not contain a return statement"));
             }
-            let value_ty = check_expr(expr, scope, ctx, table)?;
-            if !assignment_compatible(&value_ty, ctx.return_type, table) {
+            let typed_value = check_expr(expr, scope, ctx, table)?;
+            if !assignment_compatible(&typed_of(&typed_value), ctx.return_type, table) {
                 return Err(TypeError::new(ErrorCode::EReturnTypeMismatch, *line,
                     "returned expression's type does not match the declared return type"));
             }
-            Ok(())
+            TypedStmt::Return(typed_value)
         }
 
         Stmt::If(cond, then_b, else_b, line) => {
-            expect_bool(cond, scope, ctx, table, *line)?;
-            for s in then_b { check_stmt(s, scope, ctx, table)?; }
-            for s in else_b { check_stmt(s, scope, ctx, table)?; }
-            Ok(())
+            let typed_cond = expect_bool(cond, scope, ctx, table, *line)?;
+            let typed_then = then_b.iter().map(|s| check_stmt(s, scope, ctx, table)).collect::<Result<_, _>>()?;
+            let typed_else = else_b.iter().map(|s| check_stmt(s, scope, ctx, table)).collect::<Result<_, _>>()?;
+            TypedStmt::If(typed_cond, typed_then, typed_else)
         }
 
         Stmt::While(cond, body, line) => {
-            expect_bool(cond, scope, ctx, table, *line)?;
+            let typed_cond = expect_bool(cond, scope, ctx, table, *line)?;
             let inner_ctx = BodyCtx { in_loop: true, ..*ctx };
-            for s in body { check_stmt(s, scope, &inner_ctx, table)?; }
-            Ok(())
+            let typed_body = body.iter().map(|s| check_stmt(s, scope, &inner_ctx, table)).collect::<Result<_, _>>()?;
+            TypedStmt::While(typed_cond, typed_body)
         }
 
         Stmt::Break(line) => {
@@ -838,82 +1056,91 @@ fn check_stmt(stmt: &Stmt, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> 
                 return Err(TypeError::new(ErrorCode::EBreakOutsideLoop, *line,
                     "'break' outside an enclosing while loop"));
             }
-            Ok(())
+            TypedStmt::Break
         }
 
         Stmt::CallStmt(call) => {
-            let ret = check_method_call(call, scope, ctx, table)?;
-            if ret != Type::Void {
+            let typed_call = check_method_call(call, scope, ctx, table)?;
+            if typed_call.return_type != Type::Void {
                 return Err(TypeError::new(ErrorCode::ENonvoidCallAsStatement, call.line,
                     format!("result of non-void call to '{}' is discarded", call.name)));
             }
-            Ok(())
+            TypedStmt::CallStmt(typed_call)
         }
-    }
+    })
 }
 
-fn expect_bool(expr: &Expr, scope: &Scope, ctx: &BodyCtx, table: &ClassTable, line: u32) -> Result<(), TypeError> {
-    match check_expr(expr, scope, ctx, table)? {
-        ExprType::Concrete(Type::Bool) => Ok(()),
+fn expect_bool(expr: &Expr, scope: &Scope, ctx: &BodyCtx, table: &ClassTable, line: u32) -> Result<TypedExpr, TypeError> {
+    let typed = check_expr(expr, scope, ctx, table)?;
+    match typed_of(&typed) {
+        ExprType::Concrete(Type::Bool) => Ok(typed),
         _ => Err(TypeError::new(ErrorCode::ETypeMismatch, line, "condition must be bool")),
     }
 }
 ```
 
-`BodyCtx { in_loop: true, ..*ctx }` requires `BodyCtx: Copy` or an explicit field-copy
-constructor; given it holds a `&str`/`&Type` (both `Copy`) plus two `bool`s, deriving
-`Copy` is free and avoids writing that constructor by hand.
-
 ### Expression checking
 
 ```rust
-fn check_expr(expr: &Expr, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> Result<ExprType, TypeError> {
+fn check_expr(expr: &Expr, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> Result<TypedExpr, TypeError> {
     Ok(match expr {
-        Expr::Num(..) => ExprType::Concrete(Type::Int),
-        Expr::Bool(..) => ExprType::Concrete(Type::Bool),
-        Expr::Str(..) => ExprType::Concrete(Type::String),
-        Expr::Null(_) => ExprType::NullLiteral,
-
-        // No "this outside a method/constructor" guard here: `Expr::This` only ever
-        // parses inside a method or constructor body (there is no other place a
-        // `Stmt`/`Expr` exists in the grammar), and `check_bodies` only ever builds
-        // `BodyCtx` with a real class name — E_THIS_OUTSIDE_INSTANCE has no reachable
-        // trigger given this AST, so it's omitted from `ErrorCode` entirely rather
-        // than kept as untestable dead code with a borrowed sentinel.
-        Expr::This(_) => ExprType::Concrete(Type::Class(ctx.class_name.to_string())),
+        Expr::Num(n, _) => TypedExpr::Num(*n),
+        Expr::Bool(b, _) => TypedExpr::Bool(*b),
+        Expr::Str(s, _) => TypedExpr::Str(s.clone()),
+        Expr::Null(_) => TypedExpr::Null,
+        Expr::This(_) => TypedExpr::This(ctx.class_name.to_string()),
 
         Expr::Var(name, line) => {
-            let ty = resolve_name(name, scope, ctx.class_name, table)
+            let binding = resolve_name(name, scope, ctx.class_name, table)
                 .ok_or_else(|| TypeError::new(ErrorCode::EUnknownVariable, *line,
                     format!("unknown variable '{}'", name)))?;
-            ExprType::Concrete(ty)
+            TypedExpr::Var { name: name.clone(), binding }
         }
 
         Expr::New(class_name, args, line) => {
             let info = table.get(class_name).ok_or_else(|| TypeError::new(ErrorCode::EUnknownClass, *line,
                 format!("unknown class '{}'", class_name)))?;
-            check_constructor_call(&info.own_constructors, args, scope, ctx, table, *line, class_name)?;
-            ExprType::Concrete(Type::Class(class_name.clone()))
+            // §4.6: only the synthesized wrapper instantiates Input/Output. Confirmed
+            // gap — nothing rejected this before.
+            if info.kind == ClassKind::Preamble {
+                return Err(TypeError::new(ErrorCode::ETypeCheckOther, *line,
+                    format!("'{}' cannot be instantiated directly", class_name)));
+            }
+            let typed_args = check_constructor_call(&info.own_constructors, args, scope, ctx, table, *line, class_name)?;
+            TypedExpr::New { class: class_name.clone(), args: typed_args }
         }
 
-        Expr::Call(call) => ExprType::Concrete(check_method_call(call, scope, ctx, table)?),
+        Expr::Call(call) => {
+            let typed_call = check_method_call(call, scope, ctx, table)?;
+            // Confirmed gap: this check was claimed as covered in the design doc but
+            // never actually implemented — Expr::Call previously just wrapped
+            // whatever return type came back, Void included.
+            if typed_call.return_type == Type::Void {
+                return Err(TypeError::new(ErrorCode::EVoidCallInExpression, call.line,
+                    format!("void call to '{}' used in expression position", call.name)));
+            }
+            TypedExpr::Call(typed_call)
+        }
 
         Expr::Ternary(cond, then_e, else_e, line) => {
-            expect_bool(cond, scope, ctx, table, *line)?;
-            let then_ty = check_expr(then_e, scope, ctx, table)?;
-            let else_ty = check_expr(else_e, scope, ctx, table)?;
-            combine_ternary_branches(then_ty, else_ty, table, *line)?
+            let typed_cond = expect_bool(cond, scope, ctx, table, *line)?;
+            let typed_then = check_expr(then_e, scope, ctx, table)?;
+            let typed_else = check_expr(else_e, scope, ctx, table)?;
+            let ty = combine_ternary_branches(&typed_of(&typed_then), &typed_of(&typed_else), table, *line)?;
+            TypedExpr::Ternary { cond: Box::new(typed_cond), then_branch: Box::new(typed_then), else_branch: Box::new(typed_else), ty }
         }
 
         Expr::Binary(lhs, op, rhs, line) => {
-            let lhs_ty = check_expr(lhs, scope, ctx, table)?;
-            let rhs_ty = check_expr(rhs, scope, ctx, table)?;
-            ExprType::Concrete(check_binop(*op, &lhs_ty, &rhs_ty, *line)?)
+            let typed_lhs = check_expr(lhs, scope, ctx, table)?;
+            let typed_rhs = check_expr(rhs, scope, ctx, table)?;
+            let ty = check_binop(*op, &typed_of(&typed_lhs), &typed_of(&typed_rhs), *line)?;
+            TypedExpr::Binary { lhs: Box::new(typed_lhs), op: *op, rhs: Box::new(typed_rhs), ty }
         }
 
         Expr::Unary(op, operand, line) => {
-            let operand_ty = check_expr(operand, scope, ctx, table)?;
-            ExprType::Concrete(check_unop(*op, &operand_ty, *line)?)
+            let typed_operand = check_expr(operand, scope, ctx, table)?;
+            let ty = check_unop(*op, &typed_of(&typed_operand), *line)?;
+            TypedExpr::Unary { op: *op, operand: Box::new(typed_operand), ty }
         }
 
         Expr::Cast(target, operand, line) => {
@@ -923,31 +1150,40 @@ fn check_expr(expr: &Expr, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> 
             if !table.class_exists(target_name) {
                 return Err(TypeError::new(ErrorCode::EUnknownClass, *line, format!("unknown class '{}'", target_name)));
             }
-            let source_ty = check_expr(operand, scope, ctx, table)?;
-            let ExprType::Concrete(Type::Class(source_name)) = &source_ty else {
-                return Err(TypeError::new(ErrorCode::ECastSourceNotClass, *line, "cast source must be a class-typed expression"));
-                // A NullLiteral source is also rejected here: (T) null is not a form
-                // the grammar produces meaningfully differently from just `null`, and
-                // the reference never discusses casting a literal null — treated as
-                // ECastSourceNotClass rather than inventing a silent no-op.
+            let typed_operand = check_expr(operand, scope, ctx, table)?;
+            let direction = match typed_of(&typed_operand) {
+                // §4.4.4: a cast applied to null always succeeds, no runtime check.
+                // Confirmed bug — the previous draft rejected this outright.
+                ExprType::NullLiteral => CastDirection::Upcast,
+                ExprType::Concrete(Type::Class(source_name)) => {
+                    if table.is_subtype(&source_name, target_name) {
+                        CastDirection::Upcast
+                    } else if table.is_subtype(target_name, &source_name) {
+                        CastDirection::Downcast
+                    } else {
+                        return Err(TypeError::new(ErrorCode::ECastUnrelatedTypes, *line,
+                            format!("cannot cast '{}' to unrelated class '{}'", source_name, target_name)));
+                    }
+                }
+                _ => return Err(TypeError::new(ErrorCode::ECastSourceNotClass, *line,
+                    "cast source must be a class-typed expression")),
             };
-            if !table.cast_is_legal(target_name, source_name) {
-                return Err(TypeError::new(ErrorCode::ECastUnrelatedTypes, *line,
-                    format!("cannot cast '{}' to unrelated class '{}'", source_name, target_name)));
-            }
-            ExprType::Concrete(target.clone())
+            TypedExpr::Cast { target: target.clone(), operand: Box::new(typed_operand), direction }
         }
 
         Expr::InstanceOf(operand, class_name, line) => {
             if !table.class_exists(class_name) {
                 return Err(TypeError::new(ErrorCode::EUnknownClass, *line, format!("unknown class '{}'", class_name)));
             }
-            match check_expr(operand, scope, ctx, table)? {
-                ExprType::Concrete(Type::Class(_)) => {}
+            let typed_operand = check_expr(operand, scope, ctx, table)?;
+            match typed_of(&typed_operand) {
+                // §4.3.6: (null instanceof T) is legal, evaluates to false. Confirmed
+                // bug — the previous draft rejected a null source outright.
+                ExprType::Concrete(Type::Class(_)) | ExprType::NullLiteral => {}
                 _ => return Err(TypeError::new(ErrorCode::EInstanceofSourceNotClass, *line,
                     "instanceof source must be a class-typed expression")),
             }
-            ExprType::Concrete(Type::Bool)
+            TypedExpr::InstanceOf { operand: Box::new(typed_operand), class: class_name.clone() }
         }
     })
 }
@@ -956,96 +1192,119 @@ fn check_expr(expr: &Expr, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> 
 ### Method calls, receivers, and `super`
 
 ```rust
-fn check_method_call(call: &MethodCall, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> Result<Type, TypeError> {
-    let (search_class, is_super) = resolve_receiver(&call.receiver, scope, ctx, table)?;
+struct ReceiverResolution {
+    typed: TypedReceiver,
+    search_class: String, // irrelevant/empty when is_super is true
+    is_super: bool,
+}
 
-    // resolve_receiver already rejected `super` in a root class (E_SUPER_METHOD_IN_ROOT_CLASS)
-    // before returning `is_super = true`, so `ctx.class_name`'s parent is guaranteed
-    // to exist here — no need to re-check it.
-    let (_owner, sig) = if is_super {
+fn resolve_receiver(receiver: &Receiver, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> Result<ReceiverResolution, TypeError> {
+    match receiver {
+        Receiver::This(_) => Ok(ReceiverResolution {
+            typed: TypedReceiver::This(ctx.class_name.to_string()),
+            search_class: ctx.class_name.to_string(),
+            is_super: false,
+        }),
+
+        Receiver::Super(line) => {
+            // §4.1 introduces super.method(...) as a method-body form specifically;
+            // constructor-body delegation has its own dedicated form, super(...)
+            // (ConstructorDelegation::SuperCall, handled in check_delegation).
+            // Nothing about the grammar stops an ordinary MethodCall with
+            // Receiver::Super from appearing in a constructor's own statement list,
+            // so this needs an explicit check — confirmed gap, found in review.
+            if ctx.in_constructor {
+                return Err(TypeError::new(ErrorCode::EInheritanceCheckOther, *line,
+                    "super.method() is a method-body form and may not appear in a constructor body"));
+            }
+            // This is the method-body form specifically, so it gets
+            // E_SUPER_METHOD_IN_ROOT_CLASS — distinct from E_SUPER_IN_ROOT_CLASS,
+            // which is the constructor-delegation form's code (check_delegation).
+            if table.get(ctx.class_name).and_then(|i| i.parent.as_ref()).is_none() {
+                return Err(TypeError::new(ErrorCode::ESuperMethodInRootClass, *line,
+                    "'super' used in a class with no parent"));
+            }
+            Ok(ReceiverResolution { typed: TypedReceiver::Super, search_class: String::new(), is_super: true })
+        }
+
+        Receiver::Var(name, line) => {
+            let binding = resolve_name(name, scope, ctx.class_name, table)
+                .ok_or_else(|| TypeError::new(ErrorCode::EUnknownVariable, *line,
+                    format!("unknown variable '{}'", name)))?;
+            let Type::Class(c) = binding.ty().clone() else {
+                return Err(TypeError::new(ErrorCode::EReceiverNotClassType, *line, "receiver is not class-typed"));
+            };
+            Ok(ReceiverResolution { typed: TypedReceiver::Var { name: name.clone(), binding }, search_class: c, is_super: false })
+        }
+
+        Receiver::Computed(expr, line) => {
+            if matches!(**expr, Expr::Null(_)) {
+                return Err(TypeError::new(ErrorCode::ENullLiteralReceiver, *line, "receiver cannot be the literal 'null'"));
+            }
+            let typed_expr = check_expr(expr, scope, ctx, table)?;
+            match typed_of(&typed_expr) {
+                ExprType::Concrete(Type::Class(c)) => Ok(ReceiverResolution {
+                    typed: TypedReceiver::Computed(Box::new(typed_expr)),
+                    search_class: c,
+                    is_super: false,
+                }),
+                _ => Err(TypeError::new(ErrorCode::EReceiverNotClassType, *line, "receiver is not class-typed")),
+            }
+        }
+    }
+}
+
+fn check_method_call(call: &MethodCall, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> Result<TypedMethodCall, TypeError> {
+    let r = resolve_receiver(&call.receiver, scope, ctx, table)?;
+
+    // resolve_receiver already rejected super-in-a-constructor and super-in-a-root-
+    // class before returning is_super = true, so ctx.class_name's parent is
+    // guaranteed to exist here.
+    let (owner, sig) = if r.is_super {
         // super.m(...): the STATIC PARENT's effective methods, never the current
-        // class's own override — deliberately a different lookup path from the
-        // ordinary case below (design doc, Algorithms §6).
+        // class's own override.
         let parent = table.get(ctx.class_name).and_then(|i| i.parent.as_deref()).unwrap();
         table.get(parent).unwrap().effective_methods.get(&call.name).cloned()
             .ok_or_else(|| TypeError::new(ErrorCode::ESuperMethodUnresolved, call.line,
                 format!("no ancestor declares method '{}'", call.name)))?
     } else {
-        // `search_class` is always a name already validated to exist in `table` —
-        // every `Type::Class(name)` value that can flow into it (a formal/local/field
-        // type, `Expr::This`, or a `New` expression's own result) was checked against
-        // the table before it could ever reach here, so `table.get` can't miss.
-        let info = table.get(&search_class).unwrap();
+        // r.search_class is always a name already validated to exist in `table` —
+        // every Type::Class(name) that can flow into it was checked before reaching
+        // here — so table.get can't miss.
+        let info = table.get(&r.search_class).unwrap();
         info.effective_methods.get(&call.name).cloned()
             .ok_or_else(|| TypeError::new(ErrorCode::EUnknownMethod, call.line,
-                format!("unknown method '{}' on class '{}'", call.name, search_class)))?
+                format!("unknown method '{}' on class '{}'", call.name, r.search_class)))?
     };
 
-    check_actuals(&sig.params, &call.args, scope, ctx, table, call.line, &sig.name)?;
-    Ok(sig.return_type)
-}
-
-/// Returns (the class to search for the method, whether this was `super`).
-fn resolve_receiver(receiver: &Receiver, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> Result<(String, bool), TypeError> {
-    match receiver {
-        Receiver::This(_) => Ok((ctx.class_name.to_string(), false)),
-        Receiver::Super(line) => {
-            // `super.m(...)` — the METHOD-BODY form. Distinct from `super(...)`
-            // constructor delegation, which is a different AST node entirely
-            // (`ConstructorDelegation::SuperCall`, handled in `check_delegation`) and
-            // correctly gets the *other* code, E_SUPER_IN_ROOT_CLASS. An earlier draft
-            // used E_SUPER_IN_ROOT_CLASS here too, which is wrong per the vocabulary's
-            // own distinction between the two contexts, and additionally made
-            // check_method_call's (correct) E_SUPER_METHOD_IN_ROOT_CLASS check
-            // permanently unreachable, since this function runs first.
-            if table.get(ctx.class_name).and_then(|i| i.parent.as_ref()).is_none() {
-                return Err(TypeError::new(ErrorCode::ESuperMethodInRootClass, *line,
-                    "'super' used in a class with no parent"));
-            }
-            Ok((String::new(), true)) // class name unused on the super path
-        }
-        Receiver::Var(name, line) => {
-            let ty = resolve_name(name, scope, ctx.class_name, table)
-                .ok_or_else(|| TypeError::new(ErrorCode::EUnknownVariable, *line,
-                    format!("unknown variable '{}'", name)))?;
-            match ty {
-                Type::Class(c) => Ok((c, false)),
-                _ => Err(TypeError::new(ErrorCode::EReceiverNotClassType, *line, "receiver is not class-typed")),
-            }
-        }
-        Receiver::Computed(expr, line) => {
-            if matches!(**expr, Expr::Null(_)) {
-                return Err(TypeError::new(ErrorCode::ENullLiteralReceiver, *line, "receiver cannot be the literal 'null'"));
-            }
-            let ctx_for_expr = BodyCtx { ..*ctx };
-            match check_expr(expr, scope, &ctx_for_expr, table)? {
-                ExprType::Concrete(Type::Class(c)) => Ok((c, false)),
-                _ => Err(TypeError::new(ErrorCode::EReceiverNotClassType, *line, "receiver is not class-typed")),
-            }
-        }
-    }
+    // owner is now genuinely used (this revision) — retained on the typed call for
+    // codegen/interpreter, not discarded as it was in the previous draft.
+    let typed_args = check_actuals(&sig.params, &call.args, scope, ctx, table, call.line, &sig.name)?;
+    Ok(TypedMethodCall { receiver: r.typed, name: call.name.clone(), owner, args: typed_args, return_type: sig.return_type })
 }
 
 fn check_actuals(
     formals: &[Type], args: &[Expr], scope: &Scope, ctx: &BodyCtx, table: &ClassTable, line: u32, what: &str,
-) -> Result<(), TypeError> {
+) -> Result<Vec<TypedExpr>, TypeError> {
     if formals.len() != args.len() {
         return Err(TypeError::new(ErrorCode::EArityMismatch, line,
             format!("'{}' expects {} argument(s), got {}", what, formals.len(), args.len())));
     }
+    let mut typed_args = Vec::with_capacity(args.len());
     for (formal_ty, arg) in formals.iter().zip(args) {
-        let arg_ty = check_expr(arg, scope, ctx, table)?;
-        if !assignment_compatible(&arg_ty, formal_ty, table) {
+        let typed_arg = check_expr(arg, scope, ctx, table)?;
+        if !assignment_compatible(&typed_of(&typed_arg), formal_ty, table) {
             return Err(TypeError::new(ErrorCode::EActualTypeMismatch, line,
                 format!("argument type does not match formal type in call to '{}'", what)));
         }
+        typed_args.push(typed_arg);
     }
-    Ok(())
+    Ok(typed_args)
 }
 
 fn check_constructor_call(
     ctors: &[ConstructorSig], args: &[Expr], scope: &Scope, ctx: &BodyCtx, table: &ClassTable, line: u32, class_name: &str,
-) -> Result<(), TypeError> {
+) -> Result<Vec<TypedExpr>, TypeError> {
     let ctor = ctors.iter().find(|c| c.arity == args.len())
         .ok_or_else(|| TypeError::new(ErrorCode::EArityMismatch, line,
             format!("no constructor of class '{}' takes {} argument(s)", class_name, args.len())))?;
@@ -1055,21 +1314,11 @@ fn check_constructor_call(
 
 ### Constructor delegation
 
-Two functions, deliberately separated: one scans a whole class's `this(...)` graph
+Two functions, as in the previous draft: one scans a whole class's `this(...)` graph
 for cycles, run once per class; the other resolves a single constructor's own
-delegation target. An earlier draft tried to do both from inside the second function,
-reaching for a helper that needed data (`ConstructorDecl.delegation`, from every
-sibling constructor) that `ClassTable` didn't actually store anywhere — that's fixed
-now by capturing `this_target_arity` on `ConstructorSig` itself (see "Class table"),
-so the cycle scan reads `ClassTable` alone and needs no second pass over the AST.
+delegation target and now returns the typed form.
 
 ```rust
-/// Runs once per class (not once per constructor — `find_cycle` reports the same
-/// cycle every time it's asked, so re-running it per constructor would just repeat
-/// the same answer). Cycle check across ALL this(...) edges in the class at once —
-/// A -> B -> A is a cycle even though neither edge alone is a self-loop (design doc,
-/// Algorithms §4), and a constructor delegating to itself (a one-node cycle) is
-/// caught by the same traversal, per LO-3 §3.3.4.
 fn check_delegation_cycle(class_name: &str, table: &ClassTable) -> Result<(), TypeError> {
     let info = table.get(class_name).unwrap();
     let arities: Vec<usize> = info.own_constructors.iter().map(|c| c.arity).collect();
@@ -1088,27 +1337,24 @@ fn check_delegation_cycle(class_name: &str, table: &ClassTable) -> Result<(), Ty
     Ok(())
 }
 
-/// Resolves and type-checks THIS constructor's own delegation target. Assumes
-/// `check_delegation_cycle` already ran for the enclosing class and found nothing —
-/// so any `this(...)` target found here is guaranteed to terminate, not loop.
-fn check_delegation(ctor: &ConstructorDecl, class_name: &str, scope: &Scope, table: &ClassTable) -> Result<(), TypeError> {
+/// Assumes check_delegation_cycle already ran for the enclosing class and found
+/// nothing, so any this(...) target found here is guaranteed to terminate.
+fn check_delegation(ctor: &ConstructorDecl, class_name: &str, scope: &Scope, table: &ClassTable) -> Result<Option<TypedDelegation>, TypeError> {
     let info = table.get(class_name).unwrap();
     let inheriting = info.parent.is_some();
 
     match &ctor.delegation {
         None => {
             if inheriting {
-                // Gap in the published vocabulary — see "Decisions resolved for this
-                // implementation." LO-4 §4.1 requires super(...)/this(...) as the
-                // first statement of every constructor in an inheriting class.
+                // Gap in the published vocabulary — filed under E_INHERITANCE_CHECK_OTHER.
+                // LO-4 §4.1 requires super(...)/this(...) as the first statement of
+                // every constructor in an inheriting class.
                 return Err(TypeError::new(ErrorCode::EInheritanceCheckOther, ctor.line,
                     "constructor of an inheriting class must start with super(...) or this(...)"));
             }
-            Ok(())
+            Ok(None)
         }
         Some(ConstructorDelegation::SuperCall(args, line)) => {
-            // Nothing upstream (Pass 1/2) ever looks inside `ctor.delegation` — this
-            // is the first and only place a root-class `super(...)` gets caught.
             let parent = info.parent.as_ref().ok_or_else(|| TypeError::new(ErrorCode::ESuperInRootClass, *line,
                 "super(...) used in a class with no parent"))?;
             let parent_info = table.get(parent).unwrap();
@@ -1116,14 +1362,16 @@ fn check_delegation(ctor: &ConstructorDecl, class_name: &str, scope: &Scope, tab
                 .ok_or_else(|| TypeError::new(ErrorCode::EDelegationArityMismatch, *line,
                     format!("'{}' has no constructor of arity {}", parent, args.len())))?;
             let ctx = BodyCtx { class_name, return_type: &Type::Void, in_loop: false, in_constructor: true };
-            check_actuals(&target.params, args, scope, &ctx, table, *line, parent)
+            let typed_args = check_actuals(&target.params, args, scope, &ctx, table, *line, parent)?;
+            Ok(Some(TypedDelegation::Super { args: typed_args }))
         }
         Some(ConstructorDelegation::ThisCall(args, line)) => {
             let target = info.own_constructors.iter().find(|c| c.arity == args.len())
                 .ok_or_else(|| TypeError::new(ErrorCode::EDelegationArityMismatch, *line,
                     format!("class '{}' has no constructor of arity {}", class_name, args.len())))?;
             let ctx = BodyCtx { class_name, return_type: &Type::Void, in_loop: false, in_constructor: true };
-            check_actuals(&target.params, args, scope, &ctx, table, *line, class_name)
+            let typed_args = check_actuals(&target.params, args, scope, &ctx, table, *line, class_name)?;
+            Ok(Some(TypedDelegation::This { args: typed_args }))
         }
     }
 }
@@ -1140,28 +1388,27 @@ fn assignment_compatible(from: &ExprType, to: &Type, table: &ClassTable) -> bool
     }
 }
 
-fn combine_ternary_branches(a: ExprType, b: ExprType, table: &ClassTable, line: u32) -> Result<ExprType, TypeError> {
+/// **Corrected this revision** — least common ancestor, not a bidirectional
+/// is_subtype check. See design doc, Algorithms §7, for why the old check was a
+/// confirmed bug (Cat/Dog siblings under Animal would incorrectly fail).
+fn combine_ternary_branches(a: &ExprType, b: &ExprType, table: &ClassTable, line: u32) -> Result<Type, TypeError> {
     use ExprType::*;
-    Ok(match (a, b) {
-        (NullLiteral, NullLiteral) => NullLiteral,
-        (NullLiteral, Concrete(t @ Type::Class(_))) | (Concrete(t @ Type::Class(_)), NullLiteral) => Concrete(t),
-        (Concrete(t1), Concrete(t2)) if t1 == t2 => Concrete(t1),
-        (Concrete(Type::Class(c1)), Concrete(Type::Class(c2))) => {
-            if table.is_subtype(&c1, &c2) { Concrete(Type::Class(c2)) }
-            else if table.is_subtype(&c2, &c1) { Concrete(Type::Class(c1)) }
-            else {
-                return Err(TypeError::new(ErrorCode::EConditionalTypeMismatch, line,
-                    "ternary branches have unrelated class types"));
-            }
-        }
-        _ => return Err(TypeError::new(ErrorCode::EConditionalTypeMismatch, line,
-            "ternary branches have incompatible types")),
-    })
+    let mismatch = || TypeError::new(ErrorCode::EConditionalTypeMismatch, line, "ternary branches have incompatible types");
+    match (a, b) {
+        // Both branches null: no concrete Type exists to put on TypedExpr::Ternary's
+        // `ty` field (the typed AST has no Option-typed fields to fall back on) — a
+        // deliberately accepted edge case, not a gap. See design doc.
+        (NullLiteral, NullLiteral) => Err(mismatch()),
+        (NullLiteral, Concrete(t @ Type::Class(_))) | (Concrete(t @ Type::Class(_)), NullLiteral) => Ok(t.clone()),
+        (Concrete(t1), Concrete(t2)) if t1 == t2 => Ok(t1.clone()),
+        (Concrete(Type::Class(c1)), Concrete(Type::Class(c2))) =>
+            least_common_ancestor(c1, c2, table).map(Type::Class).ok_or_else(mismatch),
+        _ => Err(mismatch()),
+    }
 }
 
-/// `=`/`<`/`>` on class-typed (or null) operands is rejected — see "Decisions
-/// resolved for this implementation." This is the single arm to relax if course
-/// staff confirms reference equality was intended.
+/// `=`/`<`/`>` on class-typed (or null) operands is rejected, confirmed correct
+/// against the canonical language reference (design doc, Open item 1 — now resolved).
 fn check_binop(op: BinaryOp, lhs: &ExprType, rhs: &ExprType, line: u32) -> Result<Type, TypeError> {
     use BinaryOp::*;
     let (ExprType::Concrete(l), ExprType::Concrete(r)) = (lhs, rhs) else {
@@ -1196,35 +1443,24 @@ fn check_unop(op: UnaryOp, operand: &ExprType, line: u32) -> Result<Type, TypeEr
 }
 ```
 
-`UnaryOp::Neg` covers both `~` uses (integer negation and string reversal per LO-2
-§3.1) since the AST doesn't split them into separate operators — the grammar's `~`
-token is one `Unop` regardless of operand type, and Rust's own overload-by-return-type
-dispatch (matching the *result*, not the token) makes this a natural single-function
-fit rather than something needing a synthetic split.
-
 ### Entry point
 
 ```rust
-/// Proof, at the type level, that a `Program` has been through `check_program`
-/// successfully. Not a restructured tree — a one-line wrapper around the exact same
-/// `Program` the parser produced (see design doc, "What downstream phases get").
-pub struct Checked(pub Program);
-
-pub fn check_program(mut program: Program) -> Result<(Checked, ClassTable), TypeError> {
+fn check_program(program: Program) -> Result<(TypedProgram, ClassTable), TypeError> {
+    let mut program = program;
     inject_preamble(&mut program);
     let mut table = gather_declarations(&program)?;
     resolve_inheritance(&mut table)?;
     check_entry_point(&table)?;
-    check_bodies(&program, &table)?;
-    Ok((Checked(program), table))
+    let typed = check_bodies(&program, &table)?;
+    Ok((typed, table))
 }
 ```
 
-`check_program` takes ownership of `program` rather than a `&mut Program`, since it
-now hands the (preamble-injected) tree back out wrapped in `Checked` — there's nothing
-left for the caller to do with the original binding once checking succeeds, and taking
-ownership makes that explicit instead of leaving a `&mut Program` the caller might be
-tempted to keep using unchecked.
+`check_program` takes ownership of `Program` and consumes it entirely — nothing
+downstream needs the original untyped tree back, only `TypedProgram` and
+`ClassTable`. Preamble injection lives inside, per this revision's decision — there
+is exactly one way to obtain a `TypedProgram`, and it always includes `Input`/`Output`.
 
 ---
 
@@ -1237,8 +1473,8 @@ fn main() {
     // CLI entry point comes later — wiring shown for reference:
     //
     // let program = parser::parse_program(&tokens)?;
-    // let (checked, class_table) = sema::check_program(program)?;
-    // interpret/codegen consume `checked.0` and, if they need it, `class_table`.
+    // let (typed_program, class_table) = sema::check_program(program)?;
+    // interpret/codegen consume `typed_program` and, if needed, `class_table`.
 }
 ```
 
@@ -1247,53 +1483,56 @@ fn main() {
 ## Acceptance tests
 
 Given as source-level `.lo` fragments (parse them, run `check_program`, check the
-result) rather than hand-built AST, since that's what actually exercises the parser →
-checker boundary.
+result). Rows carried over from the previous draft are unaffected by this revision's
+changes unless noted; new rows specifically exercise this revision's fixes.
 
 | Input | Expected |
 |---|---|
-| `class Main() { int main() { return 0; } }` | `Ok(())` |
+| `class Main() { int main() { return 0; } }` | `Ok` |
 | `class Main() { int main() { } }` | `Err(EReturnMissing)` |
 | `class Main() { void main() { return 0; } }` | `Err(EMainMethodSignature)` |
 | `class Foo() {} class Foo() {}` (plus a valid `Main`) | `Err(EDuplicateClassName)` |
 | `class A(int x; int x;) {}` | `Err(EDuplicateField)` |
-| `class A extends B () {} ` — `B` never declared | `Err(EUnknownClass)` |
+| `class Main(){int f(int x, int x){return x;} int main(){return 0;}}` | `Err(EDuplicateFormal)` — new; a confirmed gap where a duplicate formal previously silently overwrote the first binding with no error at all |
+| `class A extends B () {}` — `B` never declared | `Err(EUnknownClass)` |
 | `class A extends B (){} class B extends A (){}` | `Err(EInheritanceCycle)` |
+| `class Main() { int main() { return 0; } } class Foo extends Main() [Foo(){super();}] {}` | `Err(EEntryPointOther)` — new; nothing may extend `Main` |
+| `class Foo extends Input() [Foo(){super();}] {} class Main() { int main() { return 0; } }` | `Err(EInheritanceCheckOther)` — new; `Input`/`Output` are non-extensible |
+| `class Main() { int main() { Input i; i = new Input(); return 0; } }` | `Err(ETypeCheckOther)` — new; only the synthesized wrapper instantiates `Input`/`Output` |
 | `class A(int x;)[A(int v){x=v;}]{} class B extends A(int x;)[B(int v){super(v);}]{}` | `Err(EFieldShadowing)` |
 | `class A(){int f(){return 1;}} class B extends A(){[B(){super();}]{bool f(){return true;}}}` | `Err(EOverrideSignatureMismatch)` |
 | `class A extends B(){}` where `B` is a valid root class, no `[ ]` section on `A` | `Err(EMissingConstructorInInheritingClass)` |
+| `class Foo() [Foo(){}] {} class Main() { int main() { return 0; } }` | `Err(EWellFormednessOther)` — new; an explicit constructor with no delegation and no statements is a compile error even though `(Stmt)*` allows it syntactically |
 | `class Main() { int main() { return (1 + true); } }` | `Err(EBinopTypeMismatch)` |
-| `class Main() { int main() { out.print_int(1); return out.print_int(2); } }` (void call in return position) | `Err(EVoidCallInExpression)` |
-| `class Main() { int main() { out.println(); return 0; } }` (call statement, void method — legal) | `Ok(())` |
-| `class Main() { int main() { return this.helper(); } int helper() { return 1; } }` | `Ok(())` — forward reference within the same class |
-| `class Animal(){String describe(){return "a";}} class Dog extends Animal()[Dog(){super();}]{String describe(){return ((((Dog)this) instanceof Dog) ? super.describe() : "?");}}` | `Ok(())` — exercises cast, `instanceof`, and `super.m()` together. LO requires full parenthesization of every compound expression (P25/P29/P30 each carry their own mandatory wrapping parens) — an earlier draft of this row omitted the ternary's and the `instanceof`'s own wrapping parens and would have failed to parse, let alone reach the checker. |
+| `class Main() { int main() { out.print_int(1); return out.print_int(2); } }` | `Err(EVoidCallInExpression)` — **now actually caught**; the previous draft claimed this check existed but never implemented it |
+| `class Main() { int main() { out.println(); return 0; } }` | `Ok` |
+| `class Main() { int main() { return this.helper(); } int helper() { return 1; } }` | `Ok` — forward reference within the same class |
+| `class Animal(){String describe(){return "a";}} class Dog extends Animal()[Dog(){super();}]{String describe(){return ((((Dog)this) instanceof Dog) ? super.describe() : "?");}}` | `Ok` — exercises cast, `instanceof`, and `super.m()` together, fully parenthesized per P25/P29/P30 |
+| `class Animal(){String describe(){return "a";}} class Dog extends Animal()[Dog(){super();super.describe();}]{}` | `Err(EInheritanceCheckOther)` — new; `super.method()` is a method-body form and may not appear in a constructor body |
+| `class Foo(){} class Main() { int main() { Foo f; f = ((Foo) null); return 0; } }` | `Ok` — new; a cast applied to `null` always succeeds per §4.4.4 (previously incorrectly rejected) |
+| `class Foo(){} class Main() { int main() { return ((null instanceof Foo) ? 1 : 0); } }` | `Ok`, returns `0` — new; `null instanceof T` is legal and always `false` per §4.3.6 (previously incorrectly rejected) |
+| `class Animal(){} class Cat extends Animal()[Cat(){super();}]{} class Dog extends Animal()[Dog(){super();}]{} class Main(){int main(){bool b;b=true;Animal a;a=(b ? new Cat() : new Dog());return 0;}}` | `Ok` — new, the case the whole LCA fix is for: `Cat`/`Dog` share no direct subtype relation, so this would incorrectly fail `E_CONDITIONAL_TYPE_MISMATCH` under the old bidirectional check; the correct result type is `Animal`, their least common ancestor |
 | `class Main() { int main() { break; return 0; } }` | `Err(EBreakOutsideLoop)` |
-| `class Animal(){} class Dog extends Animal()[Dog(){out.println();}]{}` (no super/this as first statement) | `Err(EInheritanceCheckOther)` — see the noted vocabulary gap |
+| `class Animal(){} class Dog extends Animal()[Dog(){out.println();}]{}` (no `super`/`this` as first statement) | `Err(EInheritanceCheckOther)` |
 | `class C(){[C(){this(1);} C(int x){this();}]{}}` | `Err(EDelegationCycle)` |
-| `class A(int x;)[A(int x){x=x;}]{int get(){return x;}}` — `new A(5).get()` at runtime returns `0`, not `5` | `Ok(())` — **not** a checker bug; see "Notes" in the design doc. LO has no `this.field = value` assignment form, so a formal sharing a field's name makes that field unassignable by bare identifier inside its own constructor (`x = x` resolves both sides to the formal, per the local→formal→field priority) — nothing in the well-formedness rules forbids this shape, so it type-checks fine and just behaves unexpectedly. Recorded here as a real language-level sharp edge, not something this pass should (or structurally could) reject. |
-
-Every row above was traced through the pass structure by hand while writing this plan,
-the same discipline `lexer_implementation.md` held itself to — not a "should probably
-work" list. (An earlier draft of this table failed that same standard on two rows —
-the field-shadowing test used a `this.x = x` assignment form that doesn't exist
-anywhere in the grammar, and the cast/`instanceof`/ternary combo test was missing three
-mandatory wrapping parens — both are fixed above.)
+| `class Main() { int main() { void x; return 0; } }` | `Err(ELocalTypedVoid)` — new; confirmed gap, local declared types were never validated at all |
+| `class Main() { int main() { Bogus x; return 0; } }` — `Bogus` never declared | `Err(EUnknownClass)` — new; same gap, this half of it is an unknown-class reference inside a local declaration |
+| `class A(int x;)[A(int x){x=x;}]{int get(){return x;}}` — `new A(5).get()` at runtime returns `0`, not `5` | `Ok` — **not** a checker bug; see design doc Notes. A formal sharing a field's name makes the field unassignable by bare identifier, a real language-level sharp edge, not something this pass should or structurally could reject. |
 
 ---
 
 ## Explicitly out of scope for this step
 
-- Wiring a CLI mode (`check`/`interpret`/`compile`) — `main.rs` stays a stub beyond the
-  module wiring shown above.
-- The interpreter and codegen themselves — both consume the `Checked(Program)` and
+- Wiring a CLI mode (`check`/`interpret`/`compile`) — `main.rs` stays a stub beyond
+  the module wiring shown above.
+- The interpreter and codegen themselves — both consume the `TypedProgram` and
   `ClassTable` that `check_program` returns, but building either is a separate
-  implementation plan. In particular, exactly how codegen re-derives cast direction
-  and variable-binding kind from `ClassTable` (rather than reading a cache, per "What
-  downstream phases get" in the design doc) is that plan's problem to work out, not
-  this one's.
+  implementation plan.
 - Unifying `sema::ErrorCode` with `parser::ErrorCode` into one shared diagnostic type
   — deferred per `type_checker_design.md`'s Open items.
-- Actually reconciling `E_DUPLICATE_LOCAL`, `E_BREAK_OUTSIDE_LOOP`, and the
-  inheriting-constructor-delegation gap with course staff's published vocabulary —
-  this plan implements against the vocabulary as it stands today, with the two
-  documented workarounds, and should be revisited if staff respond.
+- Actually reconciling the full list of invented/reused codes with course staff's
+  published vocabulary (see design doc Notes for the complete inventory as of this
+  revision) — this plan implements against the vocabulary as it stands today, with
+  the documented workarounds, and should be revisited if staff respond.
+- Vtable slot assignment, and anything else codegen-specific — `ClassTable`'s
+  `effective_methods` has what a future codegen pass needs to assign slots itself.
