@@ -220,7 +220,7 @@ pub enum Unop {
 
 ---
 
-## Parser support types (not grammar productions)
+## Parser support types
 
 Threaded through `parse_var_decls_and_stmts`/`parse_block`/`parse_stmt`/`parse_var_decl` so `E_DUPLICATE_LOCAL` hoisting and decision point 4's delegation check both have what they need without a `Parser`-level field (which would leak state across sibling `parse_class_decl`/`parse_method_decl` calls on the same `Parser`).
 
@@ -1322,7 +1322,7 @@ Lexical productions — implemented by the lexer (`lexer.rs`/`lexer_design.md`),
 
 ---
 
-## Token-level helpers (not grammar productions)
+## Token-level helpers
 
 Shared machinery every function above calls into; not itself a numbered production, so not part of the P1–P53 walkthrough, but included here since several entries reference it.
 

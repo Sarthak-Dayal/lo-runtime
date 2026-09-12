@@ -792,7 +792,7 @@ impl<'a> Parser<'a> {
     }
 
     // ================================
-    // Parse-time semantic checks (not grammar productions)
+    // Parse-time semantic checks
     // ================================
 
     fn hoist(&self, decl: VarDecl, ctx: &mut ParseContext) -> Result<(), ParseError> {
@@ -838,7 +838,7 @@ impl<'a> Parser<'a> {
     }
 
     // ================================
-    // Token-level helpers (not grammar productions)
+    // Token-level helpers
     // ================================
 
     fn peek(&self) -> &Token {
