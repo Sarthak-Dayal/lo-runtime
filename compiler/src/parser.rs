@@ -81,15 +81,19 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    // ================================
+    // LO grammar production parsing
+    // ================================
+
     // P4: ClassDecl -> class ClassName (extends ClassName)? ( (VarDecl)* ) ( [ (ConstructorDecl)+ ] )? { (MethodDecl)* }
     fn parse_class_decl(&mut self) -> Result<ClassDecl, ParseError> {
         let line = self.peek().line;
         self.expect(TokenKind::KwClass, ErrorCode::EMalformedClassDecl)?; // "class"
-        let class_name = self.parse_class_name()?; // P44
+        let class_name = self.parse_class_name()?; // P44: ClassName -> Identifier
 
         let extends = if self.check(&TokenKind::KwExtends) {
             self.advance(); // "extends"
-            Some(self.parse_class_name()?) // P44
+            Some(self.parse_class_name()?) // P44: ClassName -> Identifier
         } else {
             None
         };
@@ -97,7 +101,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LParen, ErrorCode::EMalformedClassDecl)?; // "("
         let mut fields = Vec::new();
         while !self.check(&TokenKind::RParen) {
-            fields.push(self.parse_var_decl()?); // P11
+            fields.push(self.parse_var_decl()?); // P11: VarDecl -> Type Identifier ( , Identifier)* ;
         }
         self.expect(TokenKind::RParen, ErrorCode::EMalformedClassDecl)?; // ")"
 
@@ -112,8 +116,8 @@ impl<'a> Parser<'a> {
             }
             let mut parsed_constructors = Vec::new();
             while !self.check(&TokenKind::RBracket) {
+                // P5/P6: ConstructorDecl -> ClassName ( (Formals)? ) { ( this/super ( (Actuals)? ) ; )? (VarDecl)* (Stmt)* }
                 parsed_constructors.push(self.parse_constructor_decl(&class_name)?);
-                // P5/P6
             }
             self.advance(); // "]"
             parsed_constructors
@@ -124,7 +128,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LBrace, ErrorCode::EMalformedClassDecl)?; // "{"
         let mut methods = Vec::new();
         while !self.check(&TokenKind::RBrace) {
-            methods.push(self.parse_method_decl()?); // P7
+            methods.push(self.parse_method_decl()?); // P7: MethodDecl -> Type MethodName ( (Formals)? ) { (VarDecl)* (Stmt)+ }
         }
         self.advance(); // "}"
 
@@ -142,7 +146,7 @@ impl<'a> Parser<'a> {
     // P6: ConstructorDecl -> ClassName ( (Formals)? ) { ( super ( (Actuals)? ) ; )? (VarDecl)* (Stmt)* }
     fn parse_constructor_decl(&mut self, class_name: &str) -> Result<ConstructorDecl, ParseError> {
         let line = self.peek().line;
-        let constructor_name = self.parse_class_name()?; // P44
+        let constructor_name = self.parse_class_name()?; // P44: ClassName -> Identifier
         if constructor_name != class_name {
             return Err(new_parse_error(
                 ErrorCode::EMalformedConstructor,
@@ -157,7 +161,7 @@ impl<'a> Parser<'a> {
         let formals = if self.check(&TokenKind::RParen) {
             Vec::new()
         } else {
-            self.parse_formals()? // P9
+            self.parse_formals()? // P9: Formals -> Type Identifier ( , Type Identifier)*
         };
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
 
@@ -209,27 +213,27 @@ impl<'a> Parser<'a> {
         let args = if self.check(&TokenKind::RParen) {
             Vec::new()
         } else {
-            self.parse_actuals()? // P10
+            self.parse_actuals()? // P10: Actuals -> Expr ( , Expr)*
         };
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
         self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?; // ";"
         Ok(Some(if is_this {
-            ConstructorDelegation::ThisCall(args, line) // P5
+            ConstructorDelegation::ThisCall(args, line) // P5: ConstructorDecl -> ClassName ( (Formals)? ) { ( this ( (Actuals)? ) ; )? (VarDecl)* (Stmt)* }
         } else {
-            ConstructorDelegation::SuperCall(args, line) // P6
+            ConstructorDelegation::SuperCall(args, line) // P6: ConstructorDecl -> ClassName ( (Formals)? ) { ( super ( (Actuals)? ) ; )? (VarDecl)* (Stmt)* }
         }))
     }
 
     // P7: MethodDecl -> Type MethodName ( (Formals)? ) { (VarDecl)* (Stmt)+ }
     fn parse_method_decl(&mut self) -> Result<MethodDecl, ParseError> {
         let line = self.peek().line;
-        let return_type = self.parse_type()?; // P36
-        let method_name = self.parse_method_name()?; // P45
+        let return_type = self.parse_type()?; // P36: Type -> ClassName
+        let method_name = self.parse_method_name()?; // P45: MethodName -> Identifier
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
         let formals = if self.check(&TokenKind::RParen) {
             Vec::new()
         } else {
-            self.parse_formals()? // P9
+            self.parse_formals()? // P9: Formals -> Type Identifier ( , Type Identifier)*
         };
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
         let body_line = self.peek().line;
@@ -260,7 +264,7 @@ impl<'a> Parser<'a> {
         let mut formals = Vec::new();
         loop {
             let line = self.peek().line;
-            let declared_type = self.parse_type()?; // P36
+            let declared_type = self.parse_type()?; // P36: Type -> ClassName
             let identifier = self.parse_identifier()?; // Identifier
             formals.push(Formal {
                 declared_type,
@@ -289,7 +293,7 @@ impl<'a> Parser<'a> {
     // P11: VarDecl -> Type Identifier ( , Identifier)* ;
     fn parse_var_decl(&mut self) -> Result<VarDecl, ParseError> {
         let line = self.peek().line;
-        let declared_type = self.parse_type()?; // P36
+        let declared_type = self.parse_type()?; // P36: Type -> ClassName
         let mut identifiers = vec![self.parse_identifier()?]; // Identifier
         while self.check(&TokenKind::Comma) {
             self.advance(); // ","
@@ -308,9 +312,6 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LBrace, ErrorCode::EParsePhaseOther)?; // "{"
         let mut nested_ctx = ParseContext {
             locals: &mut *ctx.locals, // reborrow -- same Vec as the enclosing body
-            // delegation is never read once at_top_level is false -- see
-            // misplaced_delegation_error, which only consults it in the
-            // at_top_level branch.
             constructor: ctx.constructor.map(|_| ConstructorContext {
                 at_top_level: false,
                 delegation: None,
@@ -328,7 +329,7 @@ impl<'a> Parser<'a> {
         arity: StmtArity,
     ) -> Result<Vec<Stmt>, ParseError> {
         while self.is_start_of_var_decl() {
-            let decl = self.parse_var_decl()?; // P11
+            let decl = self.parse_var_decl()?; // P11: VarDecl -> Type Identifier ( , Identifier)* ;
             self.hoist(decl, ctx)?;
         }
         let mut stmts = Vec::new();
@@ -343,48 +344,6 @@ impl<'a> Parser<'a> {
             ));
         }
         Ok(stmts)
-    }
-
-    fn hoist(&self, decl: VarDecl, ctx: &mut ParseContext) -> Result<(), ParseError> {
-        for (i, identifier) in decl.identifiers.iter().enumerate() {
-            let is_duplicate = decl.identifiers[..i].contains(identifier)
-                || ctx
-                    .locals
-                    .iter()
-                    .any(|existing| existing.identifiers.contains(identifier));
-            if is_duplicate {
-                return Err(new_parse_error(
-                    ErrorCode::EDuplicateLocal,
-                    decl.line,
-                    format!("duplicate local '{}'", identifier),
-                ));
-            }
-        }
-        ctx.locals.push(decl);
-        Ok(())
-    }
-
-    fn misplaced_delegation_error(&self, ctx: &ParseContext) -> Option<ParseError> {
-        let constructor = ctx.constructor?;
-        let is_this = self.check(&TokenKind::KwThis);
-        let is_super = self.check(&TokenKind::KwSuper);
-        if !(is_this || is_super) || self.peek_ahead1().kind != TokenKind::LParen {
-            return None;
-        }
-        let code = if !constructor.at_top_level {
-            ErrorCode::EDelegationNotFirstStatement
-        } else {
-            match constructor.delegation {
-                Some(DelegationKeyword::This) if is_super => ErrorCode::EDelegationBothSuperAndThis,
-                Some(DelegationKeyword::Super) if is_this => ErrorCode::EDelegationBothSuperAndThis,
-                _ => ErrorCode::EDelegationNotFirstStatement,
-            }
-        };
-        Some(new_parse_error(
-            code,
-            self.peek().line,
-            "misplaced constructor this()/super() call",
-        ))
     }
 
     // P13-P19: Stmt -> ...
@@ -447,9 +406,9 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
         let cond = self.parse_expr()?;
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
-        let if_body = self.parse_block(ctx)?; // P12
+        let if_body = self.parse_block(ctx)?; // P12: Block -> { (VarDecl)* (Stmt)+ }
         self.expect(TokenKind::KwElse, ErrorCode::EParsePhaseOther)?; // "else"
-        let else_body = self.parse_block(ctx)?; // P12
+        let else_body = self.parse_block(ctx)?; // P12: Block -> { (VarDecl)* (Stmt)+ }
         Ok(Stmt::If(cond, if_body, else_body, line))
     }
 
@@ -460,7 +419,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
         let cond = self.parse_expr()?;
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
-        let body = self.parse_block(ctx)?; // P12
+        let body = self.parse_block(ctx)?; // P12: Block -> { (VarDecl)* (Stmt)+ }
         Ok(Stmt::While(cond, body, line))
     }
 
@@ -511,12 +470,12 @@ impl<'a> Parser<'a> {
         line: u32,
     ) -> Result<MethodCall, ParseError> {
         self.expect(TokenKind::Dot, ErrorCode::EParsePhaseOther)?; // "."
-        let method_name = self.parse_method_name()?; // P45
+        let method_name = self.parse_method_name()?; // P45: MethodName -> Identifier
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
         let actuals = if self.check(&TokenKind::RParen) {
             Vec::new()
         } else {
-            self.parse_actuals()? // P10
+            self.parse_actuals()? // P10: Actuals -> Expr ( , Expr)*
         };
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
         Ok(MethodCall {
@@ -573,7 +532,7 @@ impl<'a> Parser<'a> {
                 ))
             }
             TokenKind::LParen => {
-                let value = self.parse_paren_expr()?; // P25-P30
+                let value = self.parse_paren_expr()?; // P25-P30: Expr -> ...
                 if self.check(&TokenKind::Dot) {
                     // P23: Expr -> ObjName . MethodName ( (Actuals)? ), via P49: ObjName -> ( Expr )
                     let obj_name = ObjName::Computed(Box::new(value), line);
@@ -594,12 +553,12 @@ impl<'a> Parser<'a> {
     fn parse_new_expr(&mut self) -> Result<Expr, ParseError> {
         let line = self.peek().line;
         self.advance(); // "new"
-        let class_name = self.parse_class_name()?; // P44
+        let class_name = self.parse_class_name()?; // P44: ClassName -> Identifier
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
         let actuals = if self.check(&TokenKind::RParen) {
             Vec::new()
         } else {
-            self.parse_actuals()? // P10
+            self.parse_actuals()? // P10: Actuals -> Expr ( , Expr)*
         };
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
         Ok(Expr::New(class_name, actuals, line))
@@ -636,8 +595,8 @@ impl<'a> Parser<'a> {
         }
 
         // P25/P26/P28/P30's operand: an ordinary Expr
-        let primary = self.parse_expr()?;
-        self.parse_paren_suffix(primary, line)
+        let primary_expr = self.parse_expr()?;
+        self.parse_paren_suffix(primary_expr, line)
     }
 
     // The "( Type )" fragment of P29.
@@ -646,18 +605,19 @@ impl<'a> Parser<'a> {
         let ty = if let Some(ty) = self.try_parse_primitive_type() {
             ty
         } else {
-            Type::Class(self.parse_class_name()?) // P44
+            Type::Class(self.parse_class_name()?) // P44: ClassName -> Identifier
         };
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
         Ok(ty)
     }
 
-    fn parse_paren_suffix(&mut self, primary: Expr, line: u32) -> Result<Expr, ParseError> {
+    fn parse_paren_suffix(&mut self, primary_expr: Expr, line: u32) -> Result<Expr, ParseError> {
         let value = if self.check(&TokenKind::Dot) {
-            let obj_name = ObjName::Computed(Box::new(primary), line);
-            Expr::Call(self.parse_method_call_suffix(obj_name, line)?) // P23, via P49
+            let obj_name = ObjName::Computed(Box::new(primary_expr), line);
+            // P23: Expr -> ObjName . MethodName ( (Actuals)? ), via P49: ObjName -> ( Expr )
+            Expr::Call(self.parse_method_call_suffix(obj_name, line)?)
         } else {
-            primary
+            primary_expr
         };
         if self.check(&TokenKind::RParen) {
             // P28: Expr -> ( Expr )
@@ -668,25 +628,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // first(Expr).
-    fn is_start_of_expr(&self) -> bool {
-        matches!(
-            self.peek().kind,
-            TokenKind::Num(_)
-                | TokenKind::KwTrue
-                | TokenKind::KwFalse
-                | TokenKind::Str(_)
-                | TokenKind::KwNull
-                | TokenKind::KwNew
-                | TokenKind::Ident(_)
-                | TokenKind::KwThis
-                | TokenKind::KwSuper
-                | TokenKind::LParen
-        )
-    }
-
     // P25/P26/P30: Expr -> ... (continuation after the caller's own first Expr)
-    fn parse_operator_suffix(&mut self, primary: Expr, line: u32) -> Result<Expr, ParseError> {
+    fn parse_operator_suffix(&mut self, primary_expr: Expr, line: u32) -> Result<Expr, ParseError> {
         match self.peek().kind.clone() {
             TokenKind::Question => {
                 // P25: Expr -> ( Expr ? Expr : Expr )
@@ -696,7 +639,7 @@ impl<'a> Parser<'a> {
                 let else_expr = self.parse_expr()?;
                 self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
                 Ok(Expr::Ternary(
-                    Box::new(primary),
+                    Box::new(primary_expr),
                     Box::new(if_expr),
                     Box::new(else_expr),
                     line,
@@ -705,9 +648,9 @@ impl<'a> Parser<'a> {
             TokenKind::KwInstanceof => {
                 // P30: Expr -> ( Expr instanceof ClassName )
                 self.advance(); // "instanceof"
-                let class_name = self.parse_class_name()?; // P44
+                let class_name = self.parse_class_name()?; // P44: ClassName -> Identifier
                 self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
-                Ok(Expr::InstanceOf(Box::new(primary), class_name, line))
+                Ok(Expr::InstanceOf(Box::new(primary_expr), class_name, line))
             }
             other => {
                 if let Some(op) = Self::to_binop(&other) {
@@ -715,7 +658,12 @@ impl<'a> Parser<'a> {
                     self.advance(); // Binop token
                     let right = self.parse_expr()?;
                     self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
-                    Ok(Expr::Binop(Box::new(primary), op, Box::new(right), line))
+                    Ok(Expr::Binop(
+                        Box::new(primary_expr),
+                        op,
+                        Box::new(right),
+                        line,
+                    ))
                 } else {
                     Err(new_parse_error(
                         ErrorCode::EParsePhaseOther,
@@ -747,25 +695,13 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // LL(2) lookahead disambiguating P28 vs. P29.
-    fn is_cast_type_ahead(&self) -> bool {
-        if !self.check(&TokenKind::LParen) {
-            return false;
-        }
-        match &self.peek_ahead1().kind {
-            TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid => true,
-            TokenKind::Ident(_) => self.peek_ahead2().kind == TokenKind::RParen,
-            _ => false,
-        }
-    }
-
     // P35/P37/P38/P39: Type -> void | int | bool | String
     fn try_parse_primitive_type(&mut self) -> Option<Type> {
         let ty = match &self.peek().kind {
-            TokenKind::KwInt => Type::Int,       // P37
-            TokenKind::KwBool => Type::Bool,     // P38
-            TokenKind::KwString => Type::String, // P39
-            TokenKind::KwVoid => Type::Void,     // P35
+            TokenKind::KwInt => Type::Int,       // P37: Type -> int
+            TokenKind::KwBool => Type::Bool,     // P38: Type -> bool
+            TokenKind::KwString => Type::String, // P39: Type -> String
+            TokenKind::KwVoid => Type::Void,     // P35: Type -> void
             _ => return None,
         };
         self.advance(); // primitive-type keyword
@@ -778,7 +714,7 @@ impl<'a> Parser<'a> {
             return Ok(ty);
         }
         // P36: Type -> ClassName
-        let class_name = self.parse_class_name()?; // P44
+        let class_name = self.parse_class_name()?; // P44: ClassName -> Identifier
         Ok(Type::Class(class_name))
     }
 
@@ -855,6 +791,56 @@ impl<'a> Parser<'a> {
         }
     }
 
+    // ================================
+    // Parse-time semantic checks (not grammar productions)
+    // ================================
+
+    fn hoist(&self, decl: VarDecl, ctx: &mut ParseContext) -> Result<(), ParseError> {
+        for (i, identifier) in decl.identifiers.iter().enumerate() {
+            let is_duplicate = decl.identifiers[..i].contains(identifier)
+                || ctx
+                    .locals
+                    .iter()
+                    .any(|existing| existing.identifiers.contains(identifier));
+            if is_duplicate {
+                return Err(new_parse_error(
+                    ErrorCode::EDuplicateLocal,
+                    decl.line,
+                    format!("duplicate local '{}'", identifier),
+                ));
+            }
+        }
+        ctx.locals.push(decl);
+        Ok(())
+    }
+
+    fn misplaced_delegation_error(&self, ctx: &ParseContext) -> Option<ParseError> {
+        let constructor = ctx.constructor?;
+        let is_this = self.check(&TokenKind::KwThis);
+        let is_super = self.check(&TokenKind::KwSuper);
+        if !(is_this || is_super) || self.peek_ahead1().kind != TokenKind::LParen {
+            return None;
+        }
+        let code = if !constructor.at_top_level {
+            ErrorCode::EDelegationNotFirstStatement
+        } else {
+            match constructor.delegation {
+                Some(DelegationKeyword::This) if is_super => ErrorCode::EDelegationBothSuperAndThis,
+                Some(DelegationKeyword::Super) if is_this => ErrorCode::EDelegationBothSuperAndThis,
+                _ => ErrorCode::EDelegationNotFirstStatement,
+            }
+        };
+        Some(new_parse_error(
+            code,
+            self.peek().line,
+            "misplaced constructor this()/super() call",
+        ))
+    }
+
+    // ================================
+    // Token-level helpers (not grammar productions)
+    // ================================
+
     fn peek(&self) -> &Token {
         &self.tokens[self.pos]
     }
@@ -922,6 +908,35 @@ impl<'a> Parser<'a> {
         match &self.peek().kind {
             TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid => true,
             TokenKind::Ident(_) => matches!(self.peek_ahead1().kind, TokenKind::Ident(_)),
+            _ => false,
+        }
+    }
+
+    // first(Expr).
+    fn is_start_of_expr(&self) -> bool {
+        matches!(
+            self.peek().kind,
+            TokenKind::Num(_)
+                | TokenKind::KwTrue
+                | TokenKind::KwFalse
+                | TokenKind::Str(_)
+                | TokenKind::KwNull
+                | TokenKind::KwNew
+                | TokenKind::Ident(_)
+                | TokenKind::KwThis
+                | TokenKind::KwSuper
+                | TokenKind::LParen
+        )
+    }
+
+    // LL(2) lookahead disambiguating P28 vs. P29.
+    fn is_cast_type_ahead(&self) -> bool {
+        if !self.check(&TokenKind::LParen) {
+            return false;
+        }
+        match &self.peek_ahead1().kind {
+            TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid => true,
+            TokenKind::Ident(_) => self.peek_ahead2().kind == TokenKind::RParen,
             _ => false,
         }
     }
