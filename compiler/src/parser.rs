@@ -577,7 +577,7 @@ impl<'a> Parser<'a> {
             return Ok(Expr::Unop(op, Box::new(operand), line));
         }
 
-        if let Some(ty) = self.primitive_type_ahead() {
+        if let Some(ty) = self.peek_primitive_type() {
             // P29: Expr -> ( ( Type ) Expr ), Type -> int | bool | String | void
             self.advance(); // second "("
             self.advance(); // primitive-type keyword
@@ -927,7 +927,7 @@ impl<'a> Parser<'a> {
     }
 
     // LL(2) lookahead disambiguating a primitive-Type P29 from P25/P26/P28/P30.
-    fn primitive_type_ahead(&self) -> Option<Type> {
+    fn peek_primitive_type(&self) -> Option<Type> {
         if !self.check(&TokenKind::LParen) {
             return None;
         }
