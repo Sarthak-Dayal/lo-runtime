@@ -2,7 +2,21 @@ use crate::ast::{ClassDecl, Formal, IoOp, MethodBody, MethodDecl, Program, Type}
 
 const SYNTHETIC_LINE: u32 = 0;
 
+/// The classes this module injects, in injection order. This is the single
+/// source of truth for "which classes are synthetic preamble" — callers
+/// (e.g. the type checker's `ClassKind` assignment) should check membership
+/// here rather than reverse-engineering it from `line == 0` or any other
+/// structural signal.
+pub const CLASS_NAMES: [&str; 2] = ["Input", "Output"];
+
+/// Prepends the `Input`/`Output` preamble classes to `program`. This must be
+/// called exactly once, from `type_checker::check_program`, before any other
+/// pass runs — calling it twice would silently duplicate both classes.
 pub fn add_io_classes(mut program: Program) -> Program {
+    debug_assert!(
+        !program.classes.iter().any(|c| CLASS_NAMES.contains(&c.class_name.as_str())),
+        "add_io_classes called on a program that already has the preamble classes"
+    );
     let mut classes = vec![input_class(), output_class()];
     classes.append(&mut program.classes);
     program.classes = classes;
@@ -111,7 +125,9 @@ mod tests {
             .iter()
             .map(|c| c.class_name.as_str())
             .collect();
-        assert_eq!(names, vec!["Input", "Output", "Main"]);
+        let mut expected = CLASS_NAMES.to_vec();
+        expected.push("Main");
+        assert_eq!(names, expected);
     }
 
     #[test]

@@ -25,24 +25,27 @@ impl TypeError {
 pub enum ErrorCode {
     // well-formedness
     EDuplicateClassName,
-    EReservedClassName,
     EDuplicateField,
     EDuplicateMethod,
-    EDuplicateFormal,
     EDuplicateConstructorArity,
     EFieldTypedVoid,
     EFormalTypedVoid,
-    ELocalTypedVoid,
     EReturnInVoidMethod,
     EReturnMissing,
     EReturnInConstructor,
-    EBreakOutsideLoop,
+    ELocalShadowsFormal,
     EWellFormednessOther,
     // name resolution
     EUnknownVariable,
-    ELocalShadowsFormal,
     EReservedVariableName,
+    EReservedClassName,
+    EUnknownClass,
     EUnknownMethod,
+    /// Never constructed: `Expr::This` only ever parses inside a `BodyScope`
+    /// (a method or constructor body), so this AST has no position for
+    /// `this` to appear "outside" one. Kept for 1:1 coverage of the
+    /// reference vocabulary.
+    EThisOutsideInstance,
     ENameResolutionOther,
     // type-check
     ETypeMismatch,
@@ -59,7 +62,6 @@ pub enum ErrorCode {
     EVoidCallInExpression,
     ETypeCheckOther,
     // inheritance-check
-    EUnknownClass,
     EInheritanceCycle,
     EFieldShadowing,
     EOverrideSignatureMismatch,
@@ -90,23 +92,22 @@ impl ErrorCode {
         use ErrorCode::*;
         match self {
             EDuplicateClassName => "E_DUPLICATE_CLASS_NAME",
-            EReservedClassName => "E_RESERVED_CLASS_NAME",
             EDuplicateField => "E_DUPLICATE_FIELD",
             EDuplicateMethod => "E_DUPLICATE_METHOD",
-            EDuplicateFormal => "E_DUPLICATE_FORMAL",
             EDuplicateConstructorArity => "E_DUPLICATE_CONSTRUCTOR_ARITY",
             EFieldTypedVoid => "E_FIELD_TYPED_VOID",
             EFormalTypedVoid => "E_FORMAL_TYPED_VOID",
-            ELocalTypedVoid => "E_LOCAL_TYPED_VOID",
             EReturnInVoidMethod => "E_RETURN_IN_VOID_METHOD",
             EReturnMissing => "E_RETURN_MISSING",
             EReturnInConstructor => "E_RETURN_IN_CONSTRUCTOR",
-            EBreakOutsideLoop => "E_BREAK_OUTSIDE_LOOP",
+            ELocalShadowsFormal => "E_LOCAL_SHADOWS_FORMAL",
             EWellFormednessOther => "E_WELL_FORMEDNESS_OTHER",
             EUnknownVariable => "E_UNKNOWN_VARIABLE",
-            ELocalShadowsFormal => "E_LOCAL_SHADOWS_FORMAL",
             EReservedVariableName => "E_RESERVED_VARIABLE_NAME",
+            EReservedClassName => "E_RESERVED_CLASS_NAME",
+            EUnknownClass => "E_UNKNOWN_CLASS",
             EUnknownMethod => "E_UNKNOWN_METHOD",
+            EThisOutsideInstance => "E_THIS_OUTSIDE_INSTANCE",
             ENameResolutionOther => "E_NAME_RESOLUTION_OTHER",
             ETypeMismatch => "E_TYPE_MISMATCH",
             EAssignTypeMismatch => "E_ASSIGN_TYPE_MISMATCH",
@@ -121,7 +122,6 @@ impl ErrorCode {
             ENonvoidCallAsStatement => "E_NONVOID_CALL_AS_STATEMENT",
             EVoidCallInExpression => "E_VOID_CALL_IN_EXPRESSION",
             ETypeCheckOther => "E_TYPE_CHECK_OTHER",
-            EUnknownClass => "E_UNKNOWN_CLASS",
             EInheritanceCycle => "E_INHERITANCE_CYCLE",
             EFieldShadowing => "E_FIELD_SHADOWING",
             EOverrideSignatureMismatch => "E_OVERRIDE_SIGNATURE_MISMATCH",
@@ -174,7 +174,7 @@ pub enum ClassKind {
 }
 
 pub struct TypedClassDecl {
-    pub name: String,
+    pub class_name: String,
     pub kind: ClassKind,
     pub extends: Option<String>,
     pub fields: Vec<(String, Type)>,
@@ -201,7 +201,7 @@ pub enum TypedDelegation {
 }
 
 pub struct TypedMethodDecl {
-    pub name: String,
+    pub method_name: String,
     pub return_type: Type,
     pub params: Vec<(String, Type)>,
     pub body: TypedMethodBody,
@@ -217,12 +217,15 @@ pub enum BindingInfo {
     Local(Type),
     Formal(Type),
     Field { owner: String, ty: Type },
+    /// `in`/`out`/`err` — the program-scope names the preamble binds. Not a
+    /// field of any class, so distinct from `Field` rather than faked as one.
+    Prebound(Type),
 }
 
 impl BindingInfo {
     pub fn ty(&self) -> &Type {
         match self {
-            BindingInfo::Local(t) | BindingInfo::Formal(t) => t,
+            BindingInfo::Local(t) | BindingInfo::Formal(t) | BindingInfo::Prebound(t) => t,
             BindingInfo::Field { ty, .. } => ty,
         }
     }
@@ -240,16 +243,26 @@ pub enum TypedStmt {
 
 pub struct TypedMethodCall {
     pub receiver: TypedReceiver,
-    pub name: String,
-    /// The class whose `effective_methods` entry resolved this call.
-    pub owner: String,
+    pub method_name: String,
+    pub resolution: MethodResolution,
     pub args: Vec<TypedExpr>,
     pub return_type: Type,
 }
 
+/// How a call's target is found at runtime — distinct from `r.m()` and
+/// `super.m()` having different resolution semantics (static-type virtual
+/// dispatch vs. resolving from the nearest ancestor that declares the
+/// method), and from a built-in IO operation having no vtable slot at all.
+pub enum MethodResolution {
+    Virtual { static_class: String },
+    Super { declaring_class: String },
+    Io { op: IoOp },
+}
+
 pub enum TypedReceiver {
     This(String),
-    /// Owner lives on the enclosing `TypedMethodCall`.
+    /// The declaring class lives on the enclosing `TypedMethodCall`'s
+    /// `MethodResolution::Super`.
     Super,
     Var { name: String, binding: BindingInfo },
     Computed(Box<TypedExpr>),
@@ -267,7 +280,10 @@ pub enum TypedExpr {
     Var { name: String, binding: BindingInfo },
     New { class: String, args: Vec<TypedExpr> },
     Call(TypedMethodCall),
-    Ternary { cond: Box<TypedExpr>, then_branch: Box<TypedExpr>, else_branch: Box<TypedExpr>, ty: Type },
+    /// `ty: None` iff both branches are `null` — like `TypedExpr::Null`, no
+    /// type of its own; the surrounding context (assignment target, cast,
+    /// enclosing ternary) resolves it.
+    Ternary { cond: Box<TypedExpr>, then_branch: Box<TypedExpr>, else_branch: Box<TypedExpr>, ty: Option<Type> },
     Binary { lhs: Box<TypedExpr>, op: Binop, rhs: Box<TypedExpr>, ty: Type },
     Unary { op: Unop, operand: Box<TypedExpr>, ty: Type },
     Cast { target: Type, operand: Box<TypedExpr>, direction: CastDirection },
@@ -278,6 +294,8 @@ pub enum TypedExpr {
 pub enum CastDirection {
     Upcast,
     Downcast,
+    /// The operand is the literal `null` — always succeeds, no runtime check.
+    Null,
 }
 
 fn typed_of(e: &TypedExpr) -> ExprType {
@@ -290,9 +308,9 @@ fn typed_of(e: &TypedExpr) -> ExprType {
         TypedExpr::Var { binding, .. } => ExprType::Concrete(binding.ty().clone()),
         TypedExpr::New { class, .. } => ExprType::Concrete(Type::Class(class.clone())),
         TypedExpr::Call(call) => ExprType::Concrete(call.return_type.clone()),
-        TypedExpr::Ternary { ty, .. }
-        | TypedExpr::Binary { ty, .. }
-        | TypedExpr::Unary { ty, .. } => ExprType::Concrete(ty.clone()),
+        TypedExpr::Ternary { ty: Some(t), .. } => ExprType::Concrete(t.clone()),
+        TypedExpr::Ternary { ty: None, .. } => ExprType::NullLiteral,
+        TypedExpr::Binary { ty, .. } | TypedExpr::Unary { ty, .. } => ExprType::Concrete(ty.clone()),
         TypedExpr::Cast { target, .. } => ExprType::Concrete(target.clone()),
         TypedExpr::InstanceOf { .. } => ExprType::Concrete(Type::Bool),
     }
@@ -316,8 +334,31 @@ pub struct ClassInfo {
     own_constructors: Vec<ConstructorSig>,
 
     pub ancestors: Vec<String>,
-    pub effective_fields: Vec<(String, Type, String)>,
-    pub effective_methods: HashMap<String, (String, MethodSig)>,
+    pub effective_fields: Vec<FieldInfo>,
+    pub effective_methods: HashMap<String, MethodEntry>,
+
+    /// Method names in vtable-slot order: an inherited method keeps its
+    /// parent's slot, an override reuses that slot, and a genuinely new
+    /// method is appended. `method_slot[name]` is that name's index here.
+    pub vtable: Vec<String>,
+    pub method_slot: HashMap<String, usize>,
+}
+
+/// An effective (possibly inherited) field: where it's declared and its type.
+#[derive(Clone)]
+pub struct FieldInfo {
+    pub name: String,
+    pub ty: Type,
+    pub owner: String,
+}
+
+/// An effective (possibly inherited) method: which class's signature won out
+/// and what that signature is. `owner` is the declaring class, not
+/// necessarily the class this `ClassInfo` belongs to.
+#[derive(Clone)]
+pub struct MethodEntry {
+    pub owner: String,
+    pub sig: MethodSig,
 }
 
 #[derive(Clone, PartialEq)]
@@ -326,6 +367,9 @@ pub struct MethodSig {
     pub params: Vec<Type>,
     pub return_type: Type,
     pub line: u32,
+    /// `Some(op)` iff this signature's body is a built-in IO operation rather
+    /// than user-defined code.
+    pub is_io: Option<IoOp>,
 }
 
 #[derive(Clone)]
@@ -421,7 +465,6 @@ fn preamble_binding(name: &str) -> Option<Type> {
 // Pass 1 — gather_declarations
 // ---------------------------------------------------------------------------
 
-const RESERVED_CLASS_NAMES: &[&str] = &["Input", "Output"];
 const RESERVED_VAR_NAMES: &[&str] = &["in", "out", "err"];
 
 fn check_not_reserved_var_name(name: &str, line: u32) -> Result<(), TypeError> {
@@ -439,7 +482,7 @@ fn check_formals_well_formed(formals: &[Formal]) -> Result<(), TypeError> {
         }
         check_not_reserved_var_name(&f.identifier, f.line)?;
         if !seen.insert(f.identifier.clone()) {
-            return Err(TypeError::new(ErrorCode::EDuplicateFormal, f.line, format!("duplicate formal parameter '{}'", f.identifier)));
+            return Err(TypeError::new(ErrorCode::EWellFormednessOther, f.line, format!("duplicate formal parameter '{}'", f.identifier)));
         }
     }
     Ok(())
@@ -453,7 +496,7 @@ fn gather_declarations(program: &Program) -> Result<ClassTable, TypeError> {
         // Reserved-name check before duplicate-name: both preamble classes are
         // already present by the time any user class is visited, so a user's
         // `class Input(){}` would otherwise collide with EDuplicateClassName first.
-        if RESERVED_CLASS_NAMES.contains(&class.class_name.as_str()) && class.line != 0 {
+        if crate::add_io_classes::CLASS_NAMES.contains(&class.class_name.as_str()) && class.line != 0 {
             return Err(TypeError::new(ErrorCode::EReservedClassName, class.line, format!("class name '{}' is reserved", class.class_name)));
         }
         if classes.contains_key(&class.class_name) {
@@ -482,11 +525,16 @@ fn gather_declarations(program: &Program) -> Result<ClassTable, TypeError> {
                 return Err(TypeError::new(ErrorCode::EDuplicateMethod, method.line, format!("duplicate method '{}'", method.method_name)));
             }
             check_formals_well_formed(&method.formals)?;
+            let is_io = match &method.body {
+                MethodBody::Io(op) => Some(op.clone()),
+                MethodBody::UserDefined(_) => None,
+            };
             own_methods.push(MethodSig {
                 name: method.method_name.clone(),
                 params: method.formals.iter().map(|f| f.declared_type.clone()).collect(),
                 return_type: method.return_type.clone(),
                 line: method.line,
+                is_io,
             });
         }
 
@@ -521,10 +569,16 @@ fn gather_declarations(program: &Program) -> Result<ClassTable, TypeError> {
             });
         }
 
+        let kind = if crate::add_io_classes::CLASS_NAMES.contains(&class.class_name.as_str()) {
+            ClassKind::Preamble
+        } else {
+            ClassKind::User
+        };
+
         order.push(class.class_name.clone());
         classes.insert(class.class_name.clone(), ClassInfo {
             decl_line: class.line,
-            kind: if class.line == 0 { ClassKind::Preamble } else { ClassKind::User },
+            kind,
             parent: class.extends.clone(),
             own_fields,
             own_methods,
@@ -532,6 +586,8 @@ fn gather_declarations(program: &Program) -> Result<ClassTable, TypeError> {
             ancestors: Vec::new(),
             effective_fields: Vec::new(),
             effective_methods: HashMap::new(),
+            vtable: Vec::new(),
+            method_slot: HashMap::new(),
         });
     }
 
@@ -604,40 +660,55 @@ fn compute_effective(name: &str, table: &mut ClassTable, done: &mut HashSet<Stri
     }
     let parent = table.classes[name].parent.clone();
 
-    let (ancestors, mut effective_fields, mut effective_methods) = match &parent {
-        None => (vec![], vec![], HashMap::new()),
+    let (ancestors, mut effective_fields, mut effective_methods, mut vtable, mut method_slot) = match &parent {
+        None => (vec![], vec![], HashMap::new(), vec![], HashMap::new()),
         Some(p) => {
             compute_effective(p, table, done)?;
             let parent_info = &table.classes[p];
             let mut ancestors = vec![p.clone()];
             ancestors.extend(parent_info.ancestors.iter().cloned());
-            (ancestors, parent_info.effective_fields.clone(), parent_info.effective_methods.clone())
+            (
+                ancestors,
+                parent_info.effective_fields.clone(),
+                parent_info.effective_methods.clone(),
+                parent_info.vtable.clone(),
+                parent_info.method_slot.clone(),
+            )
         }
     };
 
     let info = &table.classes[name];
 
     for (fname, ftype, fline) in &info.own_fields {
-        if effective_fields.iter().any(|(n, ..)| n == fname) {
+        if effective_fields.iter().any(|f| &f.name == fname) {
             return Err(TypeError::new(ErrorCode::EFieldShadowing, *fline, format!("field '{}' shadows an inherited field", fname)));
         }
-        effective_fields.push((fname.clone(), ftype.clone(), name.to_string()));
+        effective_fields.push(FieldInfo { name: fname.clone(), ty: ftype.clone(), owner: name.to_string() });
     }
 
     for m in &info.own_methods {
-        if let Some((_, existing)) = effective_methods.get(&m.name) {
-            if existing.params != m.params || existing.return_type != m.return_type {
+        if let Some(existing) = effective_methods.get(&m.name) {
+            if existing.sig.params != m.params || existing.sig.return_type != m.return_type {
                 return Err(TypeError::new(ErrorCode::EOverrideSignatureMismatch, m.line,
                     format!("'{}' overrides an ancestor method with a different signature", m.name)));
             }
         }
-        effective_methods.insert(m.name.clone(), (name.to_string(), m.clone()));
+        effective_methods.insert(m.name.clone(), MethodEntry { owner: name.to_string(), sig: m.clone() });
+
+        // Inherited or overridden: keep the existing slot. Genuinely new: append one.
+        if !method_slot.contains_key(&m.name) {
+            let slot = vtable.len();
+            vtable.push(m.name.clone());
+            method_slot.insert(m.name.clone(), slot);
+        }
     }
 
     let info = table.classes.get_mut(name).unwrap();
     info.ancestors = ancestors;
     info.effective_fields = effective_fields;
     info.effective_methods = effective_methods;
+    info.vtable = vtable;
+    info.method_slot = method_slot;
     done.insert(name.to_string());
     Ok(())
 }
@@ -687,7 +758,7 @@ impl Scope {
         }
         for decl in locals {
             if decl.declared_type == Type::Void {
-                return Err(TypeError::new(ErrorCode::ELocalTypedVoid, decl.line, "a local variable cannot have type void"));
+                return Err(TypeError::new(ErrorCode::EWellFormednessOther, decl.line, "a local variable cannot have type void"));
             }
             check_type_reference(&decl.declared_type, table, decl.line, "local declaration")?;
             for name in &decl.identifiers {
@@ -712,10 +783,10 @@ fn resolve_name(name: &str, scope: &Scope, class_name: &str, table: &ClassTable)
         });
     }
     let info = table.get(class_name)?;
-    if let Some((_, t, owner)) = info.effective_fields.iter().find(|(n, ..)| n == name) {
-        return Some(BindingInfo::Field { owner: owner.clone(), ty: t.clone() });
+    if let Some(field) = info.effective_fields.iter().find(|f| f.name == name) {
+        return Some(BindingInfo::Field { owner: field.owner.clone(), ty: field.ty.clone() });
     }
-    preamble_binding(name).map(|t| BindingInfo::Field { owner: "<preamble>".to_string(), ty: t })
+    preamble_binding(name).map(BindingInfo::Prebound)
 }
 
 // ---------------------------------------------------------------------------
@@ -760,7 +831,7 @@ fn check_bodies(program: &Program, table: &ClassTable) -> Result<TypedProgram, T
             let body = match &method.body {
                 MethodBody::Io(op) => {
                     typed_methods.push(TypedMethodDecl {
-                        name: method.method_name.clone(),
+                        method_name: method.method_name.clone(),
                         return_type: method.return_type.clone(),
                         params: method.formals.iter().map(|f| (f.identifier.clone(), f.declared_type.clone())).collect(),
                         body: TypedMethodBody::Io(op.clone()),
@@ -779,7 +850,7 @@ fn check_bodies(program: &Program, table: &ClassTable) -> Result<TypedProgram, T
                 return Err(TypeError::new(ErrorCode::EReturnMissing, method.line, format!("'{}' does not return on every path", method.method_name)));
             }
             typed_methods.push(TypedMethodDecl {
-                name: method.method_name.clone(),
+                method_name: method.method_name.clone(),
                 return_type: method.return_type.clone(),
                 params: method.formals.iter().map(|f| (f.identifier.clone(), f.declared_type.clone())).collect(),
                 body: TypedMethodBody::UserDefined { locals: flatten_locals(&body.locals), stmts: typed_stmts },
@@ -795,9 +866,9 @@ fn check_bodies(program: &Program, table: &ClassTable) -> Result<TypedProgram, T
             check_delegation_cycle(&class.class_name, table)?;
             let mut typed_ctors = Vec::with_capacity(class.constructors.len());
             for ctor in &class.constructors {
-                if ctor.delegation.is_none() && ctor.body.stmts.is_empty() {
+                if ctor.delegation.is_none() && ctor.body.stmts.is_empty() && ctor.body.locals.is_empty() {
                     return Err(TypeError::new(ErrorCode::EWellFormednessOther, ctor.line,
-                        "constructor body must contain a delegation or at least one statement"));
+                        "constructor body must contain a delegation, a declaration, or at least one statement"));
                 }
                 let scope = Scope::build(&ctor.formals, &ctor.body.locals, table)?;
                 let typed_delegation = check_delegation(ctor, &class.class_name, &scope, table)?;
@@ -817,7 +888,7 @@ fn check_bodies(program: &Program, table: &ClassTable) -> Result<TypedProgram, T
         };
 
         typed_classes.push(TypedClassDecl {
-            name: class.class_name.clone(),
+            class_name: class.class_name.clone(),
             kind: info.kind,
             extends: class.extends.clone(),
             fields: class.fields.iter()
@@ -880,7 +951,7 @@ fn check_stmt(stmt: &Stmt, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> 
 
         Stmt::Break(line) => {
             if !ctx.in_loop {
-                return Err(TypeError::new(ErrorCode::EBreakOutsideLoop, *line, "'break' outside an enclosing while loop"));
+                return Err(TypeError::new(ErrorCode::EWellFormednessOther, *line, "'break' outside an enclosing while loop"));
             }
             TypedStmt::Break
         }
@@ -944,7 +1015,11 @@ fn check_expr(expr: &Expr, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> 
             let typed_cond = expect_bool(cond, scope, ctx, table, *line)?;
             let typed_then = check_expr(then_e, scope, ctx, table)?;
             let typed_else = check_expr(else_e, scope, ctx, table)?;
-            let ty = combine_ternary_branches(&typed_of(&typed_then), &typed_of(&typed_else), table, *line)?;
+            let combined = combine_ternary_branches(&typed_of(&typed_then), &typed_of(&typed_else), table, *line)?;
+            let ty = match combined {
+                ExprType::Concrete(t) => Some(t),
+                ExprType::NullLiteral => None,
+            };
             TypedExpr::Ternary { cond: Box::new(typed_cond), then_branch: Box::new(typed_then), else_branch: Box::new(typed_else), ty }
         }
 
@@ -970,8 +1045,7 @@ fn check_expr(expr: &Expr, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> 
             }
             let typed_operand = check_expr(operand, scope, ctx, table)?;
             let direction = match typed_of(&typed_operand) {
-                // A cast applied to null always succeeds; no runtime check needed.
-                ExprType::NullLiteral => CastDirection::Upcast,
+                ExprType::NullLiteral => CastDirection::Null,
                 ExprType::Concrete(Type::Class(source_name)) => {
                     if table.is_subtype(&source_name, target_name) {
                         CastDirection::Upcast
@@ -1063,7 +1137,7 @@ fn resolve_receiver(obj_name: &ObjName, scope: &Scope, ctx: &BodyCtx, table: &Cl
 fn check_method_call(call: &MethodCall, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> Result<TypedMethodCall, TypeError> {
     let r = resolve_receiver(&call.obj_name, scope, ctx, table)?;
 
-    let (owner, sig) = if r.is_super {
+    let entry = if r.is_super {
         let parent = table.get(ctx.class_name).and_then(|i| i.parent.as_deref()).unwrap();
         table.get(parent).unwrap().effective_methods.get(&call.method_name).cloned()
             .ok_or_else(|| TypeError::new(ErrorCode::ESuperMethodUnresolved, call.line, format!("no ancestor declares method '{}'", call.method_name)))?
@@ -1072,9 +1146,18 @@ fn check_method_call(call: &MethodCall, scope: &Scope, ctx: &BodyCtx, table: &Cl
         info.effective_methods.get(&call.method_name).cloned()
             .ok_or_else(|| TypeError::new(ErrorCode::EUnknownMethod, call.line, format!("unknown method '{}' on class '{}'", call.method_name, r.search_class)))?
     };
+    let MethodEntry { owner, sig } = entry;
+
+    let resolution = if r.is_super {
+        MethodResolution::Super { declaring_class: owner }
+    } else if let Some(op) = &sig.is_io {
+        MethodResolution::Io { op: op.clone() }
+    } else {
+        MethodResolution::Virtual { static_class: r.search_class.clone() }
+    };
 
     let typed_args = check_actuals(&sig.params, &call.actuals, scope, ctx, table, call.line, &sig.name)?;
-    Ok(TypedMethodCall { receiver: r.typed, name: call.method_name.clone(), owner, args: typed_args, return_type: sig.return_type })
+    Ok(TypedMethodCall { receiver: r.typed, method_name: call.method_name.clone(), resolution, args: typed_args, return_type: sig.return_type })
 }
 
 fn check_actuals(
@@ -1167,14 +1250,20 @@ fn assignment_compatible(from: &ExprType, to: &Type, table: &ClassTable) -> bool
     }
 }
 
-fn combine_ternary_branches(a: &ExprType, b: &ExprType, table: &ClassTable, line: u32) -> Result<Type, TypeError> {
+/// The domain here is `Type` or `Null`, not just `Type`: `x ? null : null` is
+/// legal — its type is deferred to whatever context the ternary itself sits
+/// in (an assignment target, a cast, an enclosing ternary), exactly like a
+/// bare `null` literal.
+fn combine_ternary_branches(a: &ExprType, b: &ExprType, table: &ClassTable, line: u32) -> Result<ExprType, TypeError> {
     use ExprType::*;
     let mismatch = || TypeError::new(ErrorCode::EConditionalTypeMismatch, line, "ternary branches have incompatible types");
     match (a, b) {
-        (NullLiteral, NullLiteral) => Err(mismatch()),
-        (NullLiteral, Concrete(t @ Type::Class(_))) | (Concrete(t @ Type::Class(_)), NullLiteral) => Ok(t.clone()),
-        (Concrete(t1), Concrete(t2)) if t1 == t2 => Ok(t1.clone()),
-        (Concrete(Type::Class(c1)), Concrete(Type::Class(c2))) => least_common_ancestor(c1, c2, table).map(Type::Class).ok_or_else(mismatch),
+        (NullLiteral, NullLiteral) => Ok(NullLiteral),
+        (NullLiteral, Concrete(t @ Type::Class(_))) | (Concrete(t @ Type::Class(_)), NullLiteral) => Ok(Concrete(t.clone())),
+        (Concrete(t1), Concrete(t2)) if t1 == t2 => Ok(Concrete(t1.clone())),
+        (Concrete(Type::Class(c1)), Concrete(Type::Class(c2))) => {
+            least_common_ancestor(c1, c2, table).map(|c| Concrete(Type::Class(c))).ok_or_else(mismatch)
+        }
         _ => Err(mismatch()),
     }
 }
