@@ -257,7 +257,7 @@ impl<'a> Parser<'a> {
 
     // P4: ClassDecl -> class ClassName (extends ClassName)? ( (VarDecl)* ) ( [ (ConstructorDecl)+ ] )? { (MethodDecl)* }
     fn parse_class_decl(&mut self) -> Result<ClassDecl, ParseError> {
-        let line = self.peek().line;
+        let line = self.peek1().line;
         self.expect(TokenKind::KwClass, ErrorCode::EMalformedClassDecl)?; // "class"
         let class_name = self.parse_class_name()?; // P44: ClassName -> Identifier
 
@@ -280,7 +280,7 @@ impl<'a> Parser<'a> {
             if self.check(&TokenKind::RBracket) {
                 return Err(new_parse_error(
                     ErrorCode::EMalformedClassDecl,
-                    self.peek().line,
+                    self.peek1().line,
                     "empty [ ] constructor section",
                 ));
             }
@@ -315,7 +315,7 @@ impl<'a> Parser<'a> {
     // P5: ConstructorDecl -> ClassName ( (Formals)? ) { ( this ( (Actuals)? ) ; )? (VarDecl)* (Stmt)* }
     // P6: ConstructorDecl -> ClassName ( (Formals)? ) { ( super ( (Actuals)? ) ; )? (VarDecl)* (Stmt)* }
     fn parse_constructor_decl(&mut self, class_name: &str) -> Result<ConstructorDecl, ParseError> {
-        let line = self.peek().line;
+        let line = self.peek1().line;
         let constructor_name = self.parse_class_name()?; // P44: ClassName -> Identifier
         if constructor_name != class_name {
             return Err(new_parse_error(
@@ -335,7 +335,7 @@ impl<'a> Parser<'a> {
         };
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
 
-        let body_line = self.peek().line;
+        let body_line = self.peek1().line;
         self.expect(TokenKind::LBrace, ErrorCode::EParsePhaseOther)?; // "{"
         let delegation = self.parse_constructor_delegation()?;
         let mut locals = Vec::new();
@@ -369,13 +369,13 @@ impl<'a> Parser<'a> {
     fn parse_constructor_delegation(
         &mut self,
     ) -> Result<Option<ConstructorDelegation>, ParseError> {
-        let line = self.peek().line;
+        let line = self.peek1().line;
         let is_this = self.check(&TokenKind::KwThis);
         let is_super = self.check(&TokenKind::KwSuper);
         if !is_this && !is_super {
             return Ok(None);
         }
-        if self.peek_ahead1().kind != TokenKind::LParen {
+        if self.peek2().kind != TokenKind::LParen {
             return Ok(None);
         }
         self.advance(); // "this" or "super"
@@ -396,7 +396,7 @@ impl<'a> Parser<'a> {
 
     // P7: MethodDecl -> Type MethodName ( (Formals)? ) { (VarDecl)* (Stmt)+ }
     fn parse_method_decl(&mut self) -> Result<MethodDecl, ParseError> {
-        let line = self.peek().line;
+        let line = self.peek1().line;
         let return_type = self.parse_type()?; // P36: Type -> ClassName
         let method_name = self.parse_method_name()?; // P45: MethodName -> Identifier
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
@@ -406,7 +406,7 @@ impl<'a> Parser<'a> {
             self.parse_formals()? // P9: Formals -> Type Identifier ( , Type Identifier)*
         };
         self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
-        let body_line = self.peek().line;
+        let body_line = self.peek1().line;
         self.expect(TokenKind::LBrace, ErrorCode::EParsePhaseOther)?; // "{"
         let mut locals = Vec::new();
         let mut ctx = ParseContext {
@@ -433,7 +433,7 @@ impl<'a> Parser<'a> {
     fn parse_formals(&mut self) -> Result<Vec<Formal>, ParseError> {
         let mut formals = Vec::new();
         loop {
-            let line = self.peek().line;
+            let line = self.peek1().line;
             let declared_type = self.parse_type()?; // P36: Type -> ClassName
             let identifier = self.parse_identifier()?; // Identifier
             formals.push(Formal {
@@ -462,7 +462,7 @@ impl<'a> Parser<'a> {
 
     // P11: VarDecl -> Type Identifier ( , Identifier)* ;
     fn parse_var_decl(&mut self) -> Result<VarDecl, ParseError> {
-        let line = self.peek().line;
+        let line = self.peek1().line;
         let declared_type = self.parse_type()?; // P36: Type -> ClassName
         let mut identifiers = vec![self.parse_identifier()?]; // Identifier
         while self.check(&TokenKind::Comma) {
@@ -509,7 +509,7 @@ impl<'a> Parser<'a> {
         if arity == StmtArity::OneOrMore && stmts.is_empty() {
             return Err(new_parse_error(
                 ErrorCode::EParsePhaseOther,
-                self.peek().line,
+                self.peek1().line,
                 "expected at least one statement",
             ));
         }
@@ -522,8 +522,8 @@ impl<'a> Parser<'a> {
             return Err(delegation_err);
         }
 
-        let line = self.peek().line;
-        match self.peek().kind.clone() {
+        let line = self.peek1().line;
+        match self.peek1().kind.clone() {
             // P13: Stmt -> return Expr ;
             TokenKind::KwReturn => {
                 self.advance(); // "return"
@@ -547,7 +547,7 @@ impl<'a> Parser<'a> {
                 Ok(Stmt::Empty(line))
             }
             TokenKind::Ident(_) => {
-                if self.peek_ahead1().kind == TokenKind::Equals {
+                if self.peek2().kind == TokenKind::Equals {
                     // P17: Stmt -> Var = Expr ;
                     let name = self.parse_var()?; // P50: Var -> Identifier
                     self.advance(); // "="
@@ -571,7 +571,7 @@ impl<'a> Parser<'a> {
 
     // P14: Stmt -> if ( Expr ) Block else Block
     fn parse_if_else_stmt(&mut self, ctx: &mut ParseContext) -> Result<Stmt, ParseError> {
-        let line = self.peek().line;
+        let line = self.peek1().line;
         self.advance(); // "if"
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
         let cond = self.parse_expr()?;
@@ -584,7 +584,7 @@ impl<'a> Parser<'a> {
 
     // P15: Stmt -> while ( Expr ) Block
     fn parse_while_stmt(&mut self, ctx: &mut ParseContext) -> Result<Stmt, ParseError> {
-        let line = self.peek().line;
+        let line = self.peek1().line;
         self.advance(); // "while"
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
         let cond = self.parse_expr()?;
@@ -595,7 +595,7 @@ impl<'a> Parser<'a> {
 
     // P19: Stmt -> ObjName . MethodName ( (Actuals)? ) ;
     fn parse_call_stmt(&mut self) -> Result<Stmt, ParseError> {
-        let line = self.peek().line;
+        let line = self.peek1().line;
         let obj_name = self.parse_obj_name()?;
         let call = self.parse_method_call_suffix(obj_name, line)?;
         self.expect(TokenKind::Semicolon, ErrorCode::EParsePhaseOther)?; // ";"
@@ -604,8 +604,8 @@ impl<'a> Parser<'a> {
 
     // P46-P49: ObjName -> ...
     fn parse_obj_name(&mut self) -> Result<ObjName, ParseError> {
-        let line = self.peek().line;
-        match &self.peek().kind {
+        let line = self.peek1().line;
+        match &self.peek1().kind {
             TokenKind::Ident(_) => {
                 let identifier = self.parse_var()?; // P50: Var -> Identifier
                 Ok(ObjName::Var(identifier, line)) // P46: ObjName -> Var
@@ -658,8 +658,8 @@ impl<'a> Parser<'a> {
 
     // P20-P23, P31, P32: Expr -> ...
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        let line = self.peek().line;
-        match self.peek().kind.clone() {
+        let line = self.peek1().line;
+        match self.peek1().kind.clone() {
             // P32: Expr -> Literal
             TokenKind::Num(_) | TokenKind::KwTrue | TokenKind::KwFalse | TokenKind::Str(_) => {
                 self.parse_literal()
@@ -721,7 +721,7 @@ impl<'a> Parser<'a> {
 
     // P22: Expr -> new ClassName ( (Actuals)? )
     fn parse_new_expr(&mut self) -> Result<Expr, ParseError> {
-        let line = self.peek().line;
+        let line = self.peek1().line;
         self.advance(); // "new"
         let class_name = self.parse_class_name()?; // P44: ClassName -> Identifier
         self.expect(TokenKind::LParen, ErrorCode::EParsePhaseOther)?; // "("
@@ -736,10 +736,10 @@ impl<'a> Parser<'a> {
 
     // P25-P30: Expr -> ...
     fn parse_paren_expr(&mut self) -> Result<Expr, ParseError> {
-        let line = self.peek().line;
+        let line = self.peek1().line;
         self.advance(); // outer "("
 
-        if let Some(op) = Self::to_unop(&self.peek().kind) {
+        if let Some(op) = Self::to_unop(&self.peek1().kind) {
             // P27: Expr -> ( Unop Expr )
             self.advance(); // "~" or "!"
             let operand = self.parse_expr()?;
@@ -804,7 +804,7 @@ impl<'a> Parser<'a> {
 
     // P25/P26/P30: Expr -> ... (continuation after the caller's own first Expr)
     fn parse_operator_suffix(&mut self, primary_expr: Expr, line: u32) -> Result<Expr, ParseError> {
-        match self.peek().kind.clone() {
+        match self.peek1().kind.clone() {
             TokenKind::Question => {
                 // P25: Expr -> ( Expr ? Expr : Expr )
                 self.advance(); // "?"
@@ -841,7 +841,7 @@ impl<'a> Parser<'a> {
                 } else {
                     Err(new_parse_error(
                         ErrorCode::EParsePhaseOther,
-                        self.peek().line,
+                        self.peek1().line,
                         format!(
                             "expected ?, instanceof, an operator, or ) here, found {:?}",
                             other
@@ -871,7 +871,7 @@ impl<'a> Parser<'a> {
 
     // P35/P37/P38/P39: Type -> void | int | bool | String
     fn try_parse_primitive_type(&mut self) -> Option<Type> {
-        let ty = match &self.peek().kind {
+        let ty = match &self.peek1().kind {
             TokenKind::KwInt => Type::Int,       // P37: Type -> int
             TokenKind::KwBool => Type::Bool,     // P38: Type -> bool
             TokenKind::KwString => Type::String, // P39: Type -> String
@@ -909,8 +909,8 @@ impl<'a> Parser<'a> {
 
     // P32: Expr -> Literal; P40-P43: Literal -> ...
     fn parse_literal(&mut self) -> Result<Expr, ParseError> {
-        let line = self.peek().line;
-        match self.peek().kind.clone() {
+        let line = self.peek1().line;
+        match self.peek1().kind.clone() {
             TokenKind::Num(n) => {
                 self.advance(); // P40: Literal -> Num
                 Ok(Expr::Num(n, line))
@@ -946,8 +946,8 @@ impl<'a> Parser<'a> {
 
     // Consumes the lexer's Identifier token (P53).
     fn parse_identifier(&mut self) -> Result<String, ParseError> {
-        let line = self.peek().line;
-        match self.peek().kind.clone() {
+        let line = self.peek1().line;
+        match self.peek1().kind.clone() {
             TokenKind::Ident(identifier) => {
                 self.advance(); // identifier
                 Ok(identifier)
@@ -992,7 +992,7 @@ impl<'a> Parser<'a> {
         let constructor = ctx.constructor?;
         let is_this = self.check(&TokenKind::KwThis);
         let is_super = self.check(&TokenKind::KwSuper);
-        if !(is_this || is_super) || self.peek_ahead1().kind != TokenKind::LParen {
+        if !(is_this || is_super) || self.peek2().kind != TokenKind::LParen {
             return None;
         }
         let code = if !constructor.at_top_level {
@@ -1006,7 +1006,7 @@ impl<'a> Parser<'a> {
         };
         Some(new_parse_error(
             code,
-            self.peek().line,
+            self.peek1().line,
             "misplaced constructor this()/super() call",
         ))
     }
@@ -1015,17 +1015,17 @@ impl<'a> Parser<'a> {
     // Token-level helpers
     // ================================
 
-    fn peek(&self) -> &Token {
+    fn peek1(&self) -> &Token {
         &self.tokens[self.pos]
     }
 
-    fn peek_ahead1(&self) -> &Token {
-        debug_assert!(self.peek().kind != TokenKind::Eof);
+    fn peek2(&self) -> &Token {
+        debug_assert!(self.peek1().kind != TokenKind::Eof);
         &self.tokens[self.pos + 1]
     }
 
     fn check(&self, kind: &TokenKind) -> bool {
-        &self.peek().kind == kind
+        &self.peek1().kind == kind
     }
 
     fn advance(&mut self) -> Token {
@@ -1042,8 +1042,8 @@ impl<'a> Parser<'a> {
         } else {
             Err(new_parse_error(
                 code,
-                self.peek().line,
-                format!("expected {:?}, found {:?}", kind, self.peek().kind),
+                self.peek1().line,
+                format!("expected {:?}, found {:?}", kind, self.peek1().kind),
             ))
         }
     }
@@ -1074,9 +1074,9 @@ impl<'a> Parser<'a> {
 
     // distinguishes P11 (VarDecl) from P17/P19 at the top of a body
     fn is_start_of_var_decl(&self) -> bool {
-        match &self.peek().kind {
+        match &self.peek1().kind {
             TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid => true,
-            TokenKind::Ident(_) => matches!(self.peek_ahead1().kind, TokenKind::Ident(_)),
+            TokenKind::Ident(_) => matches!(self.peek2().kind, TokenKind::Ident(_)),
             _ => false,
         }
     }
@@ -1084,7 +1084,7 @@ impl<'a> Parser<'a> {
     // first(Expr).
     fn is_start_of_expr(&self) -> bool {
         matches!(
-            self.peek().kind,
+            self.peek1().kind,
             TokenKind::Num(_)
                 | TokenKind::KwTrue
                 | TokenKind::KwFalse
@@ -1102,7 +1102,7 @@ impl<'a> Parser<'a> {
     fn is_primitive_type_ahead(&self) -> bool {
         self.check(&TokenKind::LParen)
             && matches!(
-                self.peek_ahead1().kind,
+                self.peek2().kind,
                 TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid
             )
     }
@@ -1121,7 +1121,7 @@ wrapping the fragment in a minimal class/method scaffold and asserting on the
 relevant sub-node of the resulting `Program`, or marking the specific `Parser`
 methods under test `pub(crate)` for direct construction and invocation in
 `#[cfg(test)]` code. Either way, `tokens` must end with an `Eof` token, same as
-`tokenize`'s own output — `peek`/`peek_ahead1` assume it's always
+`tokenize`'s own output — `peek1`/`peek2` assume it's always
 there. Test function names should say what they test (e.g.
 `duplicate_local_across_if_else_arms`); no comments above them.
 
