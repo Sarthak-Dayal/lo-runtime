@@ -577,50 +577,54 @@ impl<'a> Parser<'a> {
             return Ok(Expr::Unop(op, Box::new(operand), line));
         }
 
-        if self.is_cast_type_ahead() {
-            let ty = self.parse_paren_type()?;
-
-            return match ty {
-                Type::Class(identifier) if !self.is_start_of_expr() => {
-                    // P28: Expr -> ( Expr ), via P31: Expr -> Var
-                    self.parse_paren_suffix(Expr::Var(identifier, line), line)
-                }
-                _ => {
-                    // P29: Expr -> ( ( Type ) Expr )
-                    let value = self.parse_expr()?;
-                    self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
-                    Ok(Expr::Cast(ty, Box::new(value), line))
-                }
-            };
+        if self.is_primitive_type_ahead() {
+            // P29: Expr -> ( ( Type ) Expr ), Type -> int | bool | String | void
+            self.advance(); // second "("
+            let ty = self
+                .try_parse_primitive_type()
+                .expect("is_primitive_type_ahead confirmed this");
+            self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
+            let value = self.parse_expr()?;
+            self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
+            return Ok(Expr::Cast(ty, Box::new(value), line));
         }
 
-        // P25/P26/P28/P30's operand: an ordinary Expr
+        // P25/P26/P28/P29(ClassName)/P30's operand: an ordinary Expr
         let primary_expr = self.parse_expr()?;
         self.parse_paren_suffix(primary_expr, line)
     }
 
-    // The "( Type )" fragment of P29.
-    fn parse_paren_type(&mut self) -> Result<Type, ParseError> {
-        self.advance(); // second "("
-        let ty = if let Some(ty) = self.try_parse_primitive_type() {
-            ty
-        } else {
-            Type::Class(self.parse_class_name()?) // P44: ClassName -> Identifier
-        };
-        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
-        Ok(ty)
+    fn parse_paren_suffix(&mut self, primary_expr: Expr, line: u32) -> Result<Expr, ParseError> {
+        // P29: Expr -> ( ( Type ) Expr ), Type -> ClassName
+        if let Expr::Var(identifier, _) = &primary_expr {
+            if self.is_start_of_expr() {
+                let value = self.parse_expr()?;
+                self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
+                return Ok(Expr::Cast(
+                    Type::Class(identifier.clone()),
+                    Box::new(value),
+                    line,
+                ));
+            }
+        }
+
+        // P23: Expr -> ObjName . MethodName ( (Actuals)? ), via P49: ObjName -> ( Expr )
+        if self.check(&TokenKind::Dot) {
+            let obj_name = ObjName::Computed(Box::new(primary_expr), line);
+            let call = Expr::Call(self.parse_method_call_suffix(obj_name, line)?);
+            return self.parse_paren_close_or_operator(call, line);
+        }
+
+        self.parse_paren_close_or_operator(primary_expr, line)
     }
 
-    fn parse_paren_suffix(&mut self, primary_expr: Expr, line: u32) -> Result<Expr, ParseError> {
-        let value = if self.check(&TokenKind::Dot) {
-            let obj_name = ObjName::Computed(Box::new(primary_expr), line);
-            // P23: Expr -> ObjName . MethodName ( (Actuals)? ), via P49: ObjName -> ( Expr )
-            Expr::Call(self.parse_method_call_suffix(obj_name, line)?)
-        } else {
-            primary_expr
-        };
+    // P28: Expr -> ( Expr ), if it closes here; else P25/P26/P30 continue it.
+    fn parse_paren_close_or_operator(
+        &mut self,
+        value: Expr,
+        line: u32,
+    ) -> Result<Expr, ParseError> {
         if self.check(&TokenKind::RParen) {
-            // P28: Expr -> ( Expr )
             self.advance(); // ")"
             Ok(value)
         } else {
@@ -850,11 +854,6 @@ impl<'a> Parser<'a> {
         &self.tokens[self.pos + 1]
     }
 
-    fn peek_ahead2(&self) -> &Token {
-        debug_assert!(self.peek().kind != TokenKind::Eof);
-        &self.tokens[self.pos + 2]
-    }
-
     fn check(&self, kind: &TokenKind) -> bool {
         &self.peek().kind == kind
     }
@@ -929,16 +928,13 @@ impl<'a> Parser<'a> {
         )
     }
 
-    // LL(2) lookahead disambiguating P28 vs. P29.
-    fn is_cast_type_ahead(&self) -> bool {
-        if !self.check(&TokenKind::LParen) {
-            return false;
-        }
-        match &self.peek_ahead1().kind {
-            TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid => true,
-            TokenKind::Ident(_) => self.peek_ahead2().kind == TokenKind::RParen,
-            _ => false,
-        }
+    // LL(2) lookahead disambiguating a primitive-Type P29 from P25/P26/P28/P30.
+    fn is_primitive_type_ahead(&self) -> bool {
+        self.check(&TokenKind::LParen)
+            && matches!(
+                self.peek_ahead1().kind,
+                TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid
+            )
     }
 }
 

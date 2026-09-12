@@ -163,15 +163,15 @@ pub enum Unop {
 - A function dispatching over several productions of the same nonterminal gets a header listing every production it covers — `// P<n>-P<m>: <Nonterminal> -> ...` for a contiguous run, `// P<n>/P<m>/...: <Nonterminal> -> ...` when it isn't — and each match arm gets its own precise `// P<n>: <exact RHS>` directly above it.
 - A function with no production of its own (LL(2) lookahead, a shared continuation tail, token-level machinery) gets no `P<n>` header at all — the absence is the signal; there's no separate "not a production" disclaimer to write.
 - Where two or more productions share a prefix and a lookahead call is needed, the comment names the exact production pair (or triple) forcing it — never just "needs lookahead" without saying against what.
-- See "LL(2) decision points" below for the full list; every `peek_ahead1`/`peek_ahead2` call traces to an entry in it.
+- See "LL(2) decision points" below for the full list; every `peek_ahead1` call traces to an entry in it.
 
 ---
 
 ## LL(2) decision points
 
 - `peek()` reads the current token.
-- `peek_ahead1()` reads the next token. `peek_ahead2()` reads the token after that. Two fixed, zero-argument functions, not one function taking a numeric offset — a parameterized `peek_ahead(n)` could silently be called with `n > 2` anywhere, which would blow past the bound this whole section documents without anything visibly different at the call site. With only `peek_ahead1`/`peek_ahead2` existing, looking further ahead would require adding a new function, not just typing a different number — a deliberate, reviewable change instead of a silent one.
-- Every decision point below resolves with `peek_ahead1()` alone, except decision point 3, which additionally needs `peek_ahead2()` for one sub-case. Nothing backtracks.
+- `peek_ahead1()` reads the next token. A fixed, zero-argument function, not one taking a numeric offset — a parameterized `peek_ahead(n)` could silently be called with `n > 1` anywhere, which would blow past the bound this whole section documents without anything visibly different at the call site. With only `peek_ahead1` existing, looking further ahead would require adding a new function, not just typing a different number — a deliberate, reviewable change instead of a silent one.
+- Every decision point below resolves with `peek_ahead1()` alone. Nothing backtracks, and nothing ever needs a second token of lookahead — including decision point 3, which looks like it should at first glance. See that entry for why it doesn't.
 
 ### 1. Ident-led: `VarDecl` vs. assignment vs. call statement
 
@@ -196,12 +196,14 @@ pub enum Unop {
 - Shared prefix: `( (`.
 - P28: `Expr -> ( Expr )`, where the inner `Expr` itself starts with `(` (recursing into any of P25-P30).
 - P29: `Expr -> ( ( Type ) Expr )`.
-- A primitive-type keyword (P35/P37/P38/P39) at `peek_ahead1()` is unambiguous — resolves immediately.
-- An `Identifier` at `peek_ahead1()` is genuinely ambiguous (`((Circle) obj)` and `((x))` are identical this far) — resolved by `peek_ahead2()`: does `)` follow immediately?
-- Code: `is_cast_type_ahead`.
-- This only decides whether to *attempt* a cast reading — it doesn't fully resolve P28 vs. P29 by itself. `parse_paren_type` then consumes the tentative `(Type)` unconditionally (nothing about that consumption depends on the eventual answer). Full resolution needs exactly one more token, checked explicitly right there in `parse_paren_expr`: `is_start_of_expr()` true (a bare operand immediately follows, no connector) → genuinely P29; false (whatever follows is `)`, `.`, an operator, `?`, or `instanceof` — none of which can start an `Expr`) → not a cast, the tentative type was really P28's `Var`, finished by `parse_paren_suffix` like any other primary_expr (its own `.`/`)`/operator handling covers the `((x).m())`, `((x))`, and `((x) + y)` cases uniformly, with no cast-specific knowledge of any of them).
+- A primitive-type keyword (P35/P37/P38/P39) at `peek_ahead1()` is unambiguous — resolves immediately, since a primitive keyword can never start an ordinary `Expr`. Code: `is_primitive_type_ahead`.
+- An `Identifier` at `peek_ahead1()` is where it gets interesting. `((Dog)obj)` (a cast) and `((x))` (a redundantly-parenthesized `Var`) are indistinguishable for the first three tokens — `( Identifier )` — no matter how far you look with fixed lookahead: whatever's inside that inner `( )` can itself be an arbitrarily deep, further-nested `Expr` (e.g. `((((Dog)))obj)`), and each extra layer pushes the one token that actually reveals the answer further to the right. So this is **not** "peek one token further" (LL(3)) or even "peek one more after that" (LL(4)) — no fixed *k* tokens of raw lookahead from the leading `(` resolves it in general.
+  - Resolution: don't try to look past the ambiguity — parse through it. Consume `(Identifier)` as an ordinary `Var` via the normal recursive-descent `parse_expr()` call (valid syntax either way, so nothing is lost by committing to it, and recursion handles however deep the nesting actually is, since depth is a stack property, not a lookahead property). Once that call returns, check the *current* token with a single fresh `peek()`: does another expression immediately follow with no connector? Only a cast produces that shape, so if so, reinterpret the `Var`'s name as the cast's `Type` and parse the operand; otherwise it really was just a `Var`, and whatever follows (`.`, an operator, `)`, `instanceof`) is handled the same as for any other parsed value. Code: the `if let Expr::Var(identifier, _) = &primary_expr { if self.is_start_of_expr() { ... } }` guard at the top of `parse_paren_suffix`.
+  - This keeps every actual decision point at `peek()` + `peek_ahead1()` — no exception, unlike an earlier version of this parser which used a `peek_ahead2()` to check "does `)` follow the identifier immediately" as a pre-filter before committing to a tentative parse. That check only ever answered "is this worth attempting as a type," not "is it a cast" (`((x))` passes it too), so it didn't actually buy a one-shot decision — full resolution still needed a further token after that, checked separately. Parsing through the shared material and deciding once, afterward, does the same job with a strictly smaller lookahead budget and no leftover exception to document.
+  - The two sub-cases (primitive vs. `ClassName`) are decided at genuinely different times relative to consumption — primitive keywords structurally cannot be parsed as an ordinary `Expr` at all, so that case must be decided *before* parsing anything; `ClassName` shares its `Identifier` token with `Var`, so it can only be decided *after* parsing. This is why the two cases live in different functions (`parse_paren_expr`'s upfront check vs. `parse_paren_suffix`'s post-parse check) rather than one — it isn't an arbitrary split, it reflects when each case's answer actually becomes knowable.
+- On why this isn't really an LL(2)-vs-LL(k) tradeoff: LL(2) doesn't promise that two tokens from the *start* of a construct determine its whole parse — it promises that at each point where the parser must choose a production, two tokens of lookahead from the parser's *current position* suffice. The apparent need for more tokens here comes from trying to decide too early, before the shared, unboundedly-recursive material (`Expr`, not just a bare `Identifier`) has been consumed. That shared material isn't a fixed-length prefix, so it can't be left-factored into a new grammar rule the textbook way (`A -> αβ1 | αβ2` ⟹ `A -> αA'`, `A' -> β1 | β2` assumes a finite `α`); the factoring instead happens implicitly, in the recursive-descent implementation itself, by calling `parse_expr()` to consume however much of that material is actually present and deferring the branch to right after.
 - Matches the course text precisely: *"the tokens `(`, `(`, type-or-keyword, `)`, expression, `)` form the cast pattern."*
-- Nested casts (`((Animal)((Dog)obj))`) and casts combined with `instanceof` (`(((Dog) x) instanceof Animal)`, three parens) fall out of this same check applied again one recursion level down — no new machinery.
+- Nested casts (`((Animal)((Dog)obj))`) and casts combined with `instanceof` (`(((Dog) x) instanceof Animal)`, three parens) fall out of the same mechanism applied again at whichever recursion level is adjacent to the revealing token — no new machinery, and no need for the reinterpretation to "see through" however many layers of redundant nesting sit above it.
 - Never consults a name/symbol table — purely structural.
 
 ### 4. Constructor delegation position — not an ambiguity between two legal productions
@@ -928,47 +930,50 @@ fn parse_paren_expr(&mut self) -> Result<Expr, ParseError> {
         return Ok(Expr::Unop(op, Box::new(operand), line));
     }
 
-    // is_cast_type_ahead only says whether attempting a P29 reading is worth
-    // it -- it isn't yet known to be a real cast until we see what follows
-    // the tentative "(Type)" below.
-    if self.is_cast_type_ahead() {
-        let ty = self.parse_paren_type()?; // consumes "( Type )"
-
-        return match ty {
-            Type::Class(identifier) if !self.is_start_of_expr() => {
-                // P28: Expr -> ( Expr ), via P31: Expr -> Var -- no operand
-                // follows, so the tentative type was really just a
-                // parenthesized Var, not a cast.
-                self.parse_paren_suffix(Expr::Var(identifier, line), line)
-            }
-            _ => {
-                // P29: Expr -> ( ( Type ) Expr )
-                let value = self.parse_expr()?;
-                self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
-                Ok(Expr::Cast(ty, Box::new(value), line))
-            }
-        };
+    // A primitive keyword can never start an Expr, so seeing one here is
+    // unambiguous before consuming anything -- always a cast.
+    if self.is_primitive_type_ahead() {
+        self.advance(); // second '('
+        let ty = self.try_parse_primitive_type().expect("is_primitive_type_ahead confirmed this");
+        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
+        let value = self.parse_expr()?;
+        self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
+        return Ok(Expr::Cast(ty, Box::new(value), line));
     }
 
-    // Whatever's left (P25, P26, P28, P30's operand) is an ordinary Expr.
+    // Anything else -- P25/P26/P28/P30, or a ClassName-typed P29 cast, which
+    // shares its one Identifier token with Var and can't be told apart from
+    // lookahead alone. parse_paren_suffix decides which, once this returns.
     let primary_expr = self.parse_expr()?;
     self.parse_paren_suffix(primary_expr, line)
 }
 
-// Shared tail for whatever follows a primary_expr while still inside an
-// unclosed enclosing "(": an optional P23 ". MethodName(...)" postfix (via
-// P49: ObjName -> ( Expr )), then either the closing ")" (P28) or an
-// operator continuation (P25/P26/P30, via parse_operator_suffix, which
-// itself consumes the ")").
 fn parse_paren_suffix(&mut self, primary_expr: Expr, line: u32) -> Result<Expr, ParseError> {
-    let value = if self.check(&TokenKind::Dot) {
+    // P29: Expr -> ( ( Type ) Expr ), ClassName Type -- a bare operand
+    // immediately follows a Var with no connector, a shape only a cast
+    // produces, so primary_expr was really this cast's Type all along.
+    if let Expr::Var(identifier, _) = &primary_expr {
+        if self.is_start_of_expr() {
+            let value = self.parse_expr()?;
+            self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
+            return Ok(Expr::Cast(Type::Class(identifier.clone()), Box::new(value), line));
+        }
+    }
+
+    // P23: Expr -> ObjName . MethodName ( (Actuals)? ), via P49: ObjName -> ( Expr )
+    if self.check(&TokenKind::Dot) {
         let obj_name = ObjName::Computed(Box::new(primary_expr), line);
-        Expr::Call(self.parse_method_call_suffix(obj_name, line)?) // P23: Expr -> ObjName . MethodName ( (Actuals)? ), via P49: ObjName -> ( Expr )
-    } else {
-        primary_expr
-    };
+        let call = Expr::Call(self.parse_method_call_suffix(obj_name, line)?);
+        return self.parse_paren_close_or_operator(call, line);
+    }
+
+    self.parse_paren_close_or_operator(primary_expr, line)
+}
+
+// P28: Expr -> ( Expr ), if it closes here; else P25/P26/P30 continue it via
+// parse_operator_suffix (which itself consumes the ")").
+fn parse_paren_close_or_operator(&mut self, value: Expr, line: u32) -> Result<Expr, ParseError> {
     if self.check(&TokenKind::RParen) {
-        // P28: Expr -> ( Expr )
         self.advance();
         Ok(value)
     } else {
@@ -1068,40 +1073,23 @@ The `Tilde`/`Bang` check at the top of `parse_paren_expr` — see P25's full lis
 
 **P28**: `Expr -> ( Expr )`
 
-One spot: the `if self.check(&TokenKind::RParen) { ... }` inside `parse_paren_suffix` (P25's listing) -- reached both from the ordinary path (`parse_paren_expr`'s bottom) and from the not-a-cast path (`is_cast_type_ahead` turned out not to pan out, e.g. `((Ident))`).
+One spot: `parse_paren_close_or_operator`'s `if self.check(&TokenKind::RParen) { ... }` (P25's listing) -- reached both from an ordinary parenthesized value and from a `Var` that turned out not to be a cast after all (e.g. `((Ident))`).
 
 ### P29
 
 **P29**: `Expr -> ( ( Type ) Expr )`
 ```rust
-// Lookahead for the "( (" prefix: a primitive-type keyword is unambiguous;
-// an Identifier needs peek_ahead2() (does `)` follow immediately?).
-fn is_cast_type_ahead(&self) -> bool {
-    if !self.check(&TokenKind::LParen) {
-        return false;
-    }
-    match &self.peek_ahead1().kind {
-        TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid => true,
-        TokenKind::Ident(_) => self.peek_ahead2().kind == TokenKind::RParen,
-        _ => false,
-    }
-}
-
-// Consumes "( Type )" once is_cast_type_ahead() says attempting P29 is
-// worth it. See P25's full listing above.
-fn parse_paren_type(&mut self) -> Result<Type, ParseError> {
-    self.advance(); // second '('
-    let ty = if let Some(ty) = self.try_parse_primitive_type() {
-        ty
-    } else {
-        Type::Class(self.parse_class_name()?) // P44, the tentative cast target
-    };
-    self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // closes "(Type)"
-    Ok(ty)
+// LL(2) lookahead disambiguating a primitive-Type P29 from P25/P26/P28/P30.
+fn is_primitive_type_ahead(&self) -> bool {
+    self.check(&TokenKind::LParen)
+        && matches!(
+            self.peek_ahead1().kind,
+            TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid
+        )
 }
 ```
 
-`is_cast_type_ahead` only decides whether attempting a cast reading is *worth it*. `parse_paren_type` then consumes the tentative `(Type)` unconditionally — it doesn't decide anything either, since the same tokens are needed whichever way this resolves (either becoming the `Cast`'s `Type` directly, or reinterpreted into a `Var` when `is_start_of_expr` says no operand follows). The actual "is this a cast, or not" decision happens only once, in the `match` right after `parse_paren_type()?` returns, in `parse_paren_expr` (shown in full at P25 above): a bare operand immediately following means P29; anything else means the tentative type was really P28's `Var`, finished by `parse_paren_suffix` exactly like any other primary_expr.
+The primitive case is fully resolved by `is_primitive_type_ahead`, shown in full at P25 above, since a primitive keyword can't be mistaken for anything else. The `ClassName` case has no equivalent upfront lookahead function at all -- there's nothing to pre-detect, since `(Identifier)` is legal as either a `Var` or a cast's `Type` and only the token following it tells them apart. That case is resolved after the fact, by the `if let Expr::Var(identifier, _) = &primary_expr { if self.is_start_of_expr() { ... } }` guard in `parse_paren_suffix` (P25's listing) -- see "LL(2) decision points," decision 3, for why this is structured as a post-parse check rather than more lookahead.
 
 ### P30
 
@@ -1331,18 +1319,13 @@ fn peek(&self) -> &Token {
     &self.tokens[self.pos]
 }
 
-// Two fixed functions, not one parameterized by an offset -- a bare
+// A fixed function, not one parameterized by an offset -- a bare
 // `peek_ahead(n: usize)` could be called with any n, silently exceeding the
-// bound this file documents. Only these two exist; looking further ahead
-// requires visibly adding a third.
+// bound this file documents. Only this one exists; looking further ahead
+// requires visibly adding another.
 fn peek_ahead1(&self) -> &Token {
     debug_assert!(self.peek().kind != TokenKind::Eof);
     &self.tokens[self.pos + 1]
-}
-
-fn peek_ahead2(&self) -> &Token {
-    debug_assert!(self.peek().kind != TokenKind::Eof);
-    &self.tokens[self.pos + 2]
 }
 
 fn check(&self, kind: &TokenKind) -> bool {
