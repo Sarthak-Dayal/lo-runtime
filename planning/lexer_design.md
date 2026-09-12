@@ -13,7 +13,7 @@ Scope: source text in, `Vec<Token>` out. Parsing is a separate document.
 | Single-character lookahead (`Peekable<Chars>`) | LO has no multi-character operators. Nothing in the grammar needs more than 1 char of peek. |
 | Decode string escapes during scanning, not later | `\u{...}` range validation (reject surrogates and codepoints above U+10FFFF) is a lex-phase compile error per spec. Has to happen while the string is being scanned. |
 | `Token { kind, line }` — one `line` field on the wrapper, not one per `TokenKind` variant | Every token needs exactly one line number. No variant-specific variation to justify repeating the field. |
-| Track line number only, no column | Matches course's stated expectation: line number is sufficient for error messages. |
+| Track line number only, no column | No document states a column policy for P1 diagnostics specifically. The "line, not column" statement in the source material is in the P4/DWARF chapter's discussion of debugger-stepping granularity: *"column tracking was considered and rejected as cost without P4 payoff."* That's good evidence for line-only being sufficient even beyond P1's own error messages — the course already checked whether the debugger project would need column info and decided no. |
 | `in`, `out`, `err`, `Main`, `Input`, `Output` are NOT lexer keywords | They never appear as literal tokens in the LO-4 grammar. They lex as plain `Ident` and get flagged as reserved later, during name resolution. |
 
 ---
@@ -96,17 +96,23 @@ against this table. No match → emit `Ident` instead.
 
 ## Reserved names — NOT keywords
 
-Lex as ordinary `Ident`. Enforced as reserved later, at name resolution
-(`E_RESERVED_VARIABLE_NAME` / `E_RESERVED_CLASS_NAME`), not by the lexer.
+Lex as ordinary `Ident`. `in`/`out`/`err` are enforced as reserved at name resolution
+via `E_RESERVED_VARIABLE_NAME`; `Input`/`Output` via `E_RESERVED_CLASS_NAME`. `Main` is
+the odd one out: `error-codes.md` is explicit that *"`Main` is permitted but must
+satisfy the entry-point shape"* — `Main` is exempt from `E_RESERVED_CLASS_NAME`
+entirely and is checked only by its own separate entry-point codes (`E_NO_MAIN_CLASS`,
+`E_MAIN_CLASS_EXTENDS`, `E_NO_MAIN_METHOD`, `E_MAIN_METHOD_SIGNATURE`,
+`E_MAIN_NO_ZERO_ARG_CONSTRUCTOR`). None of this changes what the lexer does — `Main`
+still just lexes as `Ident` — only which check code applies later, at name resolution.
 
-| Name | Role |
-|---|---|
-| `in` | preamble binding, type `Input` |
-| `out` | preamble binding, type `Output` |
-| `err` | preamble binding, type `Output` |
-| `Main` | required entry-point class name |
-| `Input` | synthesized preamble class |
-| `Output` | synthesized preamble class |
+| Name | Role | Checked via |
+|---|---|---|
+| `in` | preamble binding, type `Input` | `E_RESERVED_VARIABLE_NAME` |
+| `out` | preamble binding, type `Output` | `E_RESERVED_VARIABLE_NAME` |
+| `err` | preamble binding, type `Output` | `E_RESERVED_VARIABLE_NAME` |
+| `Main` | required entry-point class name | entry-point codes, NOT `E_RESERVED_CLASS_NAME` |
+| `Input` | synthesized preamble class | `E_RESERVED_CLASS_NAME` |
+| `Output` | synthesized preamble class | `E_RESERVED_CLASS_NAME` |
 
 Side effect of `String` being a keyword and not an identifier: `class C extends String`
 fails to parse (`String` can't fill the `ClassName` slot), so "can a user extend String"
@@ -137,8 +143,11 @@ is answered by the lexer/parser, not a check the type checker has to write.
 - Integer literal overflow: grammar allows unbounded digit strings, `int` is 32-bit.
   No clearly-named error code for this case (closest is the catch-all
   `E_PARSE_PHASE_OTHER`). Decide the behavior, write a test for it.
-- Error recovery: assumed fail-fast (stop at first bad character), matching the type
-  checker's stated policy. Not explicitly confirmed for the lexer specifically.
+- Error recovery: assumed fail-fast (stop at first bad character). No document
+  supports this for any phase (see `parser_design.md`'s Decisions table and Open
+  Item 1) — a team assumption adopted for implementation simplicity across lexer,
+  parser, and checker alike; worth a direct question to course staff before treating
+  it as settled.
 
 ---
 
