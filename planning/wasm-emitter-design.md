@@ -1,87 +1,91 @@
 # LO → WASM emission rules
 
-**Status: WIP.** Proposed rules for discussion; open points remain at the end of this document.
+This is a WIP design for the WASM emitter. It assumes the planned `TypedProgram`
+and `ClassTable` provide checked types, resolved bindings, inheritance, and call
+targets; the Rust interface can change as the checker is implemented. The emitter
+will produce LLVM WASM assembly, which `llvm-mc` assembles into a relocatable object
+and `wasm-ld` links with the runtime.
 
-Read each rule as “when we visit this LO construct, emit these operations.”
-Production numbers refer to the supplied LO-4 grammar. These are readable emission
-sketches; the writer renders actual LLVM WASM assembly and numeric local/label indices.
-
-Input is the planned `TypedProgram` and `ClassTable`: types, bindings, inheritance,
-constructor targets, and method targets are already checked. Exact Rust names can change.
-
-## Reading the rules
-
-An expression leaves one `i32` on the WASM operand stack; a statement leaves nothing.
-`void` has no result. `emit e` recursively emits an expression.
-`save e as x` evaluates e once into a temporary local; later uses read that saved value.
-A saved String/class reference stays rooted until consumed, including across later arguments.
-`CALL` below includes GC handling. These helpers describe emitter actions, not another IR.
-
-## P1, P4 — program and class declarations
+The rules below use the production numbers from the LO-4 grammar. They describe
+emission steps, with names for locals and labels that the writer converts to
+numeric indices. An expression leaves one `i32` on the operand stack; a statement
+leaves no value, and `void` has no result. `emit e` recursively emits e, while
+`save e as x` evaluates it once into a temporary local. CALL saves its optional
+result; an expression rule loads its final saved value onto the operand stack.
 
 ```text
-<Program> → <ClassDecl>*
-    pre-scan declarations → field offsets, vtable slots, signatures, symbols
-    emit descriptors and vtables; visit each constructor/method body once
-    emit lo_entry → program.s → llvm-mc → program.o → wasm-ld + runtime → program.wasm
+P1: <Program> → <ClassDecl>*
+    pre-scan declarations to assign field offsets, vtable slots, signatures, and symbols
+    emit descriptors and vtables
+    visit each constructor and method body once
+    emit lo_entry
+    assemble program.s → program.o; link program.o + runtime → program.wasm
 
-class C extends P (...) [...] {...}
-    fields(C) = inherited fields, then own fields in declaration order
+P4: class C extends P (...) [...] {...}
+    fields(C) = inherited fields, followed by own fields in declaration order
     vtable(C) = parent's table, replacing overrides and appending new methods
     descriptor(C) = name, parent, instance size, pointer offsets, vtable
 ```
 
-Process parents before children. Each object has a 12-byte header, followed by four-byte
-fields: field i is at `12 + 4*i`. Instance size is `12 + 4*field_count`; allocation rounding
-belongs to the runtime. Pointer offsets include inherited String/class fields.
-Overrides retain their slots. Vtables contain function-table indices, resolved by the linker
-from symbolic function references. Exact structures follow [ABI §2](../runtime-abi.md).
-Buffer emitted instructions so local declarations/frame sizes can precede the body;
-this still visits each body once. The frontend supplies the I/O preamble exactly once.
+The declaration scan processes parents before children, so inherited offsets and
+method slots are available when laying out a child. An override keeps its slot.
+Vtable entries are function-table indices, resolved by the linker from symbolic
+function references. The frontend supplies the I/O declarations exactly once.
 
-## P35–P39 — values and defaults
+Each body is visited once, as the project handout requires. Instructions are buffered
+so local declarations and the frame size can be written before them. String bytes
+go into a static-data buffer during that same traversal.
 
-| LO type | WASM representation | Initial value | Root? |
+For P35–P39, values and defaults are represented as follows:
+
+| LO type | WASM representation | Initial value | GC root? |
 |---|---|---|---|
 | int | i32 | 0 | No |
 | bool | i32, 0 or 1 | 0 | No |
 | String | i32 object address | address of `LO_EMPTY_STRING` | Yes |
 | class | i32 object address | 0 (null) | Yes |
-| void | no value | — | No |
+| void | no value | none | No |
 
-Descriptor addresses, raw literal-byte addresses, and function-table indices are not roots.
+Every field occupies four bytes after the 12-byte object header. Field i has offset
+`12 + 4*i`, and instance size is `12 + 4*field_count`; the runtime rounds allocations.
+The descriptor records all inherited and own String/class field offsets for GC.
+Descriptor addresses, literal-byte addresses, and function-table indices are not
+roots. The exact data structures follow [ABI §2](../runtime-abi.md).
 
-## Shared rule — calls and moving GC
+A call can move objects, so saved references must remain in shadow-stack root slots
+until they are consumed. This applies to user methods and constructors as well as
+runtime calls, since a user call may allocate indirectly.
 
 ```text
-CALL target(saved arguments) → optional result
+CALL target(saved arguments) → optional saved result
     spill this, reference parameters/locals, and active reference temporaries to roots
-    clear inactive temporary root slots; load arguments in parameter order
-    call target (or call_indirect with its signature and table index)
-    save the result immediately; reload spilled references from updated roots
+    clear inactive temporary root slots
+    load arguments in parameter order; emit call or call_indirect
+    save the result immediately
+    reload spilled references from their updated root slots
+
+ENTER
+    reserve an aligned shadow frame below __stack_pointer
+    populate its roots; lo_push_frame(frame)
+
+LEAVE
+    spill references, including a reference return value; lo_pop_frame()
+    reload the return value if needed; restore __stack_pointer
 ```
 
-Apply CALL to user calls as well as runtime calls: either may allocate indirectly.
-Keep named reference locals rooted for the whole function; release temporaries after use.
-A new reference result becomes an active temporary before any further call; reloading
-pre-call roots must not overwrite it. Runtime callees protect their own incoming references.
-For `r.m(new A(), new B())`, both r and the first object must survive the second allocation.
+Named reference locals stay rooted for the whole function; temporary slots are
+released after use and cleared before the next call. A new reference result becomes
+an active temporary before another call, and reloading pre-call roots must not
+overwrite it. In `r.m(new A(), new B())`, r and the first object must both survive
+the second allocation. Runtime callees must protect their own incoming references.
+
+Every generated function gets a frame in linear memory, including I/O wrappers and
+lo_entry, using [ABI §3.3](../runtime-abi.md). ENTER and LEAVE rely on the supplied
+push/pop implementations being non-allocating. The method rule initializes locals
+before registering their roots and sends all returns through one exit.
 
 ```text
-ENTER → reserve an aligned shadow frame below __stack_pointer; populate its roots;
-        lo_push_frame(frame)
-LEAVE → spill references, including a reference return value; lo_pop_frame();
-        reload the return value if needed; restore __stack_pointer
-```
-
-Every generated function gets a frame, including I/O wrappers and lo_entry.
-Frames and roots live in linear memory; layout follows [ABI §3.3](../runtime-abi.md).
-ENTER/LEAVE rely on the supplied push/pop implementations being non-allocating.
-
-## P7, P9, P11–P12 — functions, locals, and blocks
-
-```text
-T m(T1 p1, ..., Tk pk) { declarations; statements }
+P7, P9: T m(T1 p1, ..., Tk pk) { declarations; statements }
     function (this: i32, p1: i32, ..., pk: i32) → wasm(T)
         initialize all hoisted locals to defaults; ENTER
         block method_exit
@@ -90,89 +94,80 @@ T m(T1 p1, ..., Tk pk) { declarations; statements }
         end
         LEAVE; return saved_return_value if T is non-void
 
-<Block> → { <VarDecl>* <Stmt>+ }
+P11: T x, y; → allocate locals during function setup; emit nothing here
+P12: <Block> → { <VarDecl>* <Stmt>+ }
     emit statements in order
 ```
 
-`this` is parameter 0. Locals declared anywhere in the body are initialized before ENTER,
-even when their declaration lies inside a skipped branch. A declaration emits nothing at
-its source position and never resets a local on a later loop iteration.
-All returns use the shared exit. Void methods and constructors finish by falling through.
-
-## P5–P6 — constructors
+Parameter 0 is `this`. A local declared anywhere in the body is initialized at function
+entry, including one declared inside a skipped branch. Reaching its declaration
+does not reset it, even on later loop iterations. Void methods and constructors
+fall through to the exit; non-void fallthrough emits unreachable.
 
 ```text
-C(formals) { delegation? declarations; statements }
+P5–P6: C(formals) { delegation? declarations; statements }
     function (this, formals...) → ()
-        initialize hoisted locals; ENTER; emit delegation; emit statements; LEAVE
+        initialize hoisted locals; ENTER
+        emit delegation, if present; emit statements; LEAVE
 
 this(a1, ..., ak);  → save actuals left-to-right; CALL ctor(current_class, k)(this, actuals)
 super(a1, ..., ak); → save actuals left-to-right; CALL ctor(parent_class, k)(this, actuals)
 ```
 
-Delegation reuses the same object and preserves its descriptor and field values.
-An inheriting class must explicitly delegate; we never invent an implicit `super()`.
-Without an explicit constructor section, a root class gets a constructor whose parameters
-match its fields and whose body assigns them using the field-store rules below.
-
-## P13–P19 — statements
+Delegation operates on the same object, preserving its descriptor and existing field
+values. An inheriting class must explicitly delegate with `this` or `super`. A root
+class without an explicit constructor section gets parameters matching its fields
+and a body that assigns them using the field-store rules.
 
 ```text
-return e;                       → save e as saved_return_value; br method_exit
-if (e) { yes } else { no }       → emit e; if; emit yes; else; emit no; end
-while (e) { body }               → block loop_exit
-                                      loop loop_head
-                                          emit e; i32.eqz; br_if loop_exit
-                                          emit body; br loop_head
-                                      end
-                                  end
-break;                          → br nearest_loop_exit
-;                               → emit nothing
-receiver.m(actuals);             → method-call rule, with no result (void methods only)
+P13: return e;                 → save e as saved_return_value; br method_exit
+P14: if (e) { a } else { b }    → emit e; if; emit a; else; emit b; end
+P15: while (e) { body }         → block loop_exit
+                                    loop loop_head
+                                        emit e; i32.eqz; br_if loop_exit
+                                        emit body; br loop_head
+                                    end
+                                end
+P16: break;                    → br nearest_loop_exit
+P18: ;                         → emit nothing
+P19: receiver.m(actuals);       → method-call rule, with no result (void methods only)
 
-x = e;  [local/formal]           → emit e; local.set x
-f = e;  [int/bool field]         → save e as v; load this and v; i32.store offset(f)
-f = e;  [String/class field]     → save e as v; CALL lo_gc_write_barrier(this, offset(f), v)
+P17: x = e; [local/formal]      → emit e; local.set x
+     f = e; [int/bool field]    → save e as v; load this and v; i32.store offset(f)
+     f = e; [reference field]   → save e as v; CALL lo_gc_write_barrier(this, offset(f), v)
 ```
 
-Track all enclosing WASM blocks/loops/ifs to compute branch depths.
-Evaluate a field assignment's RHS before loading this: evaluation may move the object.
-The barrier performs the store itself. Use it even for null and default String stores.
-
-## P20–P21, P28, P31–P32, P40–P53 — simple expressions
+Branch depths account for every enclosing WASM block, loop, and if. Field assignment
+evaluates the RHS before loading this because that evaluation may move the object.
+The barrier performs the store itself, including null stores and default String
+initialization.
 
 ```text
-this                 → local.get 0
-null / false / true  → i32.const 0 / 0 / 1
-integer n            → i32.const n
-local/formal x       → local.get x
-field f              → local.get this; i32.load offset(f)
-(e)                  → emit e
-string literal s     → place decoded UTF-8 bytes in static data;
-                       CALL lo_string_new(address(bytes), byte_length) → result
+P20: this              → local.get 0
+P21: null              → i32.const 0
+P28: (e)               → emit e
+P31: local/formal x     → local.get x
+     field f           → local.get this; i32.load offset(f)
+P32, P40: integer n     → i32.const n
+P41: true              → i32.const 1
+P42: false             → i32.const 0
+P43: string literal s  → place decoded UTF-8 bytes in static data
+                        CALL lo_string_new(address(bytes), byte_length) → result
 ```
 
-An empty literal may use `address(LO_EMPTY_STRING)`. Literal bytes are not a String object.
-Names resolve to bindings/symbols at compile time; receiver forms use the call rule below.
-
-## P22 — allocation
+An empty literal may use `address(LO_EMPTY_STRING)`. Other literals pass raw bytes
+and their byte length to the runtime to construct a String object. The remaining
+name and token productions resolve upstream; receiver forms use the call rules below.
 
 ```text
-new C(a1, ..., ak)
+P22: new C(a1, ..., ak)
     save actuals left-to-right
     CALL lo_alloc(address(descriptor(C))) → object
-    initialize every inherited/own String field to LO_EMPTY_STRING through the barrier
+    initialize inherited/own String fields to LO_EMPTY_STRING through the barrier
     CALL ctor(C, k)(object, saved actuals)
     produce object
-```
 
-Keep object and reference arguments rooted throughout. Use the updated object after calls.
-Allocation zeroes other fields; all String defaults are set before any constructor runs.
-
-## P10, P23, P46–P49 — method calls
-
-```text
-receiver.m(a1, ..., ak)
+P10, P23, P46–P49: receiver.m(a1, ..., ak)
     save receiver as object; save actuals left-to-right
     if object is null: CALL lo_abort_null_receiver(method-name bytes, length); unreachable
     slot = m's slot in the receiver's static class
@@ -180,60 +175,63 @@ receiver.m(a1, ..., ak)
     CALL_INDIRECT signature(m)(object, saved actuals; target) → result
 
 super.m(actuals)
-    save this and actuals; apply the same null guard
-    CALL nearest ancestor implementation resolved by the checker(this, actuals) → result
+    save this as object; save actuals left-to-right; apply the same null guard
+    CALL nearest ancestor implementation resolved by the checker(object, actuals) → result
 ```
 
-Arguments run before the null guard (LO §3.4.3). Computed receivers run exactly once.
-Ordinary calls, including this.m, dispatch virtually; super calls are direct.
-Indirect calls use CALL's root protocol and push the table index after the arguments.
-The signature includes this; omit result steps for void methods.
+Allocation zeroes scalar and class-reference fields; every String default is set
+before a constructor runs. The new object and reference arguments remain rooted
+throughout construction, and subsequent uses read their updated values after calls.
 
-## P25–P27, P33–P34 — operators
+A method call evaluates its receiver once, then its arguments, then checks for null,
+following LO §3.4.3. Ordinary calls, including `this.m`, dispatch virtually; `super`
+calls use the statically resolved ancestor implementation. CALL_INDIRECT uses CALL's
+root handling and pushes the table index after the arguments. Its signature includes
+this; void calls omit the result.
 
 ```text
-(c ? a : b)  → emit c; if (result i32); emit a; else; emit b; end
-(a & b)      → emit a; if (result i32); emit b; else; i32.const 0; end
-(a | b)      → emit a; if (result i32); i32.const 1; else; emit b; end
+P25: (c ? a : b) → emit c; if (result i32); emit a; else; emit b; end
+P26: (a & b)     → emit a; if (result i32); emit b; else; i32.const 0; end
+     (a | b)     → emit a; if (result i32); i32.const 1; else; emit b; end
 ```
 
-Only the selected branch runs. The checker supplies the resulting type for root tracking.
-For int binary operators, evaluate left then right; use these instructions:
+These rules evaluate only the selected branch. The checker supplies the result type
+for root tracking. Other binary operators evaluate left then right. For integer
+operands, P26/P33 reduce as follows:
 
-| Operator | Instruction/rule |
+| Operator | Emission |
 |---|---|
 | +, -, * | i32.add, i32.sub, i32.mul (wrapping) |
 | <, >, = | i32.lt_s, i32.gt_s, i32.eq |
-| / | Save operands; return -1 for divisor 0, INT_MIN for INT_MIN / -1, otherwise i32.div_s |
-| % | Save operands; return dividend for divisor 0, otherwise i32.rem_s (INT_MIN % -1 is 0) |
+| / | Save operands; produce -1 for divisor 0, INT_MIN for INT_MIN / -1, otherwise i32.div_s |
+| % | Save operands; produce dividend for divisor 0, otherwise i32.rem_s (INT_MIN % -1 is 0) |
 
-For String binary operators, save left then right and use CALL:
+For String operations, save the operands in order and use CALL. Concatenation
+`String + String` calls lo_string_concat, and repetition `String * int` calls
+lo_string_repeat, which aborts for a negative count. String `<`, `>`, and `=`
+call lo_string_compare and compare its result with zero.
 
-| Expression | Runtime operation |
-|---|---|
-| String + String | lo_string_concat |
-| String * int | lo_string_repeat; runtime aborts for negative count |
-| String <, >, = String | lo_string_compare, then compare its result with 0 |
-| (~ String) | lo_string_reverse; reversal is by Unicode code point |
-
-`(! bool)` emits i32.eqz. `(~ int)` emits `0`, the operand, then i32.sub (wrapping).
-Other operand combinations are checker errors. String comparisons use contents.
-
-## P29–P30 — casts and instanceof
+Unary expressions in P27/P34 use i32.eqz for `(! bool)`; `(~ int)` emits zero,
+the operand, then i32.sub with wrapping arithmetic. `(~ String)` saves the operand
+and calls lo_string_reverse, which reverses Unicode code points. Other operand
+combinations are checker errors.
 
 ```text
-((T) e) [upcast/identity] → emit e
-((T) e) [downcast]        → save e; CALL lo_cast_check(e, descriptor(T)) → result
-(e instanceof T)         → save e; CALL lo_instanceof(e, descriptor(T)) → result
+P29: ((T) e) [upcast/identity] → emit e
+     ((T) e) [downcast]        → save e as object
+                                CALL lo_cast_check(object, address(descriptor(T))) → result
+P30: (e instanceof T)         → save e as object
+                                CALL lo_instanceof(object, address(descriptor(T))) → result
 ```
 
-A null cast returns null; null instanceof is false. Failed downcasts abort in the runtime.
+The runtime returns null for a null cast and false for null instanceof, and aborts
+on a failed downcast.
 
-## Synthetic I/O and entry point
-
-I/O methods get ordinary functions/vtable entries, identified by typed IoOp:
-`read_int/read_bool/read_string/eof` call the corresponding `lo_*` functions;
-stdout `print_int/print_bool/print_string/println` do likewise. Each uses ENTER/CALL/LEAVE.
+Synthetic I/O methods get functions and vtable entries identified by typed `IoOp`.
+Input's read_int, read_bool, read_string, and eof call the corresponding `lo_*`
+functions; stdout Output's print_int, print_bool, print_string, and println do
+likewise. Each wrapper uses ENTER, CALL, and LEAVE, returning read results through
+the shared exit.
 
 ```text
 lo_entry: () → i32
@@ -242,23 +240,28 @@ lo_entry: () → i32
     invoke Main.main(); save its integer result; LEAVE; return that result
 ```
 
-Initialize before ENTER because initialization resets the frame chain. I/O exists before
-Main's constructor runs. Store the pre-bound values in persistent entry-frame root slots;
-static cells hold their slot addresses. Reads, and assignments if permitted, use those slots.
-The collector updates them directly; never overwrite them with a stale cached reference.
-Link one memory with the WASM runtime archive; export memory and lo_entry, with no start section.
-Emit symbolic runtime/data/function references so llvm-mc and wasm-ld resolve addresses and tables.
+Runtime initialization precedes ENTER because it resets the frame chain. I/O
+instances exist before Main's constructor runs. Their pre-bound values live in
+persistent entry-frame root slots, with static cells holding the slot addresses.
+Reads, and assignments if permitted, use those slots so they observe GC updates.
 
-## Open points and first check
+The linker combines the object with the WASM runtime archive into one module with
+one memory, exporting memory and lo_entry with no start section. Runtime, data, and
+function references remain symbolic until assembly and linking resolve them.
 
-- **stderr:** Output aliases must preserve their sink, but the print ABI only supports stdout.
-  The host's stderr helper buffers aborts. This rule needs an agreed runtime solution.
-- **Spec conflicts:** follow P1/ABI: barriers on pointer field stores and frames on every function.
-  LO chapter 7 suggests omissions; push/pop also need their non-allocating assumption confirmed.
-- **Environment:** verify llvm-mc in the course container. String/cast operations are local stubs.
-- **First check:** link a small module exercising a runtime call, LO_EMPTY_STRING, a descriptor,
-  indirect dispatch, and a shadow frame; then test evaluation order and actual moving GC.
+Several parts still need confirmation. Output aliases must preserve their sink,
+but the print ABI supports stdout and the host's stderr helper buffers aborts;
+stderr output needs an agreed runtime solution. This design follows P1 and the ABI
+on barriers for pointer field stores and frames for every function, where LO
+chapter 7 suggests omissions. The non-allocating push/pop assumption also needs
+confirmation against the runtime contract.
 
-Sources: supplied P1 §2.4 and LO grammar/semantics; [runtime ABI](../runtime-abi.md),
-[frame implementation](../rust/src/shadow_stack.rs), [typed AST plan](type_checker_design.md).
-This document specifies the intended lowering; emitter/toolchain validation is still pending.
+Assembler availability and linkage have not been tested in the course container,
+and the local String/cast operations are stubs. The first implementation check
+should link a small module using a runtime call, LO_EMPTY_STRING, a descriptor,
+indirect dispatch, and a shadow frame, followed by evaluation-order tests and
+allocation pressure that triggers moving GC.
+
+The rules are based on the supplied P1 §2.4 and LO grammar/semantics, the
+[runtime ABI](../runtime-abi.md), the [frame implementation](../rust/src/shadow_stack.rs),
+and the [typed AST plan](type_checker_design.md).
