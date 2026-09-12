@@ -747,12 +747,10 @@ impl<'a> Parser<'a> {
             return Ok(Expr::Unop(op, Box::new(operand), line));
         }
 
-        if self.is_primitive_type_ahead() {
+        if let Some(ty) = self.primitive_type_ahead() {
             // P29: Expr -> ( ( Type ) Expr ), Type -> int | bool | String | void
             self.advance(); // second "("
-            let ty = self
-                .try_parse_primitive_type()
-                .expect("is_primitive_type_ahead confirmed this");
+            self.advance(); // primitive-type keyword
             self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
             let value = self.parse_expr()?;
             self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?; // ")"
@@ -1099,12 +1097,17 @@ impl<'a> Parser<'a> {
     }
 
     // LL(2) lookahead disambiguating a primitive-Type P29 from P25/P26/P28/P30.
-    fn is_primitive_type_ahead(&self) -> bool {
-        self.check(&TokenKind::LParen)
-            && matches!(
-                self.peek2().kind,
-                TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid
-            )
+    fn primitive_type_ahead(&self) -> Option<Type> {
+        if !self.check(&TokenKind::LParen) {
+            return None;
+        }
+        match &self.peek2().kind {
+            TokenKind::KwInt => Some(Type::Int),
+            TokenKind::KwBool => Some(Type::Bool),
+            TokenKind::KwString => Some(Type::String),
+            TokenKind::KwVoid => Some(Type::Void),
+            _ => None,
+        }
     }
 }
 ```
