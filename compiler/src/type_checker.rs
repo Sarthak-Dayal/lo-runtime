@@ -180,31 +180,35 @@ pub struct TypedClassDecl {
     pub fields: Vec<(String, Type)>,
     pub constructors: Vec<TypedConstructor>,
     pub methods: Vec<TypedMethodDecl>,
+    pub line: u32,
 }
 
 pub enum TypedConstructor {
     Explicit {
-        params: Vec<(String, Type)>,
+        formals: Vec<(String, Type)>,
         delegation: Option<TypedDelegation>,
         locals: Vec<(String, Type)>,
         stmts: Vec<TypedStmt>,
+        line: u32,
     },
     /// `this.field_i = formal_i`, in field order — synthesized once here so
     /// downstream consumers don't each have to re-derive what an implicit
-    /// constructor does.
+    /// constructor does. No `line`: unlike `Explicit`, this has no source
+    /// constructor to point at.
     Implicit { fields: Vec<(String, Type)> },
 }
 
 pub enum TypedDelegation {
-    This { args: Vec<TypedExpr> },
-    Super { args: Vec<TypedExpr> },
+    ThisCall { actuals: Vec<TypedExpr>, line: u32 },
+    SuperCall { actuals: Vec<TypedExpr>, line: u32 },
 }
 
 pub struct TypedMethodDecl {
     pub method_name: String,
     pub return_type: Type,
-    pub params: Vec<(String, Type)>,
+    pub formals: Vec<(String, Type)>,
     pub body: TypedMethodBody,
+    pub line: u32,
 }
 
 pub enum TypedMethodBody {
@@ -232,21 +236,23 @@ impl BindingInfo {
 }
 
 pub enum TypedStmt {
-    Assign { target: String, binding: BindingInfo, value: TypedExpr },
-    Return(TypedExpr),
-    If(TypedExpr, Vec<TypedStmt>, Vec<TypedStmt>),
-    While(TypedExpr, Vec<TypedStmt>),
-    Break,
-    Empty,
+    Assign { target: String, binding: BindingInfo, value: TypedExpr, line: u32 },
+    Return(TypedExpr, u32),
+    If(TypedExpr, Vec<TypedStmt>, Vec<TypedStmt>, u32),
+    While(TypedExpr, Vec<TypedStmt>, u32),
+    Break(u32),
+    Empty(u32),
+    /// No `line`: `TypedMethodCall` already carries one.
     CallStmt(TypedMethodCall),
 }
 
 pub struct TypedMethodCall {
-    pub receiver: TypedReceiver,
+    pub obj_name: TypedObjName,
     pub method_name: String,
     pub resolution: MethodResolution,
-    pub args: Vec<TypedExpr>,
+    pub actuals: Vec<TypedExpr>,
     pub return_type: Type,
+    pub line: u32,
 }
 
 /// How a call's target is found at runtime — distinct from `r.m()` and
@@ -259,35 +265,36 @@ pub enum MethodResolution {
     Io { op: IoOp },
 }
 
-pub enum TypedReceiver {
-    This(String),
+pub enum TypedObjName {
+    This(String, u32),
     /// The declaring class lives on the enclosing `TypedMethodCall`'s
     /// `MethodResolution::Super`.
-    Super,
-    Var { name: String, binding: BindingInfo },
-    Computed(Box<TypedExpr>),
+    Super(u32),
+    Var { name: String, binding: BindingInfo, line: u32 },
+    Computed(Box<TypedExpr>, u32),
 }
 
 pub enum TypedExpr {
-    Num(i32),
-    Bool(bool),
-    Str(String),
+    Num(i32, u32),
+    Bool(bool, u32),
+    Str(String, u32),
     /// No `Type` field — `null` has none of its own; every consumer already
     /// has the surrounding context's type (assignment target, cast target,
     /// ternary LCA) when it needs one.
-    Null,
-    This(String),
-    Var { name: String, binding: BindingInfo },
-    New { class: String, args: Vec<TypedExpr> },
+    Null(u32),
+    This(String, u32),
+    Var { name: String, binding: BindingInfo, line: u32 },
+    New { class: String, actuals: Vec<TypedExpr>, line: u32 },
+    /// No `line`: `TypedMethodCall` already carries one.
     Call(TypedMethodCall),
     /// `ty: None` iff both branches are `null` — like `TypedExpr::Null`, no
     /// type of its own; the surrounding context (assignment target, cast,
     /// enclosing ternary) resolves it.
-    Ternary { cond: Box<TypedExpr>, then_branch: Box<TypedExpr>, else_branch: Box<TypedExpr>, ty: Option<Type> },
-    Binary { lhs: Box<TypedExpr>, op: Binop, rhs: Box<TypedExpr>, ty: Type },
-    Unary { op: Unop, operand: Box<TypedExpr>, ty: Type },
-    Cast { target: Type, operand: Box<TypedExpr>, direction: CastDirection },
-    InstanceOf { operand: Box<TypedExpr>, class: String },
+    Ternary { cond: Box<TypedExpr>, then_branch: Box<TypedExpr>, else_branch: Box<TypedExpr>, ty: Option<Type>, line: u32 },
+    Binop { lhs: Box<TypedExpr>, op: Binop, rhs: Box<TypedExpr>, ty: Type, line: u32 },
+    Unop { op: Unop, operand: Box<TypedExpr>, ty: Type, line: u32 },
+    Cast { target: Type, operand: Box<TypedExpr>, direction: CastDirection, line: u32 },
+    InstanceOf { operand: Box<TypedExpr>, class: String, line: u32 },
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -300,17 +307,17 @@ pub enum CastDirection {
 
 fn typed_of(e: &TypedExpr) -> ExprType {
     match e {
-        TypedExpr::Null => ExprType::NullLiteral,
-        TypedExpr::Num(_) => ExprType::Concrete(Type::Int),
-        TypedExpr::Bool(_) => ExprType::Concrete(Type::Bool),
-        TypedExpr::Str(_) => ExprType::Concrete(Type::String),
-        TypedExpr::This(c) => ExprType::Concrete(Type::Class(c.clone())),
+        TypedExpr::Null(_) => ExprType::NullLiteral,
+        TypedExpr::Num(..) => ExprType::Concrete(Type::Int),
+        TypedExpr::Bool(..) => ExprType::Concrete(Type::Bool),
+        TypedExpr::Str(..) => ExprType::Concrete(Type::String),
+        TypedExpr::This(c, _) => ExprType::Concrete(Type::Class(c.clone())),
         TypedExpr::Var { binding, .. } => ExprType::Concrete(binding.ty().clone()),
         TypedExpr::New { class, .. } => ExprType::Concrete(Type::Class(class.clone())),
         TypedExpr::Call(call) => ExprType::Concrete(call.return_type.clone()),
         TypedExpr::Ternary { ty: Some(t), .. } => ExprType::Concrete(t.clone()),
         TypedExpr::Ternary { ty: None, .. } => ExprType::NullLiteral,
-        TypedExpr::Binary { ty, .. } | TypedExpr::Unary { ty, .. } => ExprType::Concrete(ty.clone()),
+        TypedExpr::Binop { ty, .. } | TypedExpr::Unop { ty, .. } => ExprType::Concrete(ty.clone()),
         TypedExpr::Cast { target, .. } => ExprType::Concrete(target.clone()),
         TypedExpr::InstanceOf { .. } => ExprType::Concrete(Type::Bool),
     }
@@ -363,7 +370,7 @@ pub struct MethodEntry {
 
 #[derive(Clone, PartialEq)]
 pub struct MethodSig {
-    pub name: String,
+    pub method_name: String,
     pub params: Vec<Type>,
     pub return_type: Type,
     pub line: u32,
@@ -373,13 +380,13 @@ pub struct MethodSig {
 }
 
 #[derive(Clone)]
-struct ConstructorSig {
-    arity: usize,
-    params: Vec<Type>,
+pub struct ConstructorSig {
+    pub arity: usize,
+    pub params: Vec<Type>,
     /// `Some(n)` iff this constructor's own delegation is `this(...)` targeting
     /// the n-arity constructor of the same class.
-    this_target_arity: Option<usize>,
-    line: u32,
+    pub this_target_arity: Option<usize>,
+    pub line: u32,
 }
 
 impl ClassTable {
@@ -393,6 +400,21 @@ impl ClassTable {
 
     pub fn is_subtype(&self, a: &str, b: &str) -> bool {
         a == b || self.classes.get(a).is_some_and(|info| info.ancestors.iter().any(|anc| anc == b))
+    }
+}
+
+impl ClassInfo {
+    /// This class's own constructors (LO has no constructor inheritance --
+    /// every instantiable class declares, or is given, its own). Exposed so
+    /// downstream consumers (the interpreter, wasm codegen) can dispatch
+    /// `new` without re-deriving arity/param information the type checker
+    /// already computed.
+    pub fn constructors(&self) -> &[ConstructorSig] {
+        &self.own_constructors
+    }
+
+    pub fn find_constructor(&self, arity: usize) -> Option<&ConstructorSig> {
+        self.own_constructors.iter().find(|c| c.arity == arity)
     }
 }
 
@@ -521,7 +543,7 @@ fn gather_declarations(program: &Program) -> Result<ClassTable, TypeError> {
 
         let mut own_methods: Vec<MethodSig> = Vec::new();
         for method in &class.methods {
-            if own_methods.iter().any(|m| m.name == method.method_name) {
+            if own_methods.iter().any(|m| m.method_name == method.method_name) {
                 return Err(TypeError::new(ErrorCode::EDuplicateMethod, method.line, format!("duplicate method '{}'", method.method_name)));
             }
             check_formals_well_formed(&method.formals)?;
@@ -530,7 +552,7 @@ fn gather_declarations(program: &Program) -> Result<ClassTable, TypeError> {
                 MethodBody::UserDefined(_) => None,
             };
             own_methods.push(MethodSig {
-                name: method.method_name.clone(),
+                method_name: method.method_name.clone(),
                 params: method.formals.iter().map(|f| f.declared_type.clone()).collect(),
                 return_type: method.return_type.clone(),
                 line: method.line,
@@ -622,8 +644,8 @@ fn resolve_inheritance(table: &mut ClassTable) -> Result<(), TypeError> {
             check_type_reference(ftype, table, *fline, fname)?;
         }
         for m in &info.own_methods {
-            for p in &m.params { check_type_reference(p, table, m.line, &m.name)?; }
-            check_type_reference(&m.return_type, table, m.line, &m.name)?;
+            for p in &m.params { check_type_reference(p, table, m.line, &m.method_name)?; }
+            check_type_reference(&m.return_type, table, m.line, &m.method_name)?;
         }
         for c in &info.own_constructors {
             for p in &c.params { check_type_reference(p, table, c.line, name)?; }
@@ -687,19 +709,19 @@ fn compute_effective(name: &str, table: &mut ClassTable, done: &mut HashSet<Stri
     }
 
     for m in &info.own_methods {
-        if let Some(existing) = effective_methods.get(&m.name) {
+        if let Some(existing) = effective_methods.get(&m.method_name) {
             if existing.sig.params != m.params || existing.sig.return_type != m.return_type {
                 return Err(TypeError::new(ErrorCode::EOverrideSignatureMismatch, m.line,
-                    format!("'{}' overrides an ancestor method with a different signature", m.name)));
+                    format!("'{}' overrides an ancestor method with a different signature", m.method_name)));
             }
         }
-        effective_methods.insert(m.name.clone(), MethodEntry { owner: name.to_string(), sig: m.clone() });
+        effective_methods.insert(m.method_name.clone(), MethodEntry { owner: name.to_string(), sig: m.clone() });
 
         // Inherited or overridden: keep the existing slot. Genuinely new: append one.
-        if !method_slot.contains_key(&m.name) {
+        if !method_slot.contains_key(&m.method_name) {
             let slot = vtable.len();
-            vtable.push(m.name.clone());
-            method_slot.insert(m.name.clone(), slot);
+            vtable.push(m.method_name.clone());
+            method_slot.insert(m.method_name.clone(), slot);
         }
     }
 
@@ -724,7 +746,7 @@ fn check_entry_point(table: &ClassTable) -> Result<(), TypeError> {
         return Err(TypeError::new(ErrorCode::EMainClassExtends, main.decl_line, "'Main' must not have an extends clause"));
     }
 
-    match main.own_methods.iter().find(|m| m.name == "main") {
+    match main.own_methods.iter().find(|m| m.method_name == "main") {
         None => return Err(TypeError::new(ErrorCode::ENoMainMethod, main.decl_line, "'Main' must declare 'int main()'")),
         Some(m) if m.return_type != Type::Int || !m.params.is_empty() => {
             return Err(TypeError::new(ErrorCode::EMainMethodSignature, m.line, "'main' must return int and take no formals"));
@@ -833,8 +855,9 @@ fn check_bodies(program: &Program, table: &ClassTable) -> Result<TypedProgram, T
                     typed_methods.push(TypedMethodDecl {
                         method_name: method.method_name.clone(),
                         return_type: method.return_type.clone(),
-                        params: method.formals.iter().map(|f| (f.identifier.clone(), f.declared_type.clone())).collect(),
+                        formals: method.formals.iter().map(|f| (f.identifier.clone(), f.declared_type.clone())).collect(),
                         body: TypedMethodBody::Io(op.clone()),
+                        line: method.line,
                     });
                     continue;
                 }
@@ -852,8 +875,9 @@ fn check_bodies(program: &Program, table: &ClassTable) -> Result<TypedProgram, T
             typed_methods.push(TypedMethodDecl {
                 method_name: method.method_name.clone(),
                 return_type: method.return_type.clone(),
-                params: method.formals.iter().map(|f| (f.identifier.clone(), f.declared_type.clone())).collect(),
+                formals: method.formals.iter().map(|f| (f.identifier.clone(), f.declared_type.clone())).collect(),
                 body: TypedMethodBody::UserDefined { locals: flatten_locals(&body.locals), stmts: typed_stmts },
+                line: method.line,
             });
         }
 
@@ -878,10 +902,11 @@ fn check_bodies(program: &Program, table: &ClassTable) -> Result<TypedProgram, T
                     typed_stmts.push(check_stmt(stmt, &scope, &ctx, table)?);
                 }
                 typed_ctors.push(TypedConstructor::Explicit {
-                    params: ctor.formals.iter().map(|f| (f.identifier.clone(), f.declared_type.clone())).collect(),
+                    formals: ctor.formals.iter().map(|f| (f.identifier.clone(), f.declared_type.clone())).collect(),
                     delegation: typed_delegation,
                     locals: flatten_locals(&ctor.body.locals),
                     stmts: typed_stmts,
+                    line: ctor.line,
                 });
             }
             typed_ctors
@@ -896,6 +921,7 @@ fn check_bodies(program: &Program, table: &ClassTable) -> Result<TypedProgram, T
                 .collect(),
             constructors: typed_constructors,
             methods: typed_methods,
+            line: class.line,
         });
     }
 
@@ -908,7 +934,7 @@ fn check_bodies(program: &Program, table: &ClassTable) -> Result<TypedProgram, T
 
 fn check_stmt(stmt: &Stmt, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> Result<TypedStmt, TypeError> {
     Ok(match stmt {
-        Stmt::Empty(_) => TypedStmt::Empty,
+        Stmt::Empty(line) => TypedStmt::Empty(*line),
 
         Stmt::Assign(name, expr, line) => {
             let binding = resolve_name(name, scope, ctx.class_name, table)
@@ -917,7 +943,7 @@ fn check_stmt(stmt: &Stmt, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> 
             if !assignment_compatible(&typed_of(&typed_value), binding.ty(), table) {
                 return Err(TypeError::new(ErrorCode::EAssignTypeMismatch, *line, format!("cannot assign to '{}'", name)));
             }
-            TypedStmt::Assign { target: name.clone(), binding, value: typed_value }
+            TypedStmt::Assign { target: name.clone(), binding, value: typed_value, line: *line }
         }
 
         Stmt::Return(expr, line) => {
@@ -932,28 +958,28 @@ fn check_stmt(stmt: &Stmt, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> 
                 return Err(TypeError::new(ErrorCode::EReturnTypeMismatch, *line,
                     "returned expression's type does not match the declared return type"));
             }
-            TypedStmt::Return(typed_value)
+            TypedStmt::Return(typed_value, *line)
         }
 
         Stmt::If(cond, then_b, else_b, line) => {
             let typed_cond = expect_bool(cond, scope, ctx, table, *line)?;
             let typed_then = then_b.iter().map(|s| check_stmt(s, scope, ctx, table)).collect::<Result<_, _>>()?;
             let typed_else = else_b.iter().map(|s| check_stmt(s, scope, ctx, table)).collect::<Result<_, _>>()?;
-            TypedStmt::If(typed_cond, typed_then, typed_else)
+            TypedStmt::If(typed_cond, typed_then, typed_else, *line)
         }
 
         Stmt::While(cond, body, line) => {
             let typed_cond = expect_bool(cond, scope, ctx, table, *line)?;
             let inner_ctx = BodyCtx { in_loop: true, ..*ctx };
             let typed_body = body.iter().map(|s| check_stmt(s, scope, &inner_ctx, table)).collect::<Result<_, _>>()?;
-            TypedStmt::While(typed_cond, typed_body)
+            TypedStmt::While(typed_cond, typed_body, *line)
         }
 
         Stmt::Break(line) => {
             if !ctx.in_loop {
                 return Err(TypeError::new(ErrorCode::EWellFormednessOther, *line, "'break' outside an enclosing while loop"));
             }
-            TypedStmt::Break
+            TypedStmt::Break(*line)
         }
 
         Stmt::CallStmt(call) => {
@@ -981,16 +1007,16 @@ fn expect_bool(expr: &Expr, scope: &Scope, ctx: &BodyCtx, table: &ClassTable, li
 
 fn check_expr(expr: &Expr, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> Result<TypedExpr, TypeError> {
     Ok(match expr {
-        Expr::Num(n, _) => TypedExpr::Num(*n),
-        Expr::Bool(b, _) => TypedExpr::Bool(*b),
-        Expr::Str(s, _) => TypedExpr::Str(s.clone()),
-        Expr::Null(_) => TypedExpr::Null,
-        Expr::This(_) => TypedExpr::This(ctx.class_name.to_string()),
+        Expr::Num(n, line) => TypedExpr::Num(*n, *line),
+        Expr::Bool(b, line) => TypedExpr::Bool(*b, *line),
+        Expr::Str(s, line) => TypedExpr::Str(s.clone(), *line),
+        Expr::Null(line) => TypedExpr::Null(*line),
+        Expr::This(line) => TypedExpr::This(ctx.class_name.to_string(), *line),
 
         Expr::Var(name, line) => {
             let binding = resolve_name(name, scope, ctx.class_name, table)
                 .ok_or_else(|| TypeError::new(ErrorCode::EUnknownVariable, *line, format!("unknown variable '{}'", name)))?;
-            TypedExpr::Var { name: name.clone(), binding }
+            TypedExpr::Var { name: name.clone(), binding, line: *line }
         }
 
         Expr::New(class_name, actuals, line) => {
@@ -998,8 +1024,8 @@ fn check_expr(expr: &Expr, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> 
             if info.kind == ClassKind::Preamble {
                 return Err(TypeError::new(ErrorCode::ETypeCheckOther, *line, format!("'{}' cannot be instantiated directly", class_name)));
             }
-            let typed_args = check_constructor_call(&info.own_constructors, actuals, scope, ctx, table, *line, class_name)?;
-            TypedExpr::New { class: class_name.clone(), args: typed_args }
+            let typed_actuals = check_constructor_call(&info.own_constructors, actuals, scope, ctx, table, *line, class_name)?;
+            TypedExpr::New { class: class_name.clone(), actuals: typed_actuals, line: *line }
         }
 
         Expr::Call(call) => {
@@ -1020,20 +1046,20 @@ fn check_expr(expr: &Expr, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> 
                 ExprType::Concrete(t) => Some(t),
                 ExprType::NullLiteral => None,
             };
-            TypedExpr::Ternary { cond: Box::new(typed_cond), then_branch: Box::new(typed_then), else_branch: Box::new(typed_else), ty }
+            TypedExpr::Ternary { cond: Box::new(typed_cond), then_branch: Box::new(typed_then), else_branch: Box::new(typed_else), ty, line: *line }
         }
 
         Expr::Binop(lhs, op, rhs, line) => {
             let typed_lhs = check_expr(lhs, scope, ctx, table)?;
             let typed_rhs = check_expr(rhs, scope, ctx, table)?;
             let ty = check_binop(*op, &typed_of(&typed_lhs), &typed_of(&typed_rhs), *line)?;
-            TypedExpr::Binary { lhs: Box::new(typed_lhs), op: *op, rhs: Box::new(typed_rhs), ty }
+            TypedExpr::Binop { lhs: Box::new(typed_lhs), op: *op, rhs: Box::new(typed_rhs), ty, line: *line }
         }
 
         Expr::Unop(op, operand, line) => {
             let typed_operand = check_expr(operand, scope, ctx, table)?;
             let ty = check_unop(*op, &typed_of(&typed_operand), *line)?;
-            TypedExpr::Unary { op: *op, operand: Box::new(typed_operand), ty }
+            TypedExpr::Unop { op: *op, operand: Box::new(typed_operand), ty, line: *line }
         }
 
         Expr::Cast(target, operand, line) => {
@@ -1058,7 +1084,7 @@ fn check_expr(expr: &Expr, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> 
                 }
                 _ => return Err(TypeError::new(ErrorCode::ECastSourceNotClass, *line, "cast source must be a class-typed expression")),
             };
-            TypedExpr::Cast { target: target.clone(), operand: Box::new(typed_operand), direction }
+            TypedExpr::Cast { target: target.clone(), operand: Box::new(typed_operand), direction, line: *line }
         }
 
         Expr::InstanceOf(operand, class_name, line) => {
@@ -1071,7 +1097,7 @@ fn check_expr(expr: &Expr, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> 
                 ExprType::Concrete(Type::Class(_)) | ExprType::NullLiteral => {}
                 _ => return Err(TypeError::new(ErrorCode::EInstanceofSourceNotClass, *line, "instanceof source must be a class-typed expression")),
             }
-            TypedExpr::InstanceOf { operand: Box::new(typed_operand), class: class_name.clone() }
+            TypedExpr::InstanceOf { operand: Box::new(typed_operand), class: class_name.clone(), line: *line }
         }
     })
 }
@@ -1081,7 +1107,7 @@ fn check_expr(expr: &Expr, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> 
 // ---------------------------------------------------------------------------
 
 struct ReceiverResolution {
-    typed: TypedReceiver,
+    typed: TypedObjName,
     /// Irrelevant/empty when `is_super` is true.
     search_class: String,
     is_super: bool,
@@ -1089,8 +1115,8 @@ struct ReceiverResolution {
 
 fn resolve_receiver(obj_name: &ObjName, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> Result<ReceiverResolution, TypeError> {
     match obj_name {
-        ObjName::This(_) => Ok(ReceiverResolution {
-            typed: TypedReceiver::This(ctx.class_name.to_string()),
+        ObjName::This(line) => Ok(ReceiverResolution {
+            typed: TypedObjName::This(ctx.class_name.to_string(), *line),
             search_class: ctx.class_name.to_string(),
             is_super: false,
         }),
@@ -1105,7 +1131,7 @@ fn resolve_receiver(obj_name: &ObjName, scope: &Scope, ctx: &BodyCtx, table: &Cl
             if table.get(ctx.class_name).and_then(|i| i.parent.as_ref()).is_none() {
                 return Err(TypeError::new(ErrorCode::ESuperMethodInRootClass, *line, "'super' used in a class with no parent"));
             }
-            Ok(ReceiverResolution { typed: TypedReceiver::Super, search_class: String::new(), is_super: true })
+            Ok(ReceiverResolution { typed: TypedObjName::Super(*line), search_class: String::new(), is_super: true })
         }
 
         ObjName::Var(name, line) => {
@@ -1114,7 +1140,7 @@ fn resolve_receiver(obj_name: &ObjName, scope: &Scope, ctx: &BodyCtx, table: &Cl
             let Type::Class(c) = binding.ty().clone() else {
                 return Err(TypeError::new(ErrorCode::EReceiverNotClassType, *line, "receiver is not class-typed"));
             };
-            Ok(ReceiverResolution { typed: TypedReceiver::Var { name: name.clone(), binding }, search_class: c, is_super: false })
+            Ok(ReceiverResolution { typed: TypedObjName::Var { name: name.clone(), binding, line: *line }, search_class: c, is_super: false })
         }
 
         ObjName::Computed(expr, line) => {
@@ -1124,7 +1150,7 @@ fn resolve_receiver(obj_name: &ObjName, scope: &Scope, ctx: &BodyCtx, table: &Cl
             let typed_expr = check_expr(expr, scope, ctx, table)?;
             match typed_of(&typed_expr) {
                 ExprType::Concrete(Type::Class(c)) => Ok(ReceiverResolution {
-                    typed: TypedReceiver::Computed(Box::new(typed_expr)),
+                    typed: TypedObjName::Computed(Box::new(typed_expr), *line),
                     search_class: c,
                     is_super: false,
                 }),
@@ -1156,8 +1182,15 @@ fn check_method_call(call: &MethodCall, scope: &Scope, ctx: &BodyCtx, table: &Cl
         MethodResolution::Virtual { static_class: r.search_class.clone() }
     };
 
-    let typed_args = check_actuals(&sig.params, &call.actuals, scope, ctx, table, call.line, &sig.name)?;
-    Ok(TypedMethodCall { receiver: r.typed, method_name: call.method_name.clone(), resolution, args: typed_args, return_type: sig.return_type })
+    let typed_actuals = check_actuals(&sig.params, &call.actuals, scope, ctx, table, call.line, &sig.method_name)?;
+    Ok(TypedMethodCall {
+        obj_name: r.typed,
+        method_name: call.method_name.clone(),
+        resolution,
+        actuals: typed_actuals,
+        return_type: sig.return_type,
+        line: call.line,
+    })
 }
 
 fn check_actuals(
@@ -1225,15 +1258,15 @@ fn check_delegation(ctor: &ConstructorDecl, class_name: &str, scope: &Scope, tab
             let target = parent_info.own_constructors.iter().find(|c| c.arity == args.len())
                 .ok_or_else(|| TypeError::new(ErrorCode::EDelegationArityMismatch, *line, format!("'{}' has no constructor of arity {}", parent, args.len())))?;
             let ctx = BodyCtx { class_name, return_type: &Type::Void, in_loop: false, in_constructor: true };
-            let typed_args = check_actuals(&target.params, args, scope, &ctx, table, *line, parent)?;
-            Ok(Some(TypedDelegation::Super { args: typed_args }))
+            let typed_actuals = check_actuals(&target.params, args, scope, &ctx, table, *line, parent)?;
+            Ok(Some(TypedDelegation::SuperCall { actuals: typed_actuals, line: *line }))
         }
         Some(ConstructorDelegation::ThisCall(args, line)) => {
             let target = info.own_constructors.iter().find(|c| c.arity == args.len())
                 .ok_or_else(|| TypeError::new(ErrorCode::EDelegationArityMismatch, *line, format!("class '{}' has no constructor of arity {}", class_name, args.len())))?;
             let ctx = BodyCtx { class_name, return_type: &Type::Void, in_loop: false, in_constructor: true };
-            let typed_args = check_actuals(&target.params, args, scope, &ctx, table, *line, class_name)?;
-            Ok(Some(TypedDelegation::This { args: typed_args }))
+            let typed_actuals = check_actuals(&target.params, args, scope, &ctx, table, *line, class_name)?;
+            Ok(Some(TypedDelegation::ThisCall { actuals: typed_actuals, line: *line }))
         }
     }
 }
@@ -1305,10 +1338,24 @@ fn check_unop(op: Unop, operand: &ExprType, line: u32) -> Result<Type, TypeError
 // ---------------------------------------------------------------------------
 
 pub fn check_program(program: Program) -> Result<(TypedProgram, ClassTable), TypeError> {
+    reject_reserved_class_names(&program)?;
     let program = crate::add_io_classes::add_io_classes(program);
     let mut table = gather_declarations(&program)?;
     resolve_inheritance(&mut table)?;
     check_entry_point(&table)?;
     let typed = check_bodies(&program, &table)?;
     Ok((typed, table))
+}
+
+/// Runs before preamble injection, while every class in `program` is
+/// necessarily user-written (so unlike `gather_declarations`'s own check,
+/// this needs no `line != 0` guard against the synthetic classes -- they
+/// don't exist yet).
+fn reject_reserved_class_names(program: &Program) -> Result<(), TypeError> {
+    for class in &program.classes {
+        if crate::add_io_classes::CLASS_NAMES.contains(&class.class_name.as_str()) {
+            return Err(TypeError::new(ErrorCode::EReservedClassName, class.line, format!("class name '{}' is reserved", class.class_name)));
+        }
+    }
+    Ok(())
 }

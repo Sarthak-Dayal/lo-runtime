@@ -12,11 +12,11 @@ pub const CLASS_NAMES: [&str; 2] = ["Input", "Output"];
 /// Prepends the `Input`/`Output` preamble classes to `program`. This must be
 /// called exactly once, from `type_checker::check_program`, before any other
 /// pass runs — calling it twice would silently duplicate both classes.
+///
+/// `check_program` rejects a user class already named `Input`/`Output`
+/// *before* calling this, so `program` is guaranteed not to already contain
+/// either name by the time this runs.
 pub fn add_io_classes(mut program: Program) -> Program {
-    debug_assert!(
-        !program.classes.iter().any(|c| CLASS_NAMES.contains(&c.class_name.as_str())),
-        "add_io_classes called on a program that already has the preamble classes"
-    );
     let mut classes = vec![input_class(), output_class()];
     classes.append(&mut program.classes);
     program.classes = classes;
