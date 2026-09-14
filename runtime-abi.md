@@ -196,10 +196,10 @@ extern "C" fn lo_runtime_shutdown()
 The runtime exposes a minimal I/O surface for test programs. The print set:
 
 ```
-extern "C" fn lo_print_int(n: i32)
-extern "C" fn lo_print_bool(b: bool)
-extern "C" fn lo_print_string(s: *mut Object)
-extern "C" fn lo_println()
+extern "C" fn lo_print_int(n: i32, to_stderr: i32)
+extern "C" fn lo_print_bool(b: bool, to_stderr: i32)
+extern "C" fn lo_print_string(s: *mut Object, to_stderr: i32)
+extern "C" fn lo_println(to_stderr: i32)
 ```
 
 And a symmetric read set, plus an EOF probe:
@@ -211,7 +211,11 @@ extern "C" fn lo_read_string() -> *mut Object
 extern "C" fn lo_eof() -> bool
 ```
 
-On native, these wrap libc `printf` / `puts` for output and `scanf` / `fgets` for input. On WASM, they import host functions provided by the test harness — typically `print_int`, `read_int`, etc., resolved at module instantiation; the harness wires the read functions to whatever input source it uses. The host also provides a stderr-write import — `host.write_stderr(ptr: i32, len: i32)`, writing `len` bytes of linear memory at `ptr` to the process's stderr — which the runtime uses to emit abort messages before trapping (§3.8); it is the WASM analog of the native abort path's direct stderr write.
+For the print family, `to_stderr == 0` selects stdout and `to_stderr == 1`
+selects stderr; other values are reserved. On native, these write to the selected
+standard stream. On WASM, stdout uses the typed host print imports and stderr uses
+`host.write_stderr(ptr: i32, len: i32)`. The latter also carries runtime abort
+messages before trapping (§3.8). The read imports are supplied by the host harness.
 
 Read semantics:
 
