@@ -323,6 +323,15 @@ impl<'p> Interp<'p> {
             }
             MethodResolution::Io { op } => {
                 let receiver = self.eval_receiver(&call.receiver, frame)?;
+                // A method dispatch on a null receiver aborts (102) regardless of
+                // whether the method is user-defined or a built-in I/O op — same
+                // check the virtual arm makes. `in`/`out`/`err` are never null, but
+                // a null `Input`/`Output` variable can reach here.
+                if let Value::Obj(None) = receiver {
+                    return Err(Signal::Abort(AbortKind::NullReceiver {
+                        method: call.method_name.clone(),
+                    }));
+                }
                 let args = self.eval_args(&call.args, frame)?;
                 self.run_io(op, receiver, args)
             }
@@ -1218,5 +1227,42 @@ mod tests {
         assert_eq!(empty, Ok(Value::Int(1)));
         let (nonempty, _o, _e) = run_with_io(src, "x");
         assert_eq!(nonempty, Ok(Value::Int(0)));
+    }
+
+    #[test]
+    fn null_output_receiver_aborts_102_and_prints_nothing() {
+        // `o` is a null Output local; dispatching print_int on it must abort, not
+        // silently route to stdout.
+        let src = "class Main () { int main() { Output o; o.print_int(5); return 0; } }";
+        let (res, out, _err) = run_with_io(src, "");
+        assert_eq!(
+            res,
+            Err(AbortKind::NullReceiver {
+                method: "print_int".to_string()
+            })
+        );
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn null_input_receiver_aborts_102() {
+        let src = "class Main () { int main() { Input i; int n; n = i.read_int(); return n; } }";
+        let (res, _out, _err) = run_with_io(src, "5\n");
+        assert_eq!(
+            res,
+            Err(AbortKind::NullReceiver {
+                method: "read_int".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn out_and_err_still_route_after_null_check() {
+        // Regression guard: the null check must not disturb non-null routing.
+        let src = "class Main () { int main() { out.print_int(1); err.print_int(2); return 0; } }";
+        let (res, out, err) = run_with_io(src, "");
+        assert_eq!(res, Ok(Value::Int(0)));
+        assert_eq!(out, "1");
+        assert_eq!(err, "2");
     }
 }

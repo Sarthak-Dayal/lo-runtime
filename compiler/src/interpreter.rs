@@ -7,6 +7,7 @@ mod strings;
 mod value;
 
 pub use abort::AbortKind;
+pub use heap::DEFAULT_HEAP_LIMIT;
 pub use io::Io;
 
 use crate::type_checker::{ClassTable, TypedProgram};
