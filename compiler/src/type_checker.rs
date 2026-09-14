@@ -34,6 +34,7 @@ pub enum ErrorCode {
     EReturnMissing,
     EReturnInConstructor,
     ELocalShadowsFormal,
+    EBreakOutsideLoop,
     EWellFormednessOther,
     // name resolution
     EUnknownVariable,
@@ -101,6 +102,7 @@ impl ErrorCode {
             EReturnMissing => "E_RETURN_MISSING",
             EReturnInConstructor => "E_RETURN_IN_CONSTRUCTOR",
             ELocalShadowsFormal => "E_LOCAL_SHADOWS_FORMAL",
+            EBreakOutsideLoop => "E_BREAK_OUTSIDE_LOOP",
             EWellFormednessOther => "E_WELL_FORMEDNESS_OTHER",
             EUnknownVariable => "E_UNKNOWN_VARIABLE",
             EReservedVariableName => "E_RESERVED_VARIABLE_NAME",
@@ -515,12 +517,6 @@ fn gather_declarations(program: &Program) -> Result<ClassTable, TypeError> {
     let mut order = Vec::new();
 
     for class in &program.classes {
-        // Reserved-name check before duplicate-name: both preamble classes are
-        // already present by the time any user class is visited, so a user's
-        // `class Input(){}` would otherwise collide with EDuplicateClassName first.
-        if crate::add_io_classes::CLASS_NAMES.contains(&class.class_name.as_str()) && class.line != 0 {
-            return Err(TypeError::new(ErrorCode::EReservedClassName, class.line, format!("class name '{}' is reserved", class.class_name)));
-        }
         if classes.contains_key(&class.class_name) {
             return Err(TypeError::new(ErrorCode::EDuplicateClassName, class.line, format!("class '{}' declared more than once", class.class_name)));
         }
@@ -977,7 +973,7 @@ fn check_stmt(stmt: &Stmt, scope: &Scope, ctx: &BodyCtx, table: &ClassTable) -> 
 
         Stmt::Break(line) => {
             if !ctx.in_loop {
-                return Err(TypeError::new(ErrorCode::EWellFormednessOther, *line, "'break' outside an enclosing while loop"));
+                return Err(TypeError::new(ErrorCode::EBreakOutsideLoop, *line, "'break' outside an enclosing while loop"));
             }
             TypedStmt::Break(*line)
         }
@@ -1303,6 +1299,17 @@ fn combine_ternary_branches(a: &ExprType, b: &ExprType, table: &ClassTable, line
 
 fn check_binop(op: Binop, lhs: &ExprType, rhs: &ExprType, line: u32) -> Result<Type, TypeError> {
     use Binop::*;
+    use ExprType::*;
+    if op == Eq
+        && matches!(
+            (lhs, rhs),
+            (Concrete(Type::Class(_)), NullLiteral)
+                | (NullLiteral, Concrete(Type::Class(_)))
+                | (NullLiteral, NullLiteral)
+        )
+    {
+        return Ok(Type::Bool);
+    }
     let (ExprType::Concrete(l), ExprType::Concrete(r)) = (lhs, rhs) else {
         return Err(TypeError::new(ErrorCode::EBinopTypeMismatch, line, "null is not a legal operand"));
     };
@@ -1348,9 +1355,7 @@ pub fn check_program(program: Program) -> Result<(TypedProgram, ClassTable), Typ
 }
 
 /// Runs before preamble injection, while every class in `program` is
-/// necessarily user-written (so unlike `gather_declarations`'s own check,
-/// this needs no `line != 0` guard against the synthetic classes -- they
-/// don't exist yet).
+/// necessarily user-written.
 fn reject_reserved_class_names(program: &Program) -> Result<(), TypeError> {
     for class in &program.classes {
         if crate::add_io_classes::CLASS_NAMES.contains(&class.class_name.as_str()) {
