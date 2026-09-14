@@ -52,12 +52,7 @@ fn assemble_and_link(assembly: &str, output: &Path, work: &Path) -> Result<(), S
     run(
         "link",
         Command::new(ld)
-            .args([
-                "--no-entry",
-                "--export=lo_entry",
-                "--export-memory",
-                "--allow-undefined",
-            ])
+            .args(["--no-entry", "--export=lo_entry", "--allow-undefined"])
             .arg(&object)
             .arg(runtime)
             .arg("-o")
