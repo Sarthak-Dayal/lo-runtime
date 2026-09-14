@@ -1345,7 +1345,7 @@ fn check_unop(op: Unop, operand: &ExprType, line: u32) -> Result<Type, TypeError
 // ---------------------------------------------------------------------------
 
 pub fn check_program(program: Program) -> Result<(TypedProgram, ClassTable), TypeError> {
-    reject_reserved_class_names(&program)?;
+    validate_user_declared_names(&program)?;
     let program = crate::add_io_classes::add_io_classes(program);
     let mut table = gather_declarations(&program)?;
     resolve_inheritance(&mut table)?;
@@ -1354,13 +1354,58 @@ pub fn check_program(program: Program) -> Result<(TypedProgram, ClassTable), Typ
     Ok((typed, table))
 }
 
-/// Runs before preamble injection, while every class in `program` is
-/// necessarily user-written.
-fn reject_reserved_class_names(program: &Program) -> Result<(), TypeError> {
+/// Runs before preamble injection, while every declaration in `program` is
+/// user-written. Keeping the runtime-prefix rule here means synthetic I/O and
+/// other compiler/runtime declarations never pass through it.
+fn validate_user_declared_names(program: &Program) -> Result<(), TypeError> {
     for class in &program.classes {
         if crate::add_io_classes::CLASS_NAMES.contains(&class.class_name.as_str()) {
             return Err(TypeError::new(ErrorCode::EReservedClassName, class.line, format!("class name '{}' is reserved", class.class_name)));
         }
+        for method in &class.methods {
+            if method.method_name.starts_with("lo_") {
+                return Err(TypeError::new(
+                    ErrorCode::EReservedVariableName,
+                    method.line,
+                    format!("method name '{}' uses the reserved runtime prefix 'lo_'", method.method_name),
+                ));
+            }
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{check_program, ErrorCode};
+
+    fn check_source(source: &str) -> Result<(), super::TypeError> {
+        let tokens = crate::lexer::tokenize(source).expect("test source should lex");
+        let program = crate::parser::parse_program(&tokens).expect("test source should parse");
+        check_program(program).map(|_| ())
+    }
+
+    fn program_with_method(method_name: &str) -> String {
+        format!(
+            "class Main() {{\n\
+                 int {method_name}() {{ return 1; }}\n\
+                 int main() {{ return 0; }}\n\
+             }}"
+        )
+    }
+
+    #[test]
+    fn ordinary_and_lo_without_underscore_method_names_are_allowed() {
+        check_source(&program_with_method("foo")).expect("foo should be allowed");
+        check_source(&program_with_method("lofoo")).expect("lofoo should be allowed");
+    }
+
+    #[test]
+    fn runtime_prefix_is_rejected_on_user_methods() {
+        for name in ["lo_foo", "lo_string_concat", "lo_alloc"] {
+            let error = check_source(&program_with_method(name)).expect_err("lo_ method should be rejected");
+            assert_eq!(error.code, ErrorCode::EReservedVariableName, "wrong error for {name}");
+            assert!(error.message.contains(name), "diagnostic should name {name}");
+        }
+    }
 }
