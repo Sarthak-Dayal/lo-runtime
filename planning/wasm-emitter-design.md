@@ -56,7 +56,7 @@ expand into instructions. An emitted WASM `loop` describes runtime repetition.
 
 The [production index](wasm-production-index.md) lists P1–P53 in order and links
 each rule to its design and implementation. P2, P3, P8, and P24 belong to earlier
-LO levels. Ordinary stderr remains deferred; see the [I/O rules](#io).
+LO levels. The [I/O rules](#io) cover dynamic stdout/stderr selection.
 
 <a id="program"></a>
 
@@ -644,19 +644,18 @@ a literal-null cast as a no-check cast.
 
 Synthetic I/O methods get normal functions and vtable entries, identified by
 `IoOp`. Input's read_int/read_bool/read_string/eof call their corresponding lo_*
-functions. Stdout Output's print_int/print_bool/print_string/println do likewise.
+functions. Output's print_int/print_bool/print_string/println call the corresponding
+runtime function with the receiver's destination tag.
 Each wrapper uses ENTER, CALL, and LEAVE, with read results using the shared return slot.
 
 The Output layout has a compiler-private i32 at offset 12: 0 for stdout,
 1 for stderr. Both objects share one Output descriptor with instance size 16 and
 no pointer fields. Print wrappers read this immutable tag from their receiver,
 so aliases preserve the sink even when a pre-bound variable is reassigned.
-The checked-in runtime has no print destination parameter. Its stderr wrapper
-branch currently emits unreachable, preserving the distinction instead of
-silently printing to stdout. The test repo now records a trailing `to_stderr: i32`
-argument for the print family, but that update was absent from the course runtime
-main branch checked for this implementation. Once it lands, load the receiver's
-tag and pass it as the final argument; remove the temporary trap.
+The print-family ABI has a trailing `to_stderr: i32` argument. Each wrapper reads
+the receiver's tag and passes it after the printed value, or as the sole argument
+to `lo_println`. This handles `Output` values reached through fields, formals, and
+aliases without selecting a different function at the call site.
 
 ```text
 lo_entry: () → i32
@@ -695,7 +694,8 @@ remaining runtime dependencies are recorded in the [test report](wasm-test-resul
 | Every function gets a frame; every pointer field store gets a barrier | Required by P1 §2.4 and the authoritative ABI. Follow these despite LO §§7.2/7.5's suggested omissions. |
 | Inline root slots and reload after GC | Required by ABI §3.3 and implemented by the supplied collector. |
 | Push/pop do not allocate | Confirmed in the supplied source. Replacement runtimes must preserve the entering/exiting root lifetime. |
-| Four-byte fields, named scratch locals, per-object Output sink tag | Emitter design choices, subject to review; they do not change runtime function signatures. |
+| Four-byte fields and named scratch locals | Emitter design choices, subject to review. |
+| Per-object Output destination tag | Required to supply the print-family `to_stderr` selector through fields, formals, and aliases. |
 | Typed AST and pre-bound binding representation | PR #5 supplies TypedProgram, ClassTable, and BindingInfo::Prebound. The emitter consumes their current representations. |
 | Local String/cast stubs | ABI §4.4 says the grading runtime supplies implementations. Local execution of those paths still needs implementations. |
 

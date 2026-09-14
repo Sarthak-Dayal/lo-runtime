@@ -99,12 +99,13 @@ name in a trap. They still fail correctly: the host's fallback message is only
 `lo_cast_check: cast failure`, which does not satisfy the required message.
 An exit-code-only test would have hidden the missing implementation.
 
-Ordinary stderr is a separate deferred dependency, not one of these 27 failures.
-The latest test repo [records a print-destination selector](https://github.com/Rahik-Sikder/lo-testing/blob/7851a5985495e885da6dc41195763e7608c7eab2/state-ledger.md#runtime-abi--print-family-destination-selector--locked-2026-09-12),
-but the fetched course runtime main (`ab140f6`) still has the old signatures.
-Once the runtime and host update, append the Output receiver's sink tag to the
-print calls in `io_wrapper`, update their declarations, and remove its temporary
-stderr trap. No runtime files were changed here.
+The latest test repo [records a print-destination selector](https://github.com/Rahik-Sikder/lo-testing/blob/7851a5985495e885da6dc41195763e7608c7eab2/state-ledger.md#runtime-abi--print-family-destination-selector--locked-2026-09-12).
+The emitter passes the Output receiver's tag as the final print argument, and the
+Rust runtime routes tag 0 to stdout and tag 1 to stderr. With temporary local
+implementations of the String and type-operation stubs, the corpus reaches
+**88/102 passing**: ordinary stderr and all formerly blocked runtime paths pass,
+leaving only the 4 parser and 10 checker failures. Those temporary stub
+implementations are not part of this emitter change.
 
 ## Emitter checks
 

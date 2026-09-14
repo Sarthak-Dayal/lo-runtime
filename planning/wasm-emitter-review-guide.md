@@ -268,7 +268,7 @@ coverage, failures, and verification limits.
 | call_indirect traps | P4/P23; E1/E4 | Check the object guard, loaded vtable entry, function-table contents, and call signature. |
 | Valid module returns the wrong result | The relevant LO production | Compare source semantics, typed operands, and chosen instructions before examining byte encodings. |
 | Failure appears only after collection | PUBLISH, RELOAD, CALL, P4 layout | Record root-slot addresses and references before/after GC; inspect inherited pointer offsets. |
-| err traps | Synthetic I/O and its runtime dependency | Check whether the print-destination ABI update has landed in both runtime and host; the current wrapper explicitly defers this path. |
+| Output reaches the wrong stream | Synthetic I/O wrapper and Output tag | Check that the wrapper loads offset 12 and passes it as the print call's final argument. |
 
 These checks help narrow down the cause. An incorrect field offset can look like
 a GC failure, and an incorrect table index can look like a signature failure.

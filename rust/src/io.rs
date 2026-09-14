@@ -31,6 +31,12 @@ mod sys {
         let _ = out.flush();
     }
 
+    pub(super) fn write_err(bytes: &[u8]) {
+        let mut err = io::stderr();
+        let _ = err.write_all(bytes);
+        let _ = err.flush();
+    }
+
     /// Peek the next input byte without consuming it.
     pub(super) fn peek_byte() -> Option<u8> {
         let stdin = io::stdin();
@@ -78,6 +84,7 @@ mod sys {
         pub(super) fn host_print_bool(b: i32);
         pub(super) fn host_print_bytes(ptr: *const u8, len: i32);
         pub(super) fn host_println();
+        pub(super) fn host_write_stderr(ptr: *const u8, len: i32);
         pub(super) fn host_read_int() -> i32;
         pub(super) fn host_read_bool() -> i32;
         pub(super) fn host_read_line_len() -> i32;
@@ -106,23 +113,41 @@ fn skip_whitespace() {
 
 /// Print an `i32` in decimal (no trailing newline).
 #[no_mangle]
-pub extern "C" fn lo_print_int(n: i32) {
+pub extern "C" fn lo_print_int(n: i32, to_stderr: i32) {
     #[cfg(not(target_arch = "wasm32"))]
-    sys::write_out(n.to_string().as_bytes());
+    if to_stderr == 0 {
+        sys::write_out(n.to_string().as_bytes());
+    } else {
+        sys::write_err(n.to_string().as_bytes());
+    }
     #[cfg(target_arch = "wasm32")]
     unsafe {
-        sys::host_print_int(n);
+        if to_stderr == 0 {
+            sys::host_print_int(n);
+        } else {
+            let text = n.to_string();
+            sys::host_write_stderr(text.as_ptr(), text.len() as i32);
+        }
     }
 }
 
 /// Print `true` or `false` (no trailing newline).
 #[no_mangle]
-pub extern "C" fn lo_print_bool(b: bool) {
+pub extern "C" fn lo_print_bool(b: bool, to_stderr: i32) {
+    let text: &[u8] = if b { b"true" } else { b"false" };
     #[cfg(not(target_arch = "wasm32"))]
-    sys::write_out(if b { b"true" } else { b"false" });
+    if to_stderr == 0 {
+        sys::write_out(text);
+    } else {
+        sys::write_err(text);
+    }
     #[cfg(target_arch = "wasm32")]
     unsafe {
-        sys::host_print_bool(b as i32);
+        if to_stderr == 0 {
+            sys::host_print_bool(b as i32);
+        } else {
+            sys::host_write_stderr(text.as_ptr(), text.len() as i32);
+        }
     }
 }
 
@@ -133,7 +158,7 @@ pub extern "C" fn lo_print_bool(b: bool) {
 /// `s`, if non-null, must point at a valid `StringObject` whose inline data holds
 /// `length` readable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn lo_print_string(s: *mut Object) {
+pub unsafe extern "C" fn lo_print_string(s: *mut Object, to_stderr: i32) {
     if s.is_null() {
         return;
     }
@@ -142,19 +167,35 @@ pub unsafe extern "C" fn lo_print_string(s: *mut Object) {
     let data = (s as *const u8).add(string_data_offset());
     let slice = core::slice::from_raw_parts(data, len);
     #[cfg(not(target_arch = "wasm32"))]
-    sys::write_out(slice);
+    if to_stderr == 0 {
+        sys::write_out(slice);
+    } else {
+        sys::write_err(slice);
+    }
     #[cfg(target_arch = "wasm32")]
-    sys::host_print_bytes(slice.as_ptr(), slice.len() as i32);
+    if to_stderr == 0 {
+        sys::host_print_bytes(slice.as_ptr(), slice.len() as i32);
+    } else {
+        sys::host_write_stderr(slice.as_ptr(), slice.len() as i32);
+    }
 }
 
 /// Print a single newline.
 #[no_mangle]
-pub extern "C" fn lo_println() {
+pub extern "C" fn lo_println(to_stderr: i32) {
     #[cfg(not(target_arch = "wasm32"))]
-    sys::write_out(b"\n");
+    if to_stderr == 0 {
+        sys::write_out(b"\n");
+    } else {
+        sys::write_err(b"\n");
+    }
     #[cfg(target_arch = "wasm32")]
     unsafe {
-        sys::host_println();
+        if to_stderr == 0 {
+            sys::host_println();
+        } else {
+            sys::host_write_stderr(b"\n".as_ptr(), 1);
+        }
     }
 }
 

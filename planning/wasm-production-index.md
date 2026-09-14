@@ -70,4 +70,4 @@ and WASM rules shared by several productions.
 
 P26 already lowers non-String equality to i32.eq. The checker currently prevents
 class/null equality from reaching it; the test report identifies that dependency.
-Ordinary stderr remains deferred until the runtime's print-destination ABI lands.
+Output wrappers pass the receiver's destination tag to the print-family ABI.

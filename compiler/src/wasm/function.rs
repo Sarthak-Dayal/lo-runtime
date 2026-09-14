@@ -204,16 +204,16 @@ impl<'m, 'a> Function<'m, 'a> {
             IoOp::PrintString => ("lo_print_string", true),
             IoOp::Println => ("lo_println", true),
         };
+        let mut args: Vec<_> = (1..self.params).collect();
         if output {
-            // Runtime dependency: the checked-in ABI only supports stdout.
-            // Keep err's identity; do not silently send its output to stdout.
+            // Output carries the dynamic destination used by out, err, fields,
+            // formals, and aliases of either pre-bound object.
+            let destination = self.temporary(&Type::Int);
             self.get(0);
             self.ins("i32.load 12");
-            self.open_if(false);
-            self.ins("unreachable # ordinary err output needs the destination ABI update");
-            self.end_if();
+            self.set(destination);
+            args.push(destination);
         }
-        let args: Vec<_> = (1..self.params).collect();
         if let Some(value) = self.call(target, &args, result) {
             self.return_saved(value);
         }
