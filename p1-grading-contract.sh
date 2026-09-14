@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Course grading entry points. Sourcing this file does not build or print.
+set -uo pipefail
+
 LO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 lo-build() {
