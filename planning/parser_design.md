@@ -308,7 +308,7 @@ pub fn parse_program(tokens: &[Token]) -> Result<Program, ParseError> {
 ```rust
 fn parse_class_decl(&mut self) -> Result<ClassDecl, ParseError> {
     let line = self.peek1().line;
-    self.expect(TokenKind::KwClass, ErrorCode::EMalformedClassDecl)?;
+    self.expect(TokenKind::KwClass, ErrorCode::EParsePhaseOther)?;
     let class_name = self.parse_class_name()?; // P44: ClassName -> Identifier
 
     let extends = if self.check(&TokenKind::KwExtends) {
@@ -361,7 +361,9 @@ fn parse_class_decl(&mut self) -> Result<ClassDecl, ParseError> {
 }
 ```
 
-No check is needed here for a misplaced `(`/`[` (or anything else) after the method body closes: `parse_program`'s loop calls `parse_class_decl` again for any non-`Eof` token, and that call's very first line, `self.expect(TokenKind::KwClass, ErrorCode::EMalformedClassDecl)`, already reports `EMalformedClassDecl` for *any* token that isn't `class` — including `(`, `[`, or literally anything else. A dedicated check here (there was one earlier) only changed the error *message*, never the code, so it was pure redundancy once the leading keyword-check was itself fixed to use `EMalformedClassDecl` instead of the generic sentinel.
+The leading `self.expect(TokenKind::KwClass, ErrorCode::EParsePhaseOther)` is deliberately *not* `EMalformedClassDecl`, unlike every other `expect`/error in this function. `E_MALFORMED_CLASS_DECL`'s trigger text ("A `<ClassDecl>` lacks one of its required sections, has them in the wrong order, or has empty `[ ]` brackets") presupposes a `ClassDecl` was already recognized as starting -- every other use in this function fires *after* `class` has already been consumed (missing `(`/`)`, empty `[ ]`, missing `{`). The leading check is different: it's P1's own `(ClassDecl)*` repetition failing to find the start of the *next* one at all -- nothing has been recognized as an attempted `ClassDecl` yet, so there's no malformed `ClassDecl` to name. P1 itself has no specific error code, so `E_PARSE_PHASE_OTHER` (the parse-phase sentinel) is correct here.
+
+This also covers a misplaced `(`/`[` (or anything else) after a complete class's method body closes, with no separate check needed: `parse_program`'s loop calls `parse_class_decl` again for any non-`Eof` token, and that call's leading `expect` reports `E_PARSE_PHASE_OTHER` for *any* token that isn't `class` -- including a stray `(` or `[` left over from what looks like a misplaced section. That stray token is just as unattempted-as-a-ClassDecl as any other top-level garbage; it doesn't matter that it happens to resemble a class section shape.
 
 ### P5, P6
 
