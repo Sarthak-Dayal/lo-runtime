@@ -1,0 +1,31 @@
+// main method return value: 49
+// P4/P17/P22/P23: moving GC preserves receivers, earlier arguments, fields,
+// aliases, and a reference return. churn allocates more than two semispaces.
+class Node(Node child; int value; String text;) [
+    Node(Node c, int n) { child = c; value = n; }
+] {
+    Node getChild() { return child; }
+    int getValue() { return value; }
+    Node choose(Node first, int ignored) { return first; }
+    void printDefault() { out.print_string(text); }
+}
+
+class Main() {
+    int churn() {
+        int i;
+        Node junk;
+        while ((i < 900000)) {
+            junk = ((i < 450000) ? new Node(null, i) : new Node(null, (i + 1)));
+            i = (i + 1);
+        }
+        return i;
+    }
+    int main() {
+        Node root, alias, result;
+        root = new Node(new Node(null, 42), 7);
+        alias = root.getChild();
+        result = root.choose(alias, this.churn());
+        result.printDefault();
+        return (root.getValue() + result.getValue());
+    }
+}

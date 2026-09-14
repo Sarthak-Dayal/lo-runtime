@@ -1,0 +1,14 @@
+// main method return value: 3
+// P11/P12: skipped declarations still initialize; loop declarations never reset.
+class Main() {
+    int main() {
+        int i;
+        if (false) { int skipped; ; } else { ; }
+        while ((i < 3)) {
+            int count;
+            count = (count + 1);
+            i = (i + 1);
+        }
+        return (count + skipped);
+    }
+}

@@ -1,0 +1,30 @@
+// main method return value: 42
+// P13-P16/P25-P27: nested branch depths, short circuit, and total i32 arithmetic.
+class Main(int calls;) [ Main() { ; } ] {
+    bool touch() { calls = (calls + 1); return true; }
+    int main() {
+        int outer, inner, score, minimum;
+        bool skip;
+        skip = (false & this.touch());
+        skip = (true | this.touch());
+        if ((calls > 0)) { return 1; } else { ; }
+        minimum = ((~2147483647) - 1);
+        if (((minimum / (~1)) = minimum)) { ; } else { return 2; }
+        if (((minimum % (~1)) = 0)) { ; } else { return 3; }
+        if (((17 / 0) = (~1))) { ; } else { return 4; }
+        if (((17 % 0) = 17)) { ; } else { return 5; }
+        if (((2147483647 + 1) = minimum)) { ; } else { return 6; }
+        while ((outer < 3)) {
+            inner = 0;
+            while (true) {
+                if ((inner = 2)) {
+                    if (true) { break; } else { ; }
+                } else { ; }
+                inner = (inner + 1);
+                score = (score + 7);
+            }
+            outer = (outer + 1);
+        }
+        return (true ? score : 99);
+    }
+}

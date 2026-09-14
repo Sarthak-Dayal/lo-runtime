@@ -1,0 +1,13 @@
+// expected exit code: 102
+// expected stderr substring: lo_abort_null_receiver: cannot dispatch accept
+// P23: argument side effects occur even when the saved receiver is null.
+class Box() {
+    int accept(int value) { return value; }
+}
+class Main() {
+    int argument() { out.print_int(77); out.println(); return 1; }
+    int main() {
+        Box missing;
+        return missing.accept(this.argument());
+    }
+}
