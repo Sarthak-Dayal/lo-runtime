@@ -88,7 +88,7 @@ impl<'a> Parser<'a> {
     // P4: ClassDecl -> class ClassName (extends ClassName)? ( (VarDecl)* ) ( [ (ConstructorDecl)+ ] )? { (MethodDecl)* }
     fn parse_class_decl(&mut self) -> Result<ClassDecl, ParseError> {
         let line = self.peek1().line;
-        self.expect(TokenKind::KwClass, ErrorCode::EMalformedClassDecl)?; // "class"
+        self.expect(TokenKind::KwClass, ErrorCode::EParsePhaseOther)?; // "class"
         let class_name = self.parse_class_name()?; // P44: ClassName -> Identifier
 
         let extends = if self.check(&TokenKind::KwExtends) {
@@ -1286,10 +1286,10 @@ mod tests {
     }
 
     #[test]
-    fn wrong_order_bracket_section_after_methods() {
+    fn bracket_section_after_complete_class_is_parse_phase_other() {
         let e =
             program_err("class Foo (int x;) { int m() { return x; } } [ Foo(int n) { x = n; } ]");
-        assert_eq!(e.code, ErrorCode::EMalformedClassDecl);
+        assert_eq!(e.code, ErrorCode::EParsePhaseOther);
     }
 
     #[test]

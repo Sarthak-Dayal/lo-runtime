@@ -258,7 +258,7 @@ impl<'a> Parser<'a> {
     // P4: ClassDecl -> class ClassName (extends ClassName)? ( (VarDecl)* ) ( [ (ConstructorDecl)+ ] )? { (MethodDecl)* }
     fn parse_class_decl(&mut self) -> Result<ClassDecl, ParseError> {
         let line = self.peek1().line;
-        self.expect(TokenKind::KwClass, ErrorCode::EMalformedClassDecl)?; // "class"
+        self.expect(TokenKind::KwClass, ErrorCode::EParsePhaseOther)?; // "class"
         let class_name = self.parse_class_name()?; // P44: ClassName -> Identifier
 
         let extends = if self.check(&TokenKind::KwExtends) {
@@ -1110,6 +1110,7 @@ impl<'a> Parser<'a> {
         }
     }
 }
+
 ```
 
 ---
@@ -1155,6 +1156,6 @@ there. Test function names should say what they test (e.g.
 | `((x).m())` | `Expr::Call(MethodCall { obj_name: Computed(Var("x")), method_name: "m", actuals: [] })` — `parse_expr` parses `(x)` as `Var("x")`, then `parse_paren_suffix` sees `.` (not a cast, since `is_start_of_expr()` is false for `.`) and resolves it as a computed-receiver method call |
 | `((x).m() + y)` | `Binop(Call(...), Add, Var("y"))` — same path through `parse_paren_suffix`, which then continues into `parse_operator_suffix` instead of closing the outer paren |
 | `x = (new Circle(5)).area();` (assignment RHS) | `parse_expr`'s `LParen` arm resolves `(new Circle(5))` via `parse_paren_expr` to `Expr::New(...)`, sees the trailing `.`, calls `parse_method_call_suffix` with `ObjName::Computed(New(...))` → `Assign("x", Call(...), _)` |
-| `class Foo (int x;) { int m() { return x; } } [ Foo(int n) { x = n; } ]` | `[ ]` appears after `{ }` instead of before → `Err(EMalformedClassDecl)` |
+| `class Foo (int x;) { int m() { return x; } } [ Foo(int n) { x = n; } ]` | `[ ]` appears after `{ }` instead of before; the class is already complete and valid at that point, so `parse_program`'s loop re-invokes `parse_class_decl` on the stray `[`, which hasn't recognized any `ClassDecl` attempt yet → `Err(EParsePhaseOther)` |
 | `class C extends String () { }` | `Err(EReservedKeywordAsIdentifier)` — `String` lexes as `KwString`, rejected by `parse_identifier` in the `extends` clause |
 | `class Foo (int x;) [ Bar(int x) { } ] { }` | `Err(EMalformedConstructor)` — constructor name `Bar` ≠ class name `Foo` |
