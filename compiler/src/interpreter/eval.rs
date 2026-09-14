@@ -371,8 +371,6 @@ impl<'p> Interp<'p> {
                         let s = self.heap.str_value(id);
                         self.io.print_string(&s, to_err);
                     }
-                    // A null String argument prints nothing and does not abort.
-                    Value::Obj(None) => {}
                     _ => unreachable!("interpreter invariant: print_string arg is not a string"),
                 }
                 Ok(void)
