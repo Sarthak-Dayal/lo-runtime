@@ -5,8 +5,8 @@ use std::rc::Rc;
 use crate::ast::{Binop, IoOp, Type, Unop};
 use crate::type_checker::{
     BindingInfo, CastDirection, ClassTable, MethodResolution, TypedClassDecl, TypedConstructor,
-    TypedDelegation, TypedExpr, TypedMethodBody, TypedMethodCall, TypedMethodDecl, TypedProgram,
-    TypedReceiver, TypedStmt,
+    TypedDelegation, TypedExpr, TypedMethodBody, TypedMethodCall, TypedMethodDecl, TypedObjName,
+    TypedProgram, TypedStmt,
 };
 
 use super::abort::AbortKind;
@@ -117,23 +117,23 @@ impl<'p> Interp<'p> {
 
     pub fn eval_expr(&mut self, e: &TypedExpr, frame: &mut Frame) -> Exec<Value> {
         match e {
-            TypedExpr::Num(n) => Ok(Value::Int(*n)),
-            TypedExpr::Bool(b) => Ok(Value::Bool(*b)),
-            TypedExpr::Str(s) => Ok(Value::Str(self.intern_literal(s))),
-            TypedExpr::Null => Ok(Value::Obj(None)),
-            TypedExpr::This(_) => Ok(Value::Obj(frame.this)),
-            TypedExpr::Var { name, binding } => Ok(self.read_var(frame, name, binding)),
-            TypedExpr::New { class, args } => {
-                let vals = self.eval_args(args, frame)?;
+            TypedExpr::Num(n, _) => Ok(Value::Int(*n)),
+            TypedExpr::Bool(b, _) => Ok(Value::Bool(*b)),
+            TypedExpr::Str(s, _) => Ok(Value::Str(self.intern_literal(s))),
+            TypedExpr::Null(_) => Ok(Value::Obj(None)),
+            TypedExpr::This(_, _) => Ok(Value::Obj(frame.this)),
+            TypedExpr::Var { name, binding, .. } => Ok(self.read_var(frame, name, binding)),
+            TypedExpr::New { class, actuals, .. } => {
+                let vals = self.eval_args(actuals, frame)?;
                 let id = self.construct(class, vals)?;
                 Ok(Value::Obj(Some(id)))
             }
             TypedExpr::Call(call) => self.eval_call(call, frame),
-            TypedExpr::Unary { op, operand, .. } => {
+            TypedExpr::Unop { op, operand, .. } => {
                 let v = self.eval_expr(operand, frame)?;
                 self.eval_unary(*op, v)
             }
-            TypedExpr::Binary { lhs, op, rhs, .. } => self.eval_binary(*op, lhs, rhs, frame),
+            TypedExpr::Binop { lhs, op, rhs, .. } => self.eval_binary(*op, lhs, rhs, frame),
             TypedExpr::Ternary {
                 cond,
                 then_branch,
@@ -148,11 +148,12 @@ impl<'p> Interp<'p> {
                 target,
                 operand,
                 direction,
+                ..
             } => {
                 let v = self.eval_expr(operand, frame)?;
                 self.eval_cast(target, *direction, v)
             }
-            TypedExpr::InstanceOf { operand, class } => {
+            TypedExpr::InstanceOf { operand, class, .. } => {
                 let v = self.eval_expr(operand, frame)?;
                 Ok(Value::Bool(self.is_instance(v, class)))
             }
@@ -243,6 +244,11 @@ impl<'p> Interp<'p> {
                 Ok(Value::Str(id))
             }
             (Value::Str(a), Value::Str(b)) => self.eval_str_binop(op, a, b),
+            // Reference equality. The checker admits `=` between objects only when
+            // one side is the `null` literal (`x = null`, `null = null`), so this is
+            // the null-check idiom: equal iff the same handle, with `None` (LO null)
+            // equal only to `None`.
+            (Value::Obj(a), Value::Obj(b)) if op == Binop::Eq => Ok(Value::Bool(a == b)),
             _ => {
                 unreachable!("interpreter invariant: checker rejects this operand pair for {op:?}")
             }
@@ -291,7 +297,7 @@ impl<'p> Interp<'p> {
     fn eval_call(&mut self, call: &TypedMethodCall, frame: &mut Frame) -> Exec<Value> {
         match &call.resolution {
             MethodResolution::Virtual { .. } => {
-                let receiver = self.eval_receiver(&call.receiver, frame)?;
+                let receiver = self.eval_obj_name(&call.obj_name, frame)?;
                 let id = match receiver {
                     Value::Obj(Some(id)) => id,
                     Value::Obj(None) => {
@@ -301,7 +307,7 @@ impl<'p> Interp<'p> {
                     }
                     _ => unreachable!("interpreter invariant: virtual receiver is not an object"),
                 };
-                let args = self.eval_args(&call.args, frame)?;
+                let args = self.eval_args(&call.actuals, frame)?;
                 // Dispatch on the receiver's *runtime* class, then run the
                 // override winner's body.
                 let table = self.table;
@@ -317,12 +323,12 @@ impl<'p> Interp<'p> {
             MethodResolution::Super { declaring_class } => {
                 // Statically fixed to the ancestor the checker chose; `this` is
                 // the current receiver and is never null in a method body.
-                let args = self.eval_args(&call.args, frame)?;
+                let args = self.eval_args(&call.actuals, frame)?;
                 let body = self.body(declaring_class, &call.method_name);
                 self.invoke(frame.this, body, args)
             }
             MethodResolution::Io { op } => {
-                let receiver = self.eval_receiver(&call.receiver, frame)?;
+                let receiver = self.eval_obj_name(&call.obj_name, frame)?;
                 // A method dispatch on a null receiver aborts (102) regardless of
                 // whether the method is user-defined or a built-in I/O op — same
                 // check the virtual arm makes. `in`/`out`/`err` are never null, but
@@ -332,7 +338,7 @@ impl<'p> Interp<'p> {
                         method: call.method_name.clone(),
                     }));
                 }
-                let args = self.eval_args(&call.args, frame)?;
+                let args = self.eval_args(&call.actuals, frame)?;
                 self.run_io(op, receiver, args)
             }
         }
@@ -386,11 +392,11 @@ impl<'p> Interp<'p> {
         }
     }
 
-    fn eval_receiver(&mut self, receiver: &TypedReceiver, frame: &mut Frame) -> Exec<Value> {
-        match receiver {
-            TypedReceiver::This(_) | TypedReceiver::Super => Ok(Value::Obj(frame.this)),
-            TypedReceiver::Var { name, binding } => Ok(self.read_var(frame, name, binding)),
-            TypedReceiver::Computed(e) => self.eval_expr(e, frame),
+    fn eval_obj_name(&mut self, obj_name: &TypedObjName, frame: &mut Frame) -> Exec<Value> {
+        match obj_name {
+            TypedObjName::This(_, _) | TypedObjName::Super(_) => Ok(Value::Obj(frame.this)),
+            TypedObjName::Var { name, binding, .. } => Ok(self.read_var(frame, name, binding)),
+            TypedObjName::Computed(e, _) => self.eval_expr(e, frame),
         }
     }
 
@@ -413,7 +419,7 @@ impl<'p> Interp<'p> {
         match &method.body {
             TypedMethodBody::UserDefined { locals, stmts } => {
                 let empty = self.heap.empty();
-                let mut frame = Frame::new(this, &method.params, args, locals, empty);
+                let mut frame = Frame::new(this, &method.formals, args, locals, empty);
                 match self.exec_block(stmts, &mut frame) {
                     // A void method falls off the end; its result is never used
                     // (the checker forbids using a void call as a value), so this
@@ -479,13 +485,14 @@ impl<'p> Interp<'p> {
                 Ok(())
             }
             TypedConstructor::Explicit {
-                params,
+                formals,
                 delegation,
                 locals,
                 stmts,
+                ..
             } => {
                 let empty = self.heap.empty();
-                let mut frame = Frame::new(Some(this), params, args, locals, empty);
+                let mut frame = Frame::new(Some(this), formals, args, locals, empty);
                 // Delegation runs first and to completion (parent portion first),
                 // so exactly one constructor body runs per hierarchy level.
                 if let Some(delegation) = delegation {
@@ -513,14 +520,14 @@ impl<'p> Interp<'p> {
         frame: &mut Frame,
     ) -> Exec<()> {
         match delegation {
-            TypedDelegation::This { args } => {
-                let vals = self.eval_args(args, frame)?;
+            TypedDelegation::ThisCall { actuals, .. } => {
+                let vals = self.eval_args(actuals, frame)?;
                 let decl = self.classes.get(class).copied().expect("class decl");
                 let target = select_ctor(decl, vals.len());
                 self.run_ctor(this, class, target, vals)
             }
-            TypedDelegation::Super { args } => {
-                let vals = self.eval_args(args, frame)?;
+            TypedDelegation::SuperCall { actuals, .. } => {
+                let vals = self.eval_args(actuals, frame)?;
                 let table = self.table;
                 let parent = table
                     .get(class)
@@ -603,21 +610,22 @@ impl<'p> Interp<'p> {
                 target,
                 binding,
                 value,
+                ..
             } => {
                 let v = self.eval_expr(value, frame)?;
                 self.write_var(frame, target, binding, v);
                 Ok(())
             }
-            TypedStmt::Return(e) => {
+            TypedStmt::Return(e, _) => {
                 let v = self.eval_expr(e, frame)?;
                 Err(Signal::Return(v))
             }
-            TypedStmt::If(cond, then_body, else_body) => match self.eval_expr(cond, frame)? {
+            TypedStmt::If(cond, then_body, else_body, _) => match self.eval_expr(cond, frame)? {
                 Value::Bool(true) => self.exec_block(then_body, frame),
                 Value::Bool(false) => self.exec_block(else_body, frame),
                 _ => unreachable!("interpreter invariant: if condition is not bool"),
             },
-            TypedStmt::While(cond, body) => {
+            TypedStmt::While(cond, body, _) => {
                 loop {
                     match self.eval_expr(cond, frame)? {
                         Value::Bool(true) => {}
@@ -632,8 +640,8 @@ impl<'p> Interp<'p> {
                 }
                 Ok(())
             }
-            TypedStmt::Break => Err(Signal::Break),
-            TypedStmt::Empty => Ok(()),
+            TypedStmt::Break(_) => Err(Signal::Break),
+            TypedStmt::Empty(_) => Ok(()),
             TypedStmt::CallStmt(call) => {
                 self.eval_call(call, frame)?;
                 Ok(())
@@ -644,7 +652,7 @@ impl<'p> Interp<'p> {
 
 fn ctor_arity(ctor: &TypedConstructor) -> usize {
     match ctor {
-        TypedConstructor::Explicit { params, .. } => params.len(),
+        TypedConstructor::Explicit { formals, .. } => formals.len(),
         TypedConstructor::Implicit { fields } => fields.len(),
     }
 }
@@ -723,19 +731,20 @@ mod tests {
     }
 
     fn num(n: i32) -> Box<TypedExpr> {
-        Box::new(TypedExpr::Num(n))
+        Box::new(TypedExpr::Num(n, 0))
     }
 
     fn boolean(b: bool) -> Box<TypedExpr> {
-        Box::new(TypedExpr::Bool(b))
+        Box::new(TypedExpr::Bool(b, 0))
     }
 
     fn bin(op: Binop, l: Box<TypedExpr>, r: Box<TypedExpr>) -> TypedExpr {
-        TypedExpr::Binary {
+        TypedExpr::Binop {
             lhs: l,
             op,
             rhs: r,
             ty: Type::Int,
+            line: 0,
         }
     }
 
@@ -801,6 +810,7 @@ mod tests {
             Box::new(TypedExpr::Var {
                 name: "missing".to_string(),
                 binding: BindingInfo::Local(Type::Bool),
+                line: 0,
             })
         };
         assert_eq!(
@@ -823,16 +833,18 @@ mod tests {
 
     #[test]
     fn unary_negation_and_not() {
-        let neg = TypedExpr::Unary {
+        let neg = TypedExpr::Unop {
             op: Unop::Neg,
             operand: num(5),
             ty: Type::Int,
+            line: 0,
         };
         assert_eq!(eval_scalar(&neg), Value::Int(-5));
-        let not = TypedExpr::Unary {
+        let not = TypedExpr::Unop {
             op: Unop::Not,
             operand: boolean(true),
             ty: Type::Bool,
+            line: 0,
         };
         assert_eq!(eval_scalar(&not), Value::Bool(false));
     }
@@ -842,12 +854,14 @@ mod tests {
         let missing = Box::new(TypedExpr::Var {
             name: "missing".to_string(),
             binding: BindingInfo::Local(Type::Int),
+            line: 0,
         });
         let t = TypedExpr::Ternary {
             cond: boolean(true),
             then_branch: num(1),
             else_branch: missing,
             ty: Some(Type::Int),
+            line: 0,
         };
         assert_eq!(eval_scalar(&t), Value::Int(1));
     }
@@ -858,43 +872,47 @@ mod tests {
         let mut it = Interp::new(&p, &t, DEFAULT_HEAP_LIMIT);
         let empty = it.heap.empty();
         let mut f = Frame::new(None, &[], vec![], &[], empty);
-        let lit = |s: &str| Box::new(TypedExpr::Str(s.to_string()));
+        let lit = |s: &str| Box::new(TypedExpr::Str(s.to_string(), 0));
         let str_of = |it: &Interp, v: Value| match v {
             Value::Str(id) => it.heap.str_value(id).to_string(),
             other => panic!("expected string, got {other:?}"),
         };
 
-        let cat = TypedExpr::Binary {
+        let cat = TypedExpr::Binop {
             lhs: lit("ab"),
             op: Binop::Add,
             rhs: lit("cd"),
             ty: Type::String,
+            line: 0,
         };
         let v = it.eval_expr(&cat, &mut f).unwrap();
         assert_eq!(str_of(&it, v), "abcd");
 
-        let rep = TypedExpr::Binary {
+        let rep = TypedExpr::Binop {
             lhs: lit("ab"),
             op: Binop::Mul,
             rhs: num(3),
             ty: Type::String,
+            line: 0,
         };
         let v = it.eval_expr(&rep, &mut f).unwrap();
         assert_eq!(str_of(&it, v), "ababab");
 
-        let rev = TypedExpr::Unary {
+        let rev = TypedExpr::Unop {
             op: Unop::Neg,
             operand: lit("aé"),
             ty: Type::String,
+            line: 0,
         };
         let v = it.eval_expr(&rev, &mut f).unwrap();
         assert_eq!(str_of(&it, v), "éa");
 
-        let lt = TypedExpr::Binary {
+        let lt = TypedExpr::Binop {
             lhs: lit("Z"),
             op: Binop::Lt,
             rhs: lit("a"),
             ty: Type::Bool,
+            line: 0,
         };
         assert_eq!(it.eval_expr(&lt, &mut f).unwrap(), Value::Bool(true));
     }
@@ -905,11 +923,12 @@ mod tests {
         let mut it = Interp::new(&p, &t, DEFAULT_HEAP_LIMIT);
         let empty = it.heap.empty();
         let mut f = Frame::new(None, &[], vec![], &[], empty);
-        let rep = TypedExpr::Binary {
-            lhs: Box::new(TypedExpr::Str("x".to_string())),
+        let rep = TypedExpr::Binop {
+            lhs: Box::new(TypedExpr::Str("x".to_string(), 0)),
             op: Binop::Mul,
             rhs: num(-1),
             ty: Type::String,
+            line: 0,
         };
         match it.eval_expr(&rep, &mut f) {
             Err(Signal::Abort(AbortKind::RepeatNegative(-1))) => {}
@@ -923,7 +942,7 @@ mod tests {
         let mut it = Interp::new(&p, &t, DEFAULT_HEAP_LIMIT);
         let empty = it.heap.empty();
         let mut f = Frame::new(None, &[], vec![], &[], empty);
-        let e = TypedExpr::Str("hello".to_string());
+        let e = TypedExpr::Str("hello".to_string(), 0);
         let v1 = it.eval_expr(&e, &mut f).unwrap();
         let v2 = it.eval_expr(&e, &mut f).unwrap();
         assert_eq!(v1, v2);
@@ -941,7 +960,8 @@ mod tests {
         let stmt = TypedStmt::Assign {
             target: "x".to_string(),
             binding: BindingInfo::Local(Type::Int),
-            value: TypedExpr::Num(5),
+            value: TypedExpr::Num(5, 0),
+            line: 0,
         };
         it.exec_block(std::slice::from_ref(&stmt), &mut f).unwrap();
         assert_eq!(f.get("x"), Value::Int(5));
@@ -959,18 +979,20 @@ mod tests {
             Box::new(TypedExpr::Var {
                 name: n.to_string(),
                 binding: BindingInfo::Local(Type::Int),
+                line: 0,
             })
         };
         let assign = |n: &str, v: TypedExpr| TypedStmt::Assign {
             target: n.to_string(),
             binding: BindingInfo::Local(Type::Int),
             value: v,
+            line: 0,
         };
         let body = vec![
             assign("s", bin(Binop::Add, var("s"), var("i"))),
             assign("i", bin(Binop::Add, var("i"), num(1))),
         ];
-        let loop_stmt = TypedStmt::While(bin(Binop::Lt, var("i"), num(3)), body);
+        let loop_stmt = TypedStmt::While(bin(Binop::Lt, var("i"), num(3)), body, 0);
         it.exec_block(std::slice::from_ref(&loop_stmt), &mut f)
             .unwrap();
         assert_eq!(f.get("s"), Value::Int(3));
@@ -983,8 +1005,8 @@ mod tests {
         let mut it = Interp::new(&p, &t, DEFAULT_HEAP_LIMIT);
         let empty = it.heap.empty();
         let mut f = Frame::new(None, &[], vec![], &[], empty);
-        let inner = TypedStmt::If(TypedExpr::Bool(true), vec![TypedStmt::Break], vec![]);
-        let loop_stmt = TypedStmt::While(TypedExpr::Bool(true), vec![inner]);
+        let inner = TypedStmt::If(TypedExpr::Bool(true, 0), vec![TypedStmt::Break(0)], vec![], 0);
+        let loop_stmt = TypedStmt::While(TypedExpr::Bool(true, 0), vec![inner], 0);
         it.exec_block(std::slice::from_ref(&loop_stmt), &mut f)
             .unwrap();
     }
