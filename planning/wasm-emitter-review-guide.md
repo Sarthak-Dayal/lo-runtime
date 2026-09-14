@@ -110,10 +110,9 @@ become instructions, compiler lookups become constants/symbols, and helpers such
 as CALL expand into their specified instruction sequences. Instructions like
 PUBLISH or load32 must be expanded before invoking an assembler.
 
-The standalone [add.wat](examples/add.wat) exercise has just two integer parameters.
-It isolates WASM arithmetic and encoding; a complete LO method additionally needs
-its receiver, shadow frame, and shared return sequence. Here is the equivalent
-[LLVM assembly](examples/add.s):
+This standalone addition example has just two integer parameters. It isolates
+WASM arithmetic and encoding; a complete LO method additionally needs its receiver,
+shadow frame, and shared return sequence. Its LLVM assembly is:
 
 ```asm
 .text
@@ -132,23 +131,14 @@ encodes them. LLVM's [WASM assembler tests](https://github.com/llvm/llvm-project
 show the actual syntax, including .local declarations and end_function. WAT and
 LLVM assembly are different textual formats; use the .s file with llvm-mc.
 
-When the LLVM tools are available, these commands build the exercise in /tmp:
-
-```sh
-llvm-mc -triple=wasm32-unknown-unknown -filetype=obj planning/examples/add.s -o /tmp/lo-add.o
-wasm-ld --no-entry --export=add /tmp/lo-add.o -o /tmp/lo-add.wasm
-```
-
-These commands remain untested in the course environment. The file produced by
-LLVM may contain extra sections and different encodings of relocatable operands;
-compare instructions, signatures, and behavior with the next example, rather than
+The file produced by LLVM may contain extra sections and different encodings of
+relocatable operands. Compare instructions, signatures, and behavior rather than
 expecting identical bytes.
 
 <a id="e3"></a>
 
-E3 explains bytes independently of the assembler. [add.hex](examples/add.hex) is
-a complete standalone module written out in hexadecimal. LLVM remains responsible
-for binary encoding in the compiler; this small fixture makes the fields visible.
+E3 explains bytes independently of the assembler. LLVM remains responsible for
+binary encoding in the compiler; this small standalone example makes the fields visible.
 
 First, its instruction sequence and function-body prefix are:
 
@@ -212,29 +202,10 @@ our four-byte fields use [little-endian layout](https://webassembly.github.io/sp
 That layout is relevant to objects
 and descriptors, while LEB128 is relevant to their encoded instruction operands.
 
-To run the fixture using Node from the repository root:
-
-```sh
-node planning/examples/check-add.mjs
-```
-
-It validates the bytes, verifies the export/import lists, and checks these results:
-
-```text
-Validated 41 bytes; exports add; no imports.
-add(20, 22) = 42
-add(-7, 2) = -5
-add(2147483647, 1) = -2147483648
-```
-
-This fixture isolates handwritten encoding. The
-[compiler test](../compiler/tests/wasm.mjs) checks the full emission and runtime
-linking path, including exact i32 results and moving-GC ABI checks.
-
-For an experiment, copy add.hex and change 6a (add) to 6b (subtract), then pass that
-copy's path to check-add.mjs. Validation should still pass; the result assertion
-should fail. Changing the code payload length 09 to 08 instead should fail
-validation. These are different failure classes even though each changes one byte.
+Changing `6a` (add) to `6b` (subtract) keeps the module structurally valid but
+changes its behavior. Changing the code payload length `09` to `08` instead makes
+the module invalid. These are different failure classes even though each changes
+one byte.
 
 <a id="e4"></a>
 

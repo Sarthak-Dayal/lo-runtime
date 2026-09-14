@@ -16,12 +16,12 @@ From the repository root, with Rust/cargo, the `wasm32-unknown-unknown` target,
 ```sh
 source p1-grading-contract.sh
 lo-build
-lo-check compiler/tests/fixtures/return-42.lo
-lo-compile compiler/tests/fixtures/return-42.lo /tmp/return-42.wasm
-lo-wasmrun /tmp/return-42.wasm
+lo-check ../lo-testing/LO-3/ValidPrograms/test_15.lo
+lo-compile ../lo-testing/LO-3/ValidPrograms/test_15.lo /tmp/test_15.wasm
+lo-wasmrun /tmp/test_15.wasm
 ```
 
-The last command exits with 42. The grading functions preserve rejection status 1
+The last command exits with 10. The grading functions preserve rejection status 1
 and program exit codes. `lo-check` runs only the frontend and writes no files.
 `lo-compile` writes the module to its second argument; on failure it reports the
 stage and retains intermediate artifacts. `LLVM_MC`, `WASM_LD`, and
@@ -38,31 +38,18 @@ compiler/target/release/lo-compiler --compile program.lo program.wasm
 and stable vtable slots. Source bodies are visited once; buffering their output
 lets scratch-local declarations and frame sizes precede the instructions.
 
-Run the external LO-3/LO-4 corpus, including `contributed-tests`, and the six
-emitter regressions separately:
+Run the external LO-3/LO-4 corpus, including `contributed-tests`, from a checkout
+next to this repository:
 
 ```sh
-python3 compiler/tests/conformance.py --suite /path/to/lo-testing
-python3 compiler/tests/conformance.py --suite compiler/tests/fixtures --artifacts compiler/target/wasm-regressions
-cargo test --manifest-path compiler/Cargo.toml
+python3 scripts/test-conformance.py --suite ../lo-testing/
 ```
 
-`lo-testing` supplies test cases and expectations; its README says the instructor's
-grading harness is not included. Our Python runner checks frontend acceptance,
+The runner checks frontend acceptance,
 assembly, linking, and execution through the unchanged course host. It matches expected process status,
 stdout bytes, and abort-message substrings. Each run keeps `report.json` and
 per-stage artifacts under its artifact directory. Failure-layer labels are
 initial localization hints; inspect the saved diagnostics before assigning a fix.
 LO-2's procedural grammar is outside this emitter's scope and is not counted.
 
-After `lo-build`, run the encoding and ABI checks with Node:
-
-```sh
-node compiler/tests/wasm.mjs
-```
-
-This uses the full emitter and runtime to check exact i32 results for 42, 64,
-2147483647, and addition. It also checks frontend rejections, memory-stack
-restoration, and non-null empty String defaults. The 89 Rust tests cover the
-lexer, parser, and preamble; the six LO regressions cover moving GC, reference
-returns, evaluation order, branch depths, arithmetic, and hoisted locals.
+The 89 Rust tests cover the lexer, parser, and preamble.

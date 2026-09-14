@@ -3,7 +3,7 @@
 The latest fetched [lo-testing revision](https://github.com/Rahik-Sikder/lo-testing/commit/7851a5985495e885da6dc41195763e7608c7eab2)
 passes **75 of 102 LO-3/LO-4 cases** with this emitter. The 102 cases include all
 25 contributed cases. Their source files and expected outputs are read unchanged
-from the test-repo checkout by our [runner](../compiler/tests/conformance.py).
+from the test-repo checkout by the [conformance runner](../scripts/test-conformance.py).
 The test repo documents the harness contract but does not ship the instructor's
 grading harness; this is a local run of its corpus using the course `wasmrun` host.
 LO-2 has a different, procedural grammar and is outside this compiler's scope.
@@ -14,7 +14,6 @@ LO-2 has a different, procedural grammar and is outside this compiler's scope.
 | Parser diagnostic mismatches | 4 |
 | Type-checker failures | 10 |
 | Runtime stub failures | 13 |
-| New emitter regressions passing | 6/6 |
 | Existing Rust frontend/preamble tests passing | 89/89 |
 
 Of the 67 valid/abort programs, 9 stop in the checker. The other 58 all emit,
@@ -34,7 +33,7 @@ space was freed. The compiler, checker, and runtime sources were compared with
 the fetched branches; the checker and runtime were left unchanged as requested.
 
 Run the commands in the [compiler README](../compiler/README.md) to reproduce the
-checks. The [runner](../compiler/tests/conformance.py) preserves the exact command,
+checks. The [runner](../scripts/test-conformance.py) preserves the exact command,
 exit status, stdout, and stderr for each stage in `compiler/target/conformance`.
 Its `report.json` contains every individual result. A failed stage stops that case;
 later stages are not counted as passing.
@@ -109,27 +108,11 @@ stderr trap. No runtime files were changed here.
 
 ## Emitter checks
 
-The six [regression programs](../compiler/tests/fixtures/LO-4) execute through the
-same assembler, linker, Rust runtime, and course host as the external cases:
-
-| Regression | What it exercises |
-|---|---|
-| `control-and-arithmetic` | Break depth through nested ifs/loops; skipped boolean operands; division by zero, INT_MIN / -1, remainder, wrapping addition, ternary. |
-| `evaluation-order` | Computed receiver first, then each actual left to right. |
-| `gc-roots` | More than two semispaces of allocation; moved receiver, earlier argument, alias, field, reference return; branch scratch slots and immortal String defaults. |
-| `gc-read-string` | A String returned by I/O remains live across moving GC and prints its original UTF-8 contents. |
-| `hoisted-locals` | Defaults exist for skipped declarations; declarations do not reset locals on each loop iteration. |
-| `null-guard-after-actuals` | Arguments print before the null guard aborts; both stdout and abort text are checked. |
-
 The grading functions also passed a direct check: sourcing is silent, lo-build
 succeeds, lo-check rejects with status 1, and lo-compile writes and executes a
 requested module path containing spaces from a different working directory.
 
-The [Node test](../compiler/tests/wasm.mjs) uses the full emitter and runtime to
-check exact i32 results 42, 64, and 2147483647, addition, and three frontend
-rejections. It also confirms memory-stack restoration and observes a non-null
-empty String field through the host import. These checks are separate from the
-six LO regressions and the 89 Rust frontend tests. The
+The 89 Rust tests exercise the existing frontend. The
 [production index](wasm-production-index.md) maps a failing rule to its handler.
 
 Changed Rust files pass rustfmt; the crate-wide formatting check still fails in

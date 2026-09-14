@@ -116,7 +116,7 @@ def test_case(path, args):
 
 
 def main():
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", type=Path, required=True)
     parser.add_argument("--artifacts", type=Path, default=root / "compiler/target/conformance")
