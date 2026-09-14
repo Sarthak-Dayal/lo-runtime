@@ -1,124 +1,79 @@
 # WASM test results and fixes by layer
 
 The latest fetched [lo-testing revision](https://github.com/Rahik-Sikder/lo-testing/commit/7851a5985495e885da6dc41195763e7608c7eab2)
-passes **75 of 102 LO-3/LO-4 cases** with this emitter. The 102 cases include all
-25 contributed cases. Their source files and expected outputs are read unchanged
-from the test-repo checkout by the [conformance runner](../scripts/test-conformance.py).
-The test repo documents the harness contract but does not ship the instructor's
-grading harness; this is a local run of its corpus using the course `wasmrun` host.
-LO-2 has a different, procedural grammar and is outside this compiler's scope.
+contains 102 LO-3/LO-4 cases, including all 25 contributed cases. The
+[conformance runner](../scripts/test-conformance.py) reads those files unchanged
+and checks parsing, semantic analysis, assembly, linking, status, stdout, and
+abort diagnostics through the course `wasmrun` host.
 
-| Result | Count |
-|---|---:|
-| Passing external cases | 75 |
-| Parser diagnostic mismatches | 4 |
-| Type-checker failures | 10 |
-| Runtime stub failures | 13 |
-| Existing Rust frontend/preamble tests passing | 89/89 |
+With the updated type checker and temporary local implementations of the runtime
+String/cast stubs, the current checkout passes **97/102 cases as the suite is
+written**:
 
-Of the 67 valid/abort programs, 9 stop in the checker. The other 58 all emit,
-assemble, link, validate, and instantiate; 45 execute as expected and 13 reach
-runtime stubs. Of the 35 invalid programs, 30 produce the expected rejection and
-diagnostic; 5 are rejected with a different diagnostic. No remaining failure in
-this run was attributed to the emitter, assembler, or linker. This does not prove
-the execution paths hidden behind frontend/runtime failures.
-
-The emitter is stacked directly on type-checker PR #5 at `f27fc67`; the checks
-below were rerun on that base. The run used Rust 1.87.0, LLVM 18.1.8, and the
-unchanged course `wasmrun` source
-with Wasmtime 33.0.2, built locally on macOS. The runtime archive was built for
-`wasm32-unknown-unknown` with LTO disabled. The exact course Docker image remains
-unverified: its build exhausted disk space, and Docker failed to recover after
-space was freed. The compiler, checker, and runtime sources were compared with
-the fetched branches; the checker and runtime were left unchanged as requested.
-
-Run the commands in the [compiler README](../compiler/README.md) to reproduce the
-checks. The [runner](../scripts/test-conformance.py) preserves the exact command,
-exit status, stdout, and stderr for each stage in `compiler/target/conformance`.
-Its `report.json` contains every individual result. A failed stage stops that case;
-later stages are not counted as passing.
-
-## Frontend fixes
-
-The largest group is class/null equality: **nine valid programs** fail in
-[`check_binop`](../compiler/src/type_checker.rs). Its initial match rejects
-`NullLiteral`, and its class-type cases do not allow equality. The test repo's
-[locked language decision](https://github.com/Rahik-Sikder/lo-testing/blob/7851a5985495e885da6dc41195763e7608c7eab2/state-ledger.md#class-type-reference-equality--locked-2026-05-28)
-allows reference equality, including null/null and class/null comparisons, while
-forbidding reference ordering. Add those `Binop::Eq` cases before the generic
-null rejection and return `Type::Bool`. The current typed AST can represent the
-result without an interface change; the emitter already selects i32.eq.
-
-Affected cases are LO-3 ValidPrograms `test_17`, `test_24`, `test_30`, `test_32`,
-`test_35`, and `test_42`; LO-4 ValidPrograms `test_5_cast_null_passes` and
-`test_9_null_field_default`; and contributed LO-4 ValidPrograms
-`contributed-tests-6`. Fixing the checker exposes later execution paths, including
-cast stubs, so these are not nine guaranteed additional passes.
-
-The tenth checker failure is LO-3 InvalidPrograms `test_20_break_outside_loop`.
-The checker correctly rejects it, but reports `E_WELL_FORMEDNESS_OTHER`.
-Add `E_BREAK_OUTSIDE_LOOP` to its error vocabulary and use it in `check_stmt`'s
-out-of-loop `Break` case.
-
-All four parser cases are rejected; their diagnostic codes differ from the test
-contract. They need changes in [parser.rs](../compiler/src/parser.rs), not WASM:
-
-| LO-3 invalid case | Current / expected code | Suggested change |
-|---|---|---|
-| `test_0` | `E_RESERVED_KEYWORD_AS_IDENTIFIER` / `E_PARSE_PHASE_OTHER` | Recognize the repeated type after a comma in the malformed class field list as declaration syntax, rather than an attempted keyword identifier. |
-| `test_13` | `E_PARSE_PHASE_OTHER` / `E_RESERVED_KEYWORD_AS_IDENTIFIER` | Review diagnostic precedence for `while waiter;`. The parser treats it as a malformed loop before reaching the reserved class name. Add contextual detection for the intended illegal type name, or clarify this multi-error test's expected first error. |
-| `test_5` | `E_PARSE_PHASE_OTHER` / `E_NULL_LITERAL_RECEIVER` | Recognize a method-call suffix after literal null and route it through the existing null-receiver rejection. Currently the parser stops at the dot while expecting a semicolon. |
-| `test_6` | `E_MALFORMED_CLASS_DECL` / `E_PARSE_PHASE_OTHER` | Distinguish a top-level method from a malformed declaration that actually begins with `class`. |
-
-## Runtime fixes
-
-The Rust runtime still has `unimplemented!()` bodies in
-[string_ops.rs](../rust/src/string_ops.rs) and [cast.rs](../rust/src/cast.rs).
-The assignment says the grading runtime supplies these operations; locally we
-must either link that complete archive or implement the stubs in the runtime
-workstream. The emitter should continue calling the documented ABI.
-
-| First runtime failure | Cases | Required runtime work |
+| Remaining result | Count | Owning layer |
 |---|---:|---|
-| `lo_string_new` panic | 8 | Allocate/copy UTF-8 literal bytes into a String object. Other String operations may fail next. |
-| `lo_string_compare` panic | 2 | Compare UTF-8 contents lexicographically and return a negative/zero/positive i32. |
-| `lo_instanceof` panic | 1 | Walk descriptor parents; null yields false. |
-| `lo_cast_check` stub, incomplete abort message | 2 | Implement the checked cast and emit `lo_cast_check: cannot cast Dog to Cat` on these failures. |
+| Parser diagnostic-code mismatch | 4 | Parser |
+| Stale `lo_alloc` valid-test expectation | 1 | Test corpus |
+| Emitter, linker, or execution failure | 0 | — |
 
-The eight `lo_string_new` cases are LO-3 RuntimeAbortPrograms
-`test_1_string_repeat_negative`; LO-3 ValidPrograms `test_14_string_reverse_codepoint`,
-`test_20`, `test_33`, and `test_45`; LO-4 ValidPrograms `test_3_hello_world`; and
-contributed LO-3 ValidPrograms `contributed-tests-1` and `contributed-tests-24`.
-The compare cases are LO-3 ValidPrograms `test_43` and contributed LO-4
-ValidPrograms `contributed-tests-5`. The instanceof case is LO-4 ValidPrograms
-`test_10_instanceof_unrelated_classes`. The cast cases are LO-4 RuntimeAbortPrograms
-`test_1_cast_failure` and contributed LO-4 RuntimeAbortPrograms `contributed-tests-4`.
+The instructor has since reserved the `lo_` prefix for runtime ABI entry points.
+`contributed-tests/LO-3/ValidPrograms/contributed-tests-19.lo` still declares a
+user method named `lo_alloc` and expects acceptance. The compiler now correctly
+rejects it with `E_RESERVED_VARIABLE_NAME`; after that test is updated or moved,
+the result is **98/102**. The four remaining failures are all programs that the
+frontend rejects with a different parser diagnostic code than the test header
+requests.
 
-The cast tests already exit with 101 because the host recognizes the function
-name in a trap. They still fail correctly: the host's fallback message is only
-`lo_cast_check: cast failure`, which does not satisfy the required message.
-An exit-code-only test would have hidden the missing implementation.
+The committed Rust runtime intentionally retains its assignment stubs. A clean
+checkout linked to that skeleton fails 13 additional runtime-dependent cases.
+The temporary local implementations used to expose later emitter paths are not
+part of this PR; the grading handout says the compiler is linked with the
+instructor's complete runtime.
 
-The latest test repo [records a print-destination selector](https://github.com/Rahik-Sikder/lo-testing/blob/7851a5985495e885da6dc41195763e7608c7eab2/state-ledger.md#runtime-abi--print-family-destination-selector--locked-2026-09-12).
-The emitter passes the Output receiver's tag as the final print argument, and the
-Rust runtime routes tag 0 to stdout and tag 1 to stderr. With temporary local
-implementations of the String and type-operation stubs, the corpus reaches
-**88/102 passing**: ordinary stderr and all formerly blocked runtime paths pass,
-leaving only the 4 parser and 10 checker failures. Those temporary stub
-implementations are not part of this emitter change.
+## Changes exposed by the updated type checker
 
-## Emitter checks
+Type-checker commit `30cf34e` adds legal equality between class references and
+`null`, and reports `E_BREAK_OUTSIDE_LOOP` for an out-of-loop break. The break
+test and five null-equality programs passed immediately. Four larger null-using
+programs then reached assembly for the first time and exposed an emitter issue:
 
-The grading functions also passed a direct check: sourcing is silent, lo-build
-succeeds, lo-check rejects with status 1, and lo-compile writes and executes a
-requested module path containing spaces from a different working directory.
+- `LO-3/ValidPrograms/test_30.lo`
+- `LO-3/ValidPrograms/test_32.lo`
+- `LO-3/ValidPrograms/test_35.lo`
+- `LO-3/ValidPrograms/test_42.lo`
 
-The 89 Rust tests exercise the existing frontend. The
-[production index](wasm-production-index.md) maps a failing rule to its handler.
+Each contains nested `while` loops in a non-void function. LLVM rejected the
+inner unconditional back edge with `br: insufficient values on the type stack`.
+P15 now emits a constant-true `br_if` for the loop back edge. This has the same
+runtime behavior as an unconditional branch and keeps LLVM's nested control-flow
+stack inference valid. All four programs now assemble and return their declared
+values.
 
-Changed Rust files pass rustfmt; the crate-wide formatting check still fails in
-the unchanged type checker. Strict Clippy still reports the two inherited
-checker issues: the `ErrorCode` enum's common `E` prefix and identical branches
-in `check_binop`. Those are separate from the conformance failures and were left
-unchanged with the rest of the checker. Allowing only those two existing Clippy
-lints on the command line produces a clean check of all targets.
+## Remaining parser diagnostics
+
+All four programs are rejected at compile time; only the diagnostic category
+differs from the suite contract.
+
+| LO-3 invalid case | Current code | Expected code |
+|---|---|---|
+| `test_0` | `E_RESERVED_KEYWORD_AS_IDENTIFIER` | `E_PARSE_PHASE_OTHER` |
+| `test_13` | `E_PARSE_PHASE_OTHER` | `E_RESERVED_KEYWORD_AS_IDENTIFIER` |
+| `test_5` | `E_PARSE_PHASE_OTHER` | `E_NULL_LITERAL_RECEIVER` |
+| `test_6` | `E_MALFORMED_CLASS_DECL` | `E_PARSE_PHASE_OTHER` |
+
+These require parser diagnostic-precedence changes and are separate from the
+WASM emitter.
+
+## Verification environment
+
+The run used Rust 1.87.0, LLVM 18.1.8, and the unchanged course `wasmrun` host
+with Wasmtime 33.0.2 on macOS. The runtime archive targeted
+`wasm32-unknown-unknown` with LTO disabled. All **91/91** compiler unit tests
+pass. The grading entry points also work from a directory outside the repository:
+`lo-check` preserves rejection status 1, `lo-compile` writes the requested path,
+and `lo-wasmrun` preserves the program status.
+
+The runner stores commands, exit statuses, stdout, stderr, generated assembly,
+and linked modules under `compiler/target/conformance`; its `report.json` records
+each result. LO-2 uses a separate procedural grammar and is outside this
+emitter's current scope.

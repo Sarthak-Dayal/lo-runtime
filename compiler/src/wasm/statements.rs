@@ -58,7 +58,11 @@ impl Function<'_, '_> {
         self.ins("i32.eqz");
         self.branch(Control::LoopExit, true);
         self.p12_block(body);
-        self.branch(Control::LoopHead, false);
+        // A constant-true conditional branch is an unconditional back edge at
+        // runtime, while keeping llvm-mc's stack inference valid for nested
+        // loops in result-returning functions.
+        self.ins("i32.const 1");
+        self.branch(Control::LoopHead, true);
         self.controls.pop();
         self.ins("end_loop");
         self.controls.pop();

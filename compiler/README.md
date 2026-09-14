@@ -7,8 +7,10 @@ around calls. See the [production index](../planning/wasm-production-index.md)
 for the functions implementing each grammar rule.
 
 This WIP is stacked on [type-checker PR #5](https://github.com/Sarthak-Dayal/lo-runtime/pull/5).
-The [test report](../planning/wasm-test-results.md) records **75/102 course cases
-passing**, identifies the frontend/runtime failures, and lists verification limits.
+The [test report](../planning/wasm-test-results.md) records **97/102 course cases
+passing** with the complete local test runtime (**98/102** after accounting for
+one stale test that still treats the newly reserved `lo_` prefix as valid). It
+identifies the four remaining parser diagnostic mismatches.
 
 From the repository root, with Rust/cargo, the `wasm32-unknown-unknown` target,
 `llvm-mc`, `wasm-ld`, and the course `wasmrun` on PATH:
