@@ -1,9 +1,3 @@
-//! Runtime values (design §2).
-//!
-//! A `Value` is self-describing: it carries its own kind, so operator dispatch
-//! reads the value rather than any static type annotation. Strings and objects
-//! are handles into the heap arena; `Obj(None)` is the one and only LO null.
-
 use crate::ast::Type;
 
 use super::heap::{ObjId, StrId};

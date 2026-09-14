@@ -1,11 +1,3 @@
-//! The five LO string operations (design §4, ABI §3.2).
-//!
-//! Each returns a *new* string (LO strings are immutable). The subtlety is the
-//! unit each works in: concat and compare are over UTF-8 **bytes**, but reverse
-//! is over **codepoints** — a byte-reversed multibyte sequence would be invalid
-//! UTF-8. Byte order and codepoint order coincide for comparison because UTF-8 is
-//! order-preserving, so a byte compare is correct.
-
 use std::cmp::Ordering;
 
 use super::abort::AbortKind;

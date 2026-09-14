@@ -1,8 +1,9 @@
 //! Every LO object and string lives in one flat `Vec<Cell>`, addressed by an
-//! integer handle (`ObjId`/`StrId`) rather than a pointer. Handles keep cyclic
-//! data from leaking the accounting and let a future mark-sweep work without a
-//! redesign. A byte budget over the arena reproduces the ABI's out-of-memory
-//! abort (exit 137) deterministically; the interpreter does not otherwise collect.
+//! integer handle (`ObjId`/`StrId`). 
+//! Handles keep cyclic data from leaking the accounting and let a future 
+//! mark-sweep work without a redesign. A byte budget over the arena reproduces
+//! the ABI's out-of-memory abort (exit 137) deterministically;.
+//! This interpreter does not otherwise collect.
 
 use std::rc::Rc;
 

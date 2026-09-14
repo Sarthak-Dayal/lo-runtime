@@ -1,9 +1,3 @@
-//! Injectable I/O and the read/write semantics (design §8, ABI §3.7).
-//!
-//! The three streams are trait objects so tests can drive input and capture
-//! output. Reads follow the ABI exactly, including the aborts (110/111/112) and
-//! the token/line distinction behind the `eof()` guard.
-
 use std::cell::RefCell;
 use std::io::{self, BufRead, Write};
 use std::rc::Rc;
