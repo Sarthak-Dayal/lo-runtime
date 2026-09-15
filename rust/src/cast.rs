@@ -20,8 +20,18 @@ pub unsafe extern "C" fn lo_cast_check(
     obj: *mut Object,
     target: *const ClassDescriptor,
 ) -> *mut Object {
-    let _ = (obj, target);
-    unimplemented!("lo_cast_check: team implements per P3");
+    if obj.is_null() || lo_instanceof(obj, target) {
+        return obj;
+    }
+    let source = (*obj).class_descriptor;
+    crate::abort::runtime_abort(
+        &format!(
+            "lo_cast_check: cannot cast {} to {}",
+            class_name(source),
+            class_name(target)
+        ),
+        101,
+    )
 }
 
 /// Return true iff `obj`'s class is `target` or a descendant. Null `obj` yields
@@ -32,6 +42,20 @@ pub unsafe extern "C" fn lo_cast_check(
 /// valid `ClassDescriptor`.
 #[no_mangle]
 pub unsafe extern "C" fn lo_instanceof(obj: *mut Object, target: *const ClassDescriptor) -> bool {
-    let _ = (obj, target);
-    unimplemented!("lo_instanceof: team implements per P3");
+    if obj.is_null() {
+        return false;
+    }
+    let mut class = (*obj).class_descriptor;
+    while !class.is_null() {
+        if class == target {
+            return true;
+        }
+        class = (*class).parent;
+    }
+    false
+}
+
+unsafe fn class_name(class: *const ClassDescriptor) -> &'static str {
+    let bytes = core::slice::from_raw_parts((*class).name, (*class).name_len as usize);
+    core::str::from_utf8(bytes).unwrap_or("<invalid-utf8>")
 }
