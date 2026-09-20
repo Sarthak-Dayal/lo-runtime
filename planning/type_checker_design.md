@@ -334,7 +334,7 @@ Assignments, returns, and actual arguments share compatibility rules: identical
 types, class subtyping, or `null` assigned to a class type. `String` remains
 separate from class inheritance.
 
-`ExprType::NullLiteral` keeps null distinct during checking. Reference/null and
+`ExprType::NullLiteral` keeps null distinct during checking. Reference/reference, reference/null, and
 null/null equality are legal. Ternaries combine class types through their least
 common ancestor; two null branches retain `ty: None`. Casts record `Upcast`,
 `Downcast`, or `Null` for downstream handling.
@@ -461,12 +461,18 @@ walks the other from most specific to most general and takes the first match.
 | `*` | String, int | String |
 | `&`, `\|` | bool, bool | bool |
 | `<`, `>`, `=` | int/int or String/String | bool |
-| `=` | class/null, null/class, null/null | bool |
+| `=` | class/class, class/null, null/class, null/null | bool |
 | `!` | bool | bool |
 | `~` | int or String | Same type; integer negation or string reversal |
 
-General class/class equality and bool equality are rejected by the current
-operator rules. Null equality is handled before requiring concrete operand types.
+Class equality compares object identity, not field contents. Class references
+remain class-typed even when their runtime value is null. Bool equality and
+ordering comparisons on class references remain rejected.
+
+The original comparison arm grouped `<`, `>`, and `=` under the primitive rules.
+The first null fix added reference/null cases but missed reference/reference
+comparisons. Handling reference equality in the `Eq`-only branch fixes that gap
+without permitting reference ordering or changing primitive operator rules.
 
 A class cast requires a subtype relation in one direction: widening records
 `Upcast`, narrowing records `Downcast`, and a null source records `Null`.
