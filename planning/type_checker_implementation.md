@@ -1804,7 +1804,8 @@ fn check_binop(op: Binop, lhs: &ExprType, rhs: &ExprType, line: u32) -> Result<T
     if op == Eq
         && matches!(
             (lhs, rhs),
-            (Concrete(Type::Class(_)), NullLiteral)
+            (Concrete(Type::Class(_)), Concrete(Type::Class(_)))
+                | (Concrete(Type::Class(_)), NullLiteral)
                 | (NullLiteral, Concrete(Type::Class(_)))
                 | (NullLiteral, NullLiteral)
         )
