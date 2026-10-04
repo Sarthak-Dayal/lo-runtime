@@ -7,7 +7,7 @@ impl ProgramIr {
             if !names.insert(&symbol.name) {
                 return Err(format!("duplicate symbol {}", symbol.name));
             }
-            if let Some(id) = symbol.signature {
+            if let SymbolKind::Function(id) = symbol.kind {
                 self.signature(id)?;
             }
         }
@@ -35,26 +35,29 @@ impl ProgramIr {
             .ok_or_else(|| format!("unknown signature {}", id.0))
     }
 
+    fn function_signature(&self, id: SymbolId) -> Result<&Signature, String> {
+        match self.symbol(id)?.kind {
+            SymbolKind::Function(signature) => self.signature(signature),
+            _ => Err("expected a function symbol".into()),
+        }
+    }
+
     fn operand_type(&self, f: &FunctionIr, operand: Operand) -> Result<IrType, String> {
         match operand {
             Operand::Value(id) => value_type(f, id),
             Operand::Int(_) => Ok(IrType::Int32),
             Operand::Bool(_) => Ok(IrType::Bool),
             Operand::Null => Ok(IrType::Ref),
-            Operand::Symbol(id) => Ok(if self.symbol(id)?.signature.is_some() {
-                IrType::CodePtr
-            } else {
-                IrType::Ptr
+            Operand::Symbol(id) => Ok(match self.symbol(id)?.kind {
+                SymbolKind::Function(_) => IrType::CodePtr,
+                SymbolKind::Data => IrType::Ptr,
+                SymbolKind::StaticRef => IrType::Ref,
             }),
         }
     }
 
     fn verify_function(&self, f: &FunctionIr) -> Result<(), String> {
-        let sig = self.signature(
-            self.symbol(f.symbol)?
-                .signature
-                .ok_or("function symbol has no signature")?,
-        )?;
+        let sig = self.function_signature(f.symbol)?;
         if f.entry.0 >= f.blocks.len() {
             return Err("invalid entry block".into());
         }
@@ -150,7 +153,12 @@ impl ProgramIr {
                 ..
             } => {
                 address(ty(*base)?)?;
-                if *expected == IrType::Ref {
+                // Static objects cannot move; their direct stores need no barrier (L07, p.18).
+                let static_ref = match value {
+                    Operand::Symbol(id) => matches!(self.symbol(*id)?.kind, SymbolKind::StaticRef),
+                    _ => false,
+                };
+                if *expected == IrType::Ref && !static_ref {
                     return Err("reference stores require StoreRef".into());
                 }
                 expect(ty(*value)?, *expected)
@@ -170,9 +178,7 @@ impl ProgramIr {
                 let sig = self.signature(*signature)?;
                 match target {
                     CallTarget::Direct(id) => {
-                        let target_sig =
-                            self.symbol(*id)?.signature.ok_or("calling a data symbol")?;
-                        if self.signature(target_sig)? != sig {
+                        if self.function_signature(*id)? != sig {
                             return Err("call signature mismatch".into());
                         }
                     }

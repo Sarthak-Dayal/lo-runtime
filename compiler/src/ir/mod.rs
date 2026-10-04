@@ -30,8 +30,15 @@ pub struct Signature {
 
 pub struct Symbol {
     pub name: String,
-    // None denotes data; Some denotes a generated or external function.
-    pub signature: Option<SignatureId>,
+    pub kind: SymbolKind,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SymbolKind {
+    Function(SignatureId),
+    Data,
+    // An object outside the collectable heap, such as LO_EMPTY_STRING.
+    StaticRef,
 }
 
 pub struct ProgramIr {

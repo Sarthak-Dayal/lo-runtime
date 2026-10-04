@@ -5,7 +5,7 @@ impl ProgramIr {
     pub fn dump(&self) -> String {
         let mut out = String::new();
         for (id, symbol) in self.symbols.iter().enumerate() {
-            writeln!(out, "@{id} = {:?}", symbol.name).unwrap();
+            writeln!(out, "@{id} = {:?} {:?}", symbol.name, symbol.kind).unwrap();
         }
         for (id, sig) in self.signatures.iter().enumerate() {
             writeln!(out, "sig{id} {:?} -> {:?}", sig.params, sig.result).unwrap();

@@ -13,7 +13,7 @@ fn example() -> ProgramIr {
     ProgramIr {
         symbols: vec![Symbol {
             name: "example".into(),
-            signature: Some(SignatureId(0)),
+            kind: SymbolKind::Function(SignatureId(0)),
         }],
         signatures: vec![Signature {
             params: vec![],
@@ -54,7 +54,7 @@ fn example() -> ProgramIr {
 fn mutable_merge_and_readable_dump() {
     let p = example();
     p.verify().unwrap();
-    assert_eq!(p.dump(), "@0 = \"example\"\nsig0 [] -> Some(Int32)\n\nfunction @0() entry b0 {\n  v0: Int32\nb0:\n  branch true, b1, b2\nb1:\n  v0 = copy 1 ; line 1\n  jump b3\nb2:\n  v0 = copy 2 ; line 1\n  jump b3\nb3:\n  return v0\n}\n");
+    assert_eq!(p.dump(), "@0 = \"example\" Function(SignatureId(0))\nsig0 [] -> Some(Int32)\n\nfunction @0() entry b0 {\n  v0: Int32\nb0:\n  branch true, b1, b2\nb1:\n  v0 = copy 1 ; line 1\n  jump b3\nb2:\n  v0 = copy 2 ; line 1\n  jump b3\nb3:\n  return v0\n}\n");
 }
 
 #[test]
@@ -111,7 +111,7 @@ fn indirect_calls_check_signature_and_initialization() {
     let mut p = example();
     p.symbols.push(Symbol {
         name: "callee".into(),
-        signature: Some(SignatureId(1)),
+        kind: SymbolKind::Function(SignatureId(1)),
     });
     p.signatures.push(Signature {
         params: vec![IrType::Ref],
@@ -164,4 +164,48 @@ fn reference_store_requires_barrier_operation() {
         value: Operand::Null,
     };
     p.verify().unwrap();
+}
+
+#[test]
+fn static_objects_are_references_not_raw_data() {
+    let mut p = example();
+    p.symbols.push(Symbol {
+        name: "LO_EMPTY_STRING".into(),
+        kind: SymbolKind::StaticRef,
+    });
+    p.functions[0].value_types.push(IrType::Ref);
+    p.functions[0].params.push(ValueId(1));
+    p.signatures[0].params.push(IrType::Ref);
+    p.functions[0].blocks[0].instructions.push(Instruction {
+        kind: InstructionKind::Store {
+            base: Operand::Value(ValueId(1)),
+            offset: 0,
+            value: Operand::Symbol(SymbolId(1)),
+            ty: IrType::Ref,
+        },
+        line: 1,
+    });
+    p.symbols.push(Symbol {
+        name: "consume_string".into(),
+        kind: SymbolKind::Function(SignatureId(1)),
+    });
+    p.signatures.push(Signature {
+        params: vec![IrType::Ref],
+        result: None,
+    });
+    p.functions[0].blocks[0].instructions.push(Instruction {
+        kind: InstructionKind::Call {
+            dst: None,
+            target: CallTarget::Direct(SymbolId(2)),
+            signature: SignatureId(1),
+            args: vec![Operand::Symbol(SymbolId(1))],
+            effects: CallEffects::default(),
+        },
+        line: 1,
+    });
+    p.verify().unwrap();
+    p.symbols[1].kind = SymbolKind::Data;
+    assert!(p.verify().is_err());
+    p.functions[0].blocks[0].instructions.remove(0);
+    assert!(p.verify().unwrap_err().contains("expected Ref, got Ptr"));
 }
