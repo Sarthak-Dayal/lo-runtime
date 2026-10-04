@@ -77,25 +77,9 @@ impl ProgramIr {
                     return Err(format!("b{index}: invalid target b{}", successor.0));
                 }
             }
-            for (position, inst) in block.instructions.iter().enumerate() {
+            for inst in &block.instructions {
                 self.verify_instruction(f, &inst.kind)
                     .map_err(|e| format!("b{index}, line {}: {e}", inst.line))?;
-                if matches!(
-                    inst.kind,
-                    InstructionKind::Call {
-                        effects: CallEffects {
-                            no_return: true,
-                            ..
-                        },
-                        ..
-                    }
-                ) && (position + 1 != block.instructions.len()
-                    || !matches!(block.terminator, Terminator::Unreachable))
-                {
-                    return Err(format!(
-                        "b{index}: nonreturning call must end in unreachable"
-                    ));
-                }
             }
             match &block.terminator {
                 Terminator::Branch { condition, .. } => {
@@ -105,6 +89,18 @@ impl ProgramIr {
                     let actual = value.map(|v| self.operand_type(f, v)).transpose()?;
                     if actual != sig.result {
                         return Err(format!("b{index}: return type mismatch"));
+                    }
+                }
+                Terminator::Abort { target, args } => {
+                    let sig = self.function_signature(*target)?;
+                    if sig.result.is_some() {
+                        return Err("abort helper must not return a value".into());
+                    }
+                    if args.len() != sig.params.len() {
+                        return Err("abort argument count mismatch".into());
+                    }
+                    for (&arg, &expected) in args.iter().zip(&sig.params) {
+                        expect(self.operand_type(f, arg)?, expected)?;
                     }
                 }
                 _ => {}
@@ -159,13 +155,9 @@ impl ProgramIr {
                     _ => false,
                 };
                 if *expected == IrType::Ref && !static_ref {
-                    return Err("reference stores require StoreRef".into());
+                    return Err("reference stores require a write-barrier call".into());
                 }
                 expect(ty(*value)?, *expected)
-            }
-            InstructionKind::StoreRef { object, value, .. } => {
-                expect(ty(*object)?, IrType::Ref)?;
-                expect(ty(*value)?, IrType::Ref)
             }
             InstructionKind::NullCheck { receiver, .. } => expect(ty(*receiver)?, IrType::Ref),
             InstructionKind::Call {
@@ -173,7 +165,7 @@ impl ProgramIr {
                 target,
                 signature,
                 args,
-                effects,
+                ..
             } => {
                 let sig = self.signature(*signature)?;
                 match target {
@@ -193,9 +185,6 @@ impl ProgramIr {
                 let result = dst.map(|id| value_type(f, id)).transpose()?;
                 if result != sig.result {
                     return Err("call result type mismatch".into());
-                }
-                if effects.no_return && sig.result.is_some() {
-                    return Err("nonreturning call has a result".into());
                 }
                 Ok(())
             }
@@ -297,9 +286,14 @@ fn verify_assignment(f: &FunctionIr) -> Result<(), String> {
                 assigned[dst.0] = true;
             }
         }
-        match block.terminator {
-            Terminator::Branch { condition, .. } => check(condition, &assigned)?,
-            Terminator::Return(Some(value)) => check(value, &assigned)?,
+        match &block.terminator {
+            Terminator::Branch { condition, .. } => check(*condition, &assigned)?,
+            Terminator::Return(Some(value)) => check(*value, &assigned)?,
+            Terminator::Abort { args, .. } => {
+                for &arg in args {
+                    check(arg, &assigned)?;
+                }
+            }
             _ => {}
         }
     }

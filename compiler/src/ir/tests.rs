@@ -54,7 +54,7 @@ fn example() -> ProgramIr {
 fn mutable_merge_and_readable_dump() {
     let p = example();
     p.verify().unwrap();
-    assert_eq!(p.dump(), "@0 = \"example\" Function(SignatureId(0))\nsig0 [] -> Some(Int32)\n\nfunction @0() entry b0 {\n  v0: Int32\nb0:\n  branch true, b1, b2\nb1:\n  v0 = copy 1 ; line 1\n  jump b3\nb2:\n  v0 = copy 2 ; line 1\n  jump b3\nb3:\n  return v0\n}\n");
+    assert_eq!(p.dump(), "@0 = \"example\" Function(SignatureId(0))\nsig0 [] -> Some(Int32)\n\nfunc @0() entry .L0 {\n  t0: Int32\n.L0:\n  cbr true, .L1, .L2\n.L1:\n  t0 = 1 ; line 1\n  br .L3\n.L2:\n  t0 = 2 ; line 1\n  br .L3\n.L3:\n  ret t0\n}\n");
 }
 
 #[test]
@@ -138,7 +138,7 @@ fn indirect_calls_check_signature_and_initialization() {
         },
     ];
     p.verify().unwrap();
-    assert!(p.dump().contains("call_indirect v1 sig1(null)"));
+    assert!(p.dump().contains("call_indirect t1, null ; sig1"));
     if let InstructionKind::Call { args, .. } = &mut p.functions[0].blocks[0].instructions[1].kind {
         args.clear();
     }
@@ -146,7 +146,7 @@ fn indirect_calls_check_signature_and_initialization() {
 }
 
 #[test]
-fn reference_store_requires_barrier_operation() {
+fn reference_store_requires_barrier_call() {
     let mut p = example();
     p.functions[0].blocks[0].instructions.push(Instruction {
         kind: InstructionKind::Store {
@@ -157,11 +157,21 @@ fn reference_store_requires_barrier_operation() {
         },
         line: 1,
     });
-    assert!(p.verify().unwrap_err().contains("StoreRef"));
-    p.functions[0].blocks[0].instructions[0].kind = InstructionKind::StoreRef {
-        object: Operand::Null,
-        offset: 0,
-        value: Operand::Null,
+    assert!(p.verify().unwrap_err().contains("write-barrier call"));
+    p.symbols.push(Symbol {
+        name: "lo_gc_write_barrier".into(),
+        kind: SymbolKind::Function(SignatureId(1)),
+    });
+    p.signatures.push(Signature {
+        params: vec![IrType::Ref, IrType::Int32, IrType::Ref],
+        result: None,
+    });
+    p.functions[0].blocks[0].instructions[0].kind = InstructionKind::Call {
+        dst: None,
+        target: CallTarget::Direct(SymbolId(1)),
+        signature: SignatureId(1),
+        args: vec![Operand::Null, Operand::Int(0), Operand::Null],
+        effects: CallEffects::default(),
     };
     p.verify().unwrap();
 }
@@ -208,4 +218,41 @@ fn static_objects_are_references_not_raw_data() {
     assert!(p.verify().is_err());
     p.functions[0].blocks[0].instructions.remove(0);
     assert!(p.verify().unwrap_err().contains("expected Ref, got Ptr"));
+}
+
+#[test]
+fn abort_is_a_checked_terminal_call() {
+    let mut p = example();
+    p.symbols.push(Symbol {
+        name: "lo_abort_null_receiver".into(),
+        kind: SymbolKind::Function(SignatureId(1)),
+    });
+    p.symbols.push(Symbol {
+        name: "method_name".into(),
+        kind: SymbolKind::Data,
+    });
+    p.signatures.push(Signature {
+        params: vec![IrType::Ptr, IrType::Int32],
+        result: None,
+    });
+    p.functions[0].blocks[0].terminator = Terminator::Abort {
+        target: SymbolId(1),
+        args: vec![Operand::Symbol(SymbolId(2)), Operand::Int(4)],
+    };
+    p.verify().unwrap();
+    assert!(p.functions[0].blocks[0].terminator.successors().is_empty());
+    assert!(p.dump().contains("abort @1, @2, 4"));
+    if let Terminator::Abort { args, .. } = &mut p.functions[0].blocks[0].terminator {
+        args[1] = Operand::Value(ValueId(0));
+    }
+    assert!(p.verify().unwrap_err().contains("used before assignment"));
+    p.functions[0].blocks[0].instructions.push(copy(4));
+    p.verify().unwrap();
+    p.signatures[1].result = Some(IrType::Int32);
+    assert!(p.verify().unwrap_err().contains("must not return"));
+    p.signatures[1].result = None;
+    if let Terminator::Abort { args, .. } = &mut p.functions[0].blocks[0].terminator {
+        args.pop();
+    }
+    assert!(p.verify().unwrap_err().contains("argument count"));
 }

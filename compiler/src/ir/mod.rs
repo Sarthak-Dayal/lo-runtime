@@ -103,12 +103,6 @@ pub enum InstructionKind {
         value: Operand,
         ty: IrType,
     },
-    // Performs the managed field store through the runtime write barrier.
-    StoreRef {
-        object: Operand,
-        offset: i32,
-        value: Operand,
-    },
     NullCheck {
         receiver: Operand,
         method_name: String,
@@ -150,15 +144,11 @@ pub enum CallTarget {
 #[derive(Clone, Copy, Debug)]
 pub struct CallEffects {
     pub may_gc: bool,
-    pub no_return: bool,
 }
 
 impl Default for CallEffects {
     fn default() -> Self {
-        Self {
-            may_gc: true,
-            no_return: false,
-        }
+        Self { may_gc: true }
     }
 }
 
@@ -170,7 +160,11 @@ pub enum Terminator {
         else_block: BlockId,
     },
     Return(Option<Operand>),
-    Unreachable,
+    // Calls a nonreturning runtime helper.
+    Abort {
+        target: SymbolId,
+        args: Vec<Operand>,
+    },
 }
 
 impl Terminator {
@@ -182,7 +176,7 @@ impl Terminator {
                 else_block,
                 ..
             } => vec![*then_block, *else_block],
-            Self::Return(_) | Self::Unreachable => vec![],
+            Self::Return(_) | Self::Abort { .. } => vec![],
         }
     }
 }
@@ -205,7 +199,6 @@ impl InstructionKind {
             Self::Binary { lhs, rhs, .. } => vec![*lhs, *rhs],
             Self::Load { base, .. } => vec![*base],
             Self::Store { base, value, .. } => vec![*base, *value],
-            Self::StoreRef { object, value, .. } => vec![*object, *value],
             Self::NullCheck { receiver, .. } => vec![*receiver],
             Self::Call { target, args, .. } => {
                 let mut operands = args.clone();
