@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 
 impl CheckedIr {
     pub fn program(&self) -> &ProgramIr {
@@ -17,6 +18,17 @@ impl ProgramIr {
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
+        self.verify_signatures()?;
+        self.verify_symbols()?;
+
+        // Function and data definitions share the same symbol namespace.
+        let mut definitions = HashSet::new();
+        self.verify_function_definitions(&mut definitions)?;
+        self.verify_startup(&definitions)?;
+        self.verify_data_definitions(&mut definitions)
+    }
+
+    fn verify_signatures(&self) -> Result<(), String> {
         for (id, signature) in self.signatures.iter().enumerate() {
             if self.signatures[..id].contains(signature) {
                 return Err("duplicate signature: use intern_signature".into());
@@ -30,7 +42,11 @@ impl ProgramIr {
                 return Err("LO/runtime signatures cannot take or return code pointers".into());
             }
         }
-        let mut names = std::collections::HashSet::new();
+        Ok(())
+    }
+
+    fn verify_symbols(&self) -> Result<(), String> {
+        let mut names = HashSet::new();
         for symbol in &self.symbols {
             if !names.insert(&symbol.name) {
                 return Err(format!("duplicate symbol {}", symbol.name));
@@ -39,7 +55,10 @@ impl ProgramIr {
                 self.signature(id)?;
             }
         }
-        let mut definitions = std::collections::HashSet::new();
+        Ok(())
+    }
+
+    fn verify_function_definitions(&self, definitions: &mut HashSet<usize>) -> Result<(), String> {
         for function in &self.functions {
             let symbol = self.symbol(function.symbol)?;
             if !definitions.insert(function.symbol.0) {
@@ -48,12 +67,20 @@ impl ProgramIr {
             self.verify_function(function)
                 .map_err(|e| format!("{}: {e}", symbol.name))?;
         }
+        Ok(())
+    }
+
+    fn verify_startup(&self, definitions: &HashSet<usize>) -> Result<(), String> {
         if let Some(startup) = self.startup {
             self.function_signature(startup)?;
             if !definitions.contains(&startup.0) {
                 return Err("startup function has no definition".into());
             }
         }
+        Ok(())
+    }
+
+    fn verify_data_definitions(&self, definitions: &mut HashSet<usize>) -> Result<(), String> {
         for data in &self.data {
             if matches!(self.symbol(data.symbol)?.kind, SymbolKind::Function(_)) {
                 return Err("data definition requires a data/static-reference symbol".into());
@@ -80,7 +107,7 @@ impl ProgramIr {
         Ok(())
     }
 
-    fn expect(&self, actual: IrType, expected: IrType) -> Result<(), String> {
+    fn expect_type(&self, actual: IrType, expected: IrType) -> Result<(), String> {
         self.validate_type(actual)?;
         self.validate_type(expected)?;
         if actual == expected {
@@ -109,9 +136,9 @@ impl ProgramIr {
         }
     }
 
-    fn operand_type(&self, f: &FunctionIr, operand: Operand) -> Result<IrType, String> {
+    fn operand_type(&self, function: &FunctionIr, operand: Operand) -> Result<IrType, String> {
         match operand {
-            Operand::Value(id) => value_type(f, id),
+            Operand::Value(id) => value_type(function, id),
             Operand::Int(_) => Ok(IrType::Int32),
             Operand::Bool(_) => Ok(IrType::Bool),
             Operand::Null => Ok(IrType::Ref),
@@ -123,101 +150,173 @@ impl ProgramIr {
         }
     }
 
-    fn verify_function(&self, f: &FunctionIr) -> Result<(), String> {
-        if f.register_names.len() != f.register_types.len() {
+    fn verify_function(&self, function: &FunctionIr) -> Result<(), String> {
+        // Validate all IDs and types, including in unreachable blocks, before
+        // definite-assignment analysis indexes directly into the IR tables.
+        self.verify_structure_and_types(function)?;
+        verify_definite_assignment(function)
+    }
+
+    fn verify_structure_and_types(&self, function: &FunctionIr) -> Result<(), String> {
+        if function.register_names.len() != function.register_types.len() {
             return Err("register_names must match register_types length".into());
         }
-        for &ty in &f.register_types {
+        for &ty in &function.register_types {
             self.validate_type(ty)?;
         }
-        let sig = self.function_signature(f.symbol)?;
-        if f.entry.0 >= f.blocks.len() {
+        let signature = self.function_signature(function.symbol)?;
+        if function.entry.0 >= function.blocks.len() {
             return Err("invalid entry block".into());
         }
-        if f.params.len() != sig.params.len() {
-            return Err("parameter count mismatch".into());
+        self.verify_parameters(function, signature)?;
+        for (index, block) in function.blocks.iter().enumerate() {
+            self.verify_block(function, block, signature)
+                .map_err(|error| format!("b{index}: {error}"))?;
         }
-        let mut params = std::collections::HashSet::new();
-        for (&id, &ty) in f.params.iter().zip(&sig.params) {
+        Ok(())
+    }
+
+    fn verify_parameters(
+        &self,
+        function: &FunctionIr,
+        signature: &Signature,
+    ) -> Result<(), String> {
+        if function.params.len() != signature.params.len() {
+            return Err(format!(
+                "parameter count mismatch: expected {}, got {}",
+                signature.params.len(),
+                function.params.len()
+            ));
+        }
+        let mut params = HashSet::new();
+        for (&id, &ty) in function.params.iter().zip(&signature.params) {
             if !params.insert(id.0) {
                 return Err("duplicate parameter value".into());
             }
-            self.expect(value_type(f, id)?, ty)?;
+            self.expect_type(value_type(function, id)?, ty)?;
         }
-        for (index, block) in f.blocks.iter().enumerate() {
-            for successor in block.terminator.successors() {
-                if successor.0 >= f.blocks.len() {
-                    return Err(format!("b{index}: invalid target b{}", successor.0));
-                }
-            }
-            for inst in &block.instructions {
-                self.verify_instruction(f, &inst.kind)
-                    .map_err(|e| format!("b{index}, line {}: {e}", inst.line))?;
-            }
-            match &block.terminator {
-                Terminator::Branch { condition, .. } => {
-                    self.expect(self.operand_type(f, *condition)?, IrType::Bool)?
-                }
-                Terminator::Return(value) => {
-                    let actual = value.map(|v| self.operand_type(f, v)).transpose()?;
-                    if actual != sig.result {
-                        return Err(format!("b{index}: return type mismatch"));
-                    }
-                }
-                Terminator::Abort { target, args } => {
-                    let sig = self.function_signature(*target)?;
-                    if sig.result.is_some() {
-                        return Err("abort helper must not return a value".into());
-                    }
-                    if args.len() != sig.params.len() {
-                        return Err("abort argument count mismatch".into());
-                    }
-                    for (&arg, &expected) in args.iter().zip(&sig.params) {
-                        self.expect(self.operand_type(f, arg)?, expected)?;
-                    }
-                }
-                _ => {}
-            }
-        }
-        verify_assignment(f)
+        Ok(())
     }
 
-    fn verify_instruction(&self, f: &FunctionIr, inst: &InstructionKind) -> Result<(), String> {
-        let ty = |operand| self.operand_type(f, operand);
-        match inst {
-            InstructionKind::Copy { dst, src } => self.expect(ty(*src)?, value_type(f, *dst)?),
+    fn verify_block(
+        &self,
+        function: &FunctionIr,
+        block: &BasicBlock,
+        signature: &Signature,
+    ) -> Result<(), String> {
+        for successor in block.terminator.successors() {
+            if successor.0 >= function.blocks.len() {
+                return Err(format!("invalid target b{}", successor.0));
+            }
+        }
+        for instruction in &block.instructions {
+            self.verify_instruction(function, &instruction.kind)
+                .map_err(|error| format!("line {}: {error}", instruction.line))?;
+        }
+        self.verify_terminator(function, &block.terminator, signature)
+    }
+
+    fn verify_terminator(
+        &self,
+        function: &FunctionIr,
+        terminator: &Terminator,
+        signature: &Signature,
+    ) -> Result<(), String> {
+        match terminator {
+            Terminator::Jump(_) => Ok(()),
+            Terminator::Branch { condition, .. } => {
+                self.expect_type(self.operand_type(function, *condition)?, IrType::Bool)
+            }
+            Terminator::Return(value) => {
+                let actual = value
+                    .map(|operand| self.operand_type(function, operand))
+                    .transpose()?;
+                if actual != signature.result {
+                    return Err(format!(
+                        "return type mismatch: expected {:?}, got {actual:?}",
+                        signature.result
+                    ));
+                }
+                Ok(())
+            }
+            Terminator::Abort { target, args } => {
+                let helper_signature = self.function_signature(*target)?;
+                if helper_signature.result.is_some() {
+                    return Err("abort helper must not return a value".into());
+                }
+                self.verify_arguments(function, args, helper_signature, "abort")
+            }
+        }
+    }
+
+    fn verify_arguments(
+        &self,
+        function: &FunctionIr,
+        args: &[Operand],
+        signature: &Signature,
+        operation: &str,
+    ) -> Result<(), String> {
+        if args.len() != signature.params.len() {
+            return Err(format!(
+                "{operation} argument count mismatch: expected {}, got {}",
+                signature.params.len(),
+                args.len()
+            ));
+        }
+        for (index, (&arg, &expected)) in args.iter().zip(&signature.params).enumerate() {
+            let actual = self.operand_type(function, arg)?;
+            self.expect_type(actual, expected)
+                .map_err(|error| format!("{operation} argument {}: {error}", index + 1))?;
+        }
+        Ok(())
+    }
+
+    fn verify_instruction(
+        &self,
+        function: &FunctionIr,
+        instruction: &InstructionKind,
+    ) -> Result<(), String> {
+        let operand_type = |operand| self.operand_type(function, operand);
+        match instruction {
+            InstructionKind::Copy { dst, src } => {
+                self.expect_type(operand_type(*src)?, value_type(function, *dst)?)
+            }
             InstructionKind::Binary { dst, op, lhs, rhs } => {
                 if matches!(op, BinaryOp::Div | BinaryOp::Mod)
                     && matches!(rhs, Operand::Int(0 | -1))
                 {
                     return Err("Div/Mod special-case divisor must be lowered to branches".into());
                 }
-                let input = ty(*lhs)?;
-                self.expect(ty(*rhs)?, input)?;
+                let input = operand_type(*lhs)?;
+                self.expect_type(operand_type(*rhs)?, input)?;
                 let result = match op {
                     BinaryOp::Eq => IrType::Bool,
                     BinaryOp::Lt | BinaryOp::Gt => {
-                        self.expect(input, IrType::Int32)?;
+                        self.expect_type(input, IrType::Int32)?;
                         IrType::Bool
                     }
-                    _ => {
-                        self.expect(input, IrType::Int32)?;
+                    BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod => {
+                        self.expect_type(input, IrType::Int32)?;
                         IrType::Int32
                     }
                 };
-                self.expect(value_type(f, *dst)?, result)
+                self.expect_type(value_type(function, *dst)?, result)
             }
             InstructionKind::Unary { dst, op, src } => {
                 let expected = match op {
                     UnaryOp::Neg => IrType::Int32,
                     UnaryOp::Not => IrType::Bool,
                 };
-                self.expect(ty(*src)?, expected)?;
-                self.expect(value_type(f, *dst)?, expected)
+                self.expect_type(operand_type(*src)?, expected)?;
+                self.expect_type(value_type(function, *dst)?, expected)
             }
             InstructionKind::Load { dst, base, .. } => {
-                address(ty(*base)?)?;
-                value_type(f, *dst)?;
+                require_address_type(operand_type(*base)?)?;
+                value_type(function, *dst)?;
                 Ok(())
             }
             InstructionKind::Store {
@@ -226,7 +325,7 @@ impl ProgramIr {
                 ty: expected,
                 ..
             } => {
-                address(ty(*base)?)?;
+                require_address_type(operand_type(*base)?)?;
                 // Static objects cannot move; their direct stores need no barrier (L07, p.18).
                 let static_ref = match value {
                     Operand::Symbol(id) => matches!(self.symbol(*id)?.kind, SymbolKind::StaticRef),
@@ -235,40 +334,38 @@ impl ProgramIr {
                 if *expected == IrType::Ref && !static_ref {
                     return Err("reference stores require a write-barrier call".into());
                 }
-                self.expect(ty(*value)?, *expected)
+                self.expect_type(operand_type(*value)?, *expected)
             }
             InstructionKind::RootStore { slot, value } => {
-                root_slot(f, *slot)?;
-                self.expect(ty(*value)?, IrType::Ref)
+                verify_root_slot(function, *slot)?;
+                self.expect_type(operand_type(*value)?, IrType::Ref)
             }
             InstructionKind::RootLoad { dst, slot } => {
-                root_slot(f, *slot)?;
-                self.expect(value_type(f, *dst)?, IrType::Ref)
+                verify_root_slot(function, *slot)?;
+                self.expect_type(value_type(function, *dst)?, IrType::Ref)
             }
             InstructionKind::RootAddr { dst, slot } => {
-                root_slot(f, *slot)?;
-                if self.startup != Some(f.symbol) {
+                verify_root_slot(function, *slot)?;
+                if self.startup != Some(function.symbol) {
                     return Err("RootAddr is only permitted in the startup function".into());
                 }
-                self.expect(value_type(f, *dst)?, IrType::Ptr)
+                self.expect_type(value_type(function, *dst)?, IrType::Ptr)
             }
             InstructionKind::Call { dst, target, args } => {
-                let sig = match target {
+                let signature = match target {
                     CallTarget::Direct(id) => self.function_signature(*id)?,
-                    CallTarget::Indirect(pointer) => match ty(*pointer)? {
+                    CallTarget::Indirect(pointer) => match operand_type(*pointer)? {
                         IrType::CodePtr(id) => self.signature(id)?,
                         _ => return Err("indirect call requires a CodePtr".into()),
                     },
                 };
-                if args.len() != sig.params.len() {
-                    return Err("call argument count mismatch".into());
-                }
-                for (&arg, &expected) in args.iter().zip(&sig.params) {
-                    self.expect(ty(arg)?, expected)?;
-                }
-                let result = dst.map(|id| value_type(f, id)).transpose()?;
-                if result != sig.result {
-                    return Err("call result type mismatch".into());
+                self.verify_arguments(function, args, signature, "call")?;
+                let result = dst.map(|id| value_type(function, id)).transpose()?;
+                if result != signature.result {
+                    return Err(format!(
+                        "call result type mismatch: expected {:?}, got {result:?}",
+                        signature.result
+                    ));
                 }
                 Ok(())
             }
@@ -276,103 +373,152 @@ impl ProgramIr {
     }
 }
 
-fn root_slot(f: &FunctionIr, slot: u32) -> Result<(), String> {
-    if slot < f.root_slots {
+fn verify_root_slot(function: &FunctionIr, slot: u32) -> Result<(), String> {
+    if slot < function.root_slots {
         Ok(())
     } else {
         Err(format!("invalid root slot {slot}"))
     }
 }
 
-fn value_type(f: &FunctionIr, id: VirtualRegId) -> Result<IrType, String> {
-    f.register_types
+fn value_type(function: &FunctionIr, id: VirtualRegId) -> Result<IrType, String> {
+    function
+        .register_types
         .get(id.0)
         .copied()
         .ok_or_else(|| format!("unknown value v{}", id.0))
 }
-fn address(ty: IrType) -> Result<(), String> {
+
+fn require_address_type(ty: IrType) -> Result<(), String> {
     if matches!(ty, IrType::Ref | IrType::Ptr) {
         Ok(())
     } else {
-        Err("memory base is not an address".into())
+        Err(format!(
+            "memory base is not an address: expected Ref or Ptr, got {ty:?}"
+        ))
     }
 }
 
-// Must-analysis: a mutable value must be initialized on every incoming path.
-fn verify_assignment(f: &FunctionIr) -> Result<(), String> {
-    let n = f.blocks.len();
-    let mut reachable = vec![false; n];
-    let mut pending = vec![f.entry];
-    let mut predecessors = vec![vec![]; n];
+// A mutable register must be assigned on every incoming path before it is read.
+// Precondition: structure and type verification has validated the entry block,
+// successor blocks, parameters, and every operand and destination register ID.
+fn verify_definite_assignment(function: &FunctionIr) -> Result<(), String> {
+    let control_flow = discover_reachable_control_flow(function);
+    let assigned_at_entry = compute_definite_assignments(function, &control_flow);
+
+    // Check reads only after convergence: the initial, optimistic assignment
+    // sets can still contain registers that an incoming path never assigns.
+    verify_reads(function, &control_flow, &assigned_at_entry)
+}
+
+struct ReachableControlFlow {
+    reachable: Vec<bool>,
+    predecessors: Vec<Vec<usize>>,
+}
+
+fn discover_reachable_control_flow(function: &FunctionIr) -> ReachableControlFlow {
+    let mut reachable = vec![false; function.blocks.len()];
+    let mut pending = vec![function.entry];
+    let mut predecessors = vec![vec![]; function.blocks.len()];
     while let Some(block) = pending.pop() {
         if reachable[block.0] {
             continue;
         }
         reachable[block.0] = true;
-        for next in f.blocks[block.0].terminator.successors() {
+        for next in function.blocks[block.0].terminator.successors() {
+            // Only reachable predecessors constrain definite assignment.
             predecessors[next.0].push(block.0);
             pending.push(next);
         }
     }
-    let mut initial = vec![false; f.register_types.len()];
-    for id in &f.params {
-        initial[id.0] = true;
+    ReachableControlFlow {
+        reachable,
+        predecessors,
     }
-    let mut inputs = vec![vec![true; initial.len()]; n];
-    let mut outputs = inputs.clone();
+}
+
+fn compute_definite_assignments(
+    function: &FunctionIr,
+    control_flow: &ReachableControlFlow,
+) -> Vec<Vec<bool>> {
+    let register_count = function.register_types.len();
+    let mut parameter_assignments = vec![false; register_count];
+    for id in &function.params {
+        parameter_assignments[id.0] = true;
+    }
+
+    // Start optimistically with every register assigned. Intersecting incoming
+    // paths removes assignments that are not guaranteed. This initialization
+    // lets loops retain assignments established before entering the loop.
+    let mut assigned_at_entry = vec![vec![true; register_count]; function.blocks.len()];
+    let mut assigned_at_exit = assigned_at_entry.clone();
     loop {
         let mut changed = false;
-        for (b, block) in f.blocks.iter().enumerate() {
-            if !reachable[b] {
+        for (block_index, block) in function.blocks.iter().enumerate() {
+            if !control_flow.reachable[block_index] {
                 continue;
             }
-            let mut input = if b == f.entry.0 {
-                initial.clone()
+            let mut entry_assignments = if block_index == function.entry.0 {
+                // The first invocation reaches entry with only parameters
+                // assigned; a back edge cannot initialize that first visit.
+                parameter_assignments.clone()
             } else {
-                vec![true; initial.len()]
+                vec![true; register_count]
             };
-            for &pred in &predecessors[b] {
-                for (v, assigned) in input.iter_mut().enumerate() {
-                    *assigned &= outputs[pred][v];
+            for &predecessor in &control_flow.predecessors[block_index] {
+                for (register_index, assigned) in entry_assignments.iter_mut().enumerate() {
+                    *assigned &= assigned_at_exit[predecessor][register_index];
                 }
             }
-            let mut output = input.clone();
-            for inst in &block.instructions {
-                if let Some(dst) = inst.kind.destination() {
-                    output[dst.0] = true;
+            let mut exit_assignments = entry_assignments.clone();
+            for instruction in &block.instructions {
+                if let Some(dst) = instruction.kind.destination() {
+                    exit_assignments[dst.0] = true;
                 }
             }
-            changed |= inputs[b] != input || outputs[b] != output;
-            inputs[b] = input;
-            outputs[b] = output;
+            changed |= assigned_at_entry[block_index] != entry_assignments
+                || assigned_at_exit[block_index] != exit_assignments;
+            assigned_at_entry[block_index] = entry_assignments;
+            assigned_at_exit[block_index] = exit_assignments;
         }
         if !changed {
             break;
         }
     }
-    for (b, block) in f.blocks.iter().enumerate() {
-        if !reachable[b] {
+    assigned_at_entry
+}
+
+fn verify_reads(
+    function: &FunctionIr,
+    control_flow: &ReachableControlFlow,
+    assigned_at_entry: &[Vec<bool>],
+) -> Result<(), String> {
+    for (block_index, block) in function.blocks.iter().enumerate() {
+        if !control_flow.reachable[block_index] {
             continue;
         }
-        let mut assigned = inputs[b].clone();
-        let check = |operand: Operand, assigned: &[bool]| {
-            if let Operand::Value(id) = operand {
-                if !assigned[id.0] {
-                    return Err(format!("b{b}: v{} used before assignment", id.0));
-                }
-            }
-            Ok(())
-        };
-        for inst in &block.instructions {
-            for operand in inst.kind.operands() {
-                check(operand, &assigned)?;
-            }
-            if let Some(dst) = inst.kind.destination() {
+        let mut assigned = assigned_at_entry[block_index].clone();
+        for instruction in &block.instructions {
+            verify_assigned_operands(&instruction.kind.operands(), &assigned)
+                .map_err(|error| format!("b{block_index}: line {}: {error}", instruction.line))?;
+            // Check reads before marking the destination, so x = x + 1
+            // still requires a previous assignment to x.
+            if let Some(dst) = instruction.kind.destination() {
                 assigned[dst.0] = true;
             }
         }
-        for operand in block.terminator.operands() {
-            check(operand, &assigned)?;
+        verify_assigned_operands(&block.terminator.operands(), &assigned)
+            .map_err(|error| format!("b{block_index}: {error}"))?;
+    }
+    Ok(())
+}
+
+fn verify_assigned_operands(operands: &[Operand], assigned: &[bool]) -> Result<(), String> {
+    for operand in operands {
+        if let Operand::Value(id) = operand {
+            if !assigned[id.0] {
+                return Err(format!("v{} used before assignment", id.0));
+            }
         }
     }
     Ok(())
