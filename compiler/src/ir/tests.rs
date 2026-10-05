@@ -100,11 +100,172 @@ fn accepts_initialized_loop() {
 }
 
 #[test]
+fn assignment_analysis_handles_reverse_block_order_and_unreachable_predecessors() {
+    let mut program = example();
+    program.functions[0].entry = BlockId(3);
+    program.functions[0].blocks = vec![
+        BasicBlock {
+            instructions: vec![],
+            terminator: Terminator::Return(Some(Operand::Value(VirtualRegId(0)))),
+        },
+        // This unreachable path does not initialize v0 and must not affect b0.
+        BasicBlock {
+            instructions: vec![],
+            terminator: Terminator::Jump(BlockId(0)),
+        },
+        BasicBlock {
+            instructions: vec![copy(7)],
+            terminator: Terminator::Jump(BlockId(0)),
+        },
+        BasicBlock {
+            instructions: vec![],
+            terminator: Terminator::Jump(BlockId(2)),
+        },
+    ];
+    program.validate().unwrap();
+
+    // Assignment information must propagate through multiple iterations even
+    // when blocks are visited in the reverse of execution order.
+    program.functions[0].blocks[2].instructions.clear();
+    assert_eq!(
+        program.validate().unwrap_err(),
+        "example: b0: v0 used before assignment"
+    );
+
+    // Unreachable blocks still require valid IDs before assignment analysis.
+    program.functions[0].blocks[1].terminator = Terminator::Jump(BlockId(99));
+    assert_eq!(
+        program.validate().unwrap_err(),
+        "example: b1: invalid target b99"
+    );
+}
+
+#[test]
+fn invalid_entry_parameter_and_destination_ids_return_errors() {
+    let mut program = example();
+    program.functions[0].blocks.clear();
+    assert_eq!(
+        program.validate().unwrap_err(),
+        "example: invalid entry block"
+    );
+
+    let mut program = example();
+    program.signatures[0].params = vec![IrType::Int32];
+    program.functions[0].params = vec![VirtualRegId(99)];
+    assert_eq!(
+        program.validate().unwrap_err(),
+        "example: unknown value v99"
+    );
+
+    let mut program = example();
+    program.functions[0].blocks[0]
+        .instructions
+        .push(Instruction {
+            kind: InstructionKind::Copy {
+                dst: VirtualRegId(99),
+                src: Operand::Int(1),
+            },
+            line: 42,
+        });
+    assert_eq!(
+        program.validate().unwrap_err(),
+        "example: b0: line 42: unknown value v99"
+    );
+}
+
+#[test]
+fn verifier_errors_include_locations_and_expected_types() {
+    let mut program = example();
+    if let Terminator::Branch { condition, .. } = &mut program.functions[0].blocks[0].terminator {
+        *condition = Operand::Int(1);
+    }
+    assert_eq!(
+        program.validate().unwrap_err(),
+        "example: b0: expected Bool, got Int32"
+    );
+
+    program.functions[0].blocks[0].terminator = Terminator::Return(None);
+    assert_eq!(
+        program.validate().unwrap_err(),
+        "example: b0: return type mismatch: expected Some(Int32), got None"
+    );
+
+    let mut program = example();
+    program.functions[0].blocks[0]
+        .instructions
+        .push(Instruction {
+            kind: InstructionKind::Copy {
+                dst: VirtualRegId(0),
+                src: Operand::Value(VirtualRegId(0)),
+            },
+            line: 42,
+        });
+    assert_eq!(
+        program.validate().unwrap_err(),
+        "example: b0: line 42: v0 used before assignment"
+    );
+}
+
+#[test]
+fn call_and_abort_errors_identify_argument_types_and_counts() {
+    let mut program = example();
+    program.signatures.push(Signature {
+        params: vec![IrType::Ref, IrType::Int32],
+        result: None,
+    });
+    program.symbols.push(Symbol {
+        name: "helper".into(),
+        kind: SymbolKind::Function(SignatureId(1)),
+    });
+    program.functions[0].blocks[0]
+        .instructions
+        .push(Instruction {
+            kind: InstructionKind::Call {
+                dst: None,
+                target: CallTarget::Direct(SymbolId(1)),
+                args: vec![Operand::Null, Operand::Bool(true)],
+            },
+            line: 42,
+        });
+    assert_eq!(
+        program.validate().unwrap_err(),
+        "example: b0: line 42: call argument 2: expected Int32, got Bool"
+    );
+    if let InstructionKind::Call { args, .. } =
+        &mut program.functions[0].blocks[0].instructions[0].kind
+    {
+        args.pop();
+    }
+    assert_eq!(
+        program.validate().unwrap_err(),
+        "example: b0: line 42: call argument count mismatch: expected 2, got 1"
+    );
+
+    program.functions[0].blocks[0].instructions.clear();
+    program.functions[0].blocks[0].terminator = Terminator::Abort {
+        target: SymbolId(1),
+        args: vec![Operand::Null, Operand::Bool(true)],
+    };
+    assert_eq!(
+        program.validate().unwrap_err(),
+        "example: b0: abort argument 2: expected Int32, got Bool"
+    );
+    if let Terminator::Abort { args, .. } = &mut program.functions[0].blocks[0].terminator {
+        args.pop();
+    }
+    assert_eq!(
+        program.validate().unwrap_err(),
+        "example: b0: abort argument count mismatch: expected 2, got 1"
+    );
+}
+
+#[test]
 fn rejects_invalid_targets_ids_and_types() {
     let mut p = example();
     p.functions[0].blocks[0].terminator = Terminator::Jump(BlockId(99));
     assert!(p.validate().unwrap_err().contains("invalid target"));
-    p.functions[0].blocks[0].terminator = Terminator::Return(Some(Operand::Value(VirtualRegId(99))));
+    p.functions[0].blocks[0].terminator =
+        Terminator::Return(Some(Operand::Value(VirtualRegId(99))));
     assert!(p.validate().unwrap_err().contains("unknown value"));
     p.functions[0].blocks[0].terminator = Terminator::Return(Some(Operand::Bool(true)));
     assert!(p.validate().unwrap_err().contains("return type"));
@@ -481,13 +642,22 @@ fn public_use_def_helpers_include_calls_and_terminators() {
     };
     assert_eq!(call.destination(), Some(VirtualRegId(0)));
     assert_eq!(call.operands().len(), 2);
-    assert!(matches!(call.operands()[1], Operand::Value(VirtualRegId(1))));
-    assert_eq!(call.used_registers(), vec![VirtualRegId(2), VirtualRegId(1)]);
+    assert!(matches!(
+        call.operands()[1],
+        Operand::Value(VirtualRegId(1))
+    ));
+    assert_eq!(
+        call.used_registers(),
+        vec![VirtualRegId(2), VirtualRegId(1)]
+    );
     let abort = Terminator::Abort {
         target: SymbolId(0),
         args: vec![Operand::Value(VirtualRegId(2))],
     };
-    assert!(matches!(abort.operands()[0], Operand::Value(VirtualRegId(2))));
+    assert!(matches!(
+        abort.operands()[0],
+        Operand::Value(VirtualRegId(2))
+    ));
     assert_eq!(abort.used_registers(), vec![VirtualRegId(2)]);
     assert!(InstructionKind::Copy {
         dst: VirtualRegId(0),
