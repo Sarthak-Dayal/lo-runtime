@@ -16,10 +16,18 @@ impl ProgramIr {
         Ok(CheckedIr { program: self })
     }
 
-    pub(super) fn validate(&self) -> Result<(), String> {
-        for signature in &self.signatures {
-            for &ty in signature.params.iter().chain(signature.result.iter()) {
-                self.validate_type(ty)?;
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        for (id, signature) in self.signatures.iter().enumerate() {
+            if self.signatures[..id].contains(signature) {
+                return Err("duplicate signature: use intern_signature".into());
+            }
+            if signature
+                .params
+                .iter()
+                .chain(signature.result.iter())
+                .any(|ty| matches!(ty, IrType::CodePtr(_)))
+            {
+                return Err("LO/runtime signatures cannot take or return code pointers".into());
             }
         }
         let mut names = std::collections::HashSet::new();
@@ -40,6 +48,28 @@ impl ProgramIr {
             self.verify_function(function)
                 .map_err(|e| format!("{}: {e}", symbol.name))?;
         }
+        if let Some(startup) = self.startup {
+            self.function_signature(startup)?;
+            if !definitions.contains(&startup.0) {
+                return Err("startup function has no definition".into());
+            }
+        }
+        for data in &self.data {
+            if matches!(self.symbol(data.symbol)?.kind, SymbolKind::Function(_)) {
+                return Err("data definition requires a data/static-reference symbol".into());
+            }
+            if !definitions.insert(data.symbol.0) {
+                return Err("duplicate data definition".into());
+            }
+            if !data.align.is_power_of_two() {
+                return Err("data alignment must be a nonzero power of two".into());
+            }
+            for item in &data.items {
+                if let DataItem::Addr(id) = item {
+                    self.symbol(*id)?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -50,51 +80,10 @@ impl ProgramIr {
         Ok(())
     }
 
-    fn types_match(&self, actual: IrType, expected: IrType) -> Result<bool, String> {
-        let mut pending = vec![(actual, expected)];
-        let mut seen = std::collections::HashSet::new();
-        while let Some((actual, expected)) = pending.pop() {
-            self.validate_type(actual)?;
-            self.validate_type(expected)?;
-            match (actual, expected) {
-                (IrType::CodePtr(a), IrType::CodePtr(b)) => {
-                    // Signature graphs may contain recursive callable types.
-                    if !seen.insert((a.0, b.0)) {
-                        continue;
-                    }
-                    let a = self.signature(a)?;
-                    let b = self.signature(b)?;
-                    if a.params.len() != b.params.len() {
-                        return Ok(false);
-                    }
-                    pending.extend(a.params.iter().copied().zip(b.params.iter().copied()));
-                    match (a.result, b.result) {
-                        (Some(a), Some(b)) => pending.push((a, b)),
-                        (None, None) => {}
-                        _ => return Ok(false),
-                    }
-                }
-                _ if actual != expected => return Ok(false),
-                _ => {}
-            }
-        }
-        Ok(true)
-    }
-
-    fn optional_types_match(
-        &self,
-        actual: Option<IrType>,
-        expected: Option<IrType>,
-    ) -> Result<bool, String> {
-        match (actual, expected) {
-            (Some(a), Some(b)) => self.types_match(a, b),
-            (None, None) => Ok(true),
-            _ => Ok(false),
-        }
-    }
-
     fn expect(&self, actual: IrType, expected: IrType) -> Result<(), String> {
-        if self.types_match(actual, expected)? {
+        self.validate_type(actual)?;
+        self.validate_type(expected)?;
+        if actual == expected {
             Ok(())
         } else {
             Err(format!("expected {expected:?}, got {actual:?}"))
@@ -135,6 +124,9 @@ impl ProgramIr {
     }
 
     fn verify_function(&self, f: &FunctionIr) -> Result<(), String> {
+        if f.value_names.len() != f.value_types.len() {
+            return Err("value_names must match value_types length".into());
+        }
         for &ty in &f.value_types {
             self.validate_type(ty)?;
         }
@@ -168,7 +160,7 @@ impl ProgramIr {
                 }
                 Terminator::Return(value) => {
                     let actual = value.map(|v| self.operand_type(f, v)).transpose()?;
-                    if !self.optional_types_match(actual, sig.result)? {
+                    if actual != sig.result {
                         return Err(format!("b{index}: return type mismatch"));
                     }
                 }
@@ -195,11 +187,16 @@ impl ProgramIr {
         match inst {
             InstructionKind::Copy { dst, src } => self.expect(ty(*src)?, value_type(f, *dst)?),
             InstructionKind::Binary { dst, op, lhs, rhs } => {
+                if matches!(op, BinaryOp::Div | BinaryOp::Mod)
+                    && matches!(rhs, Operand::Int(0 | -1))
+                {
+                    return Err("Div/Mod special-case divisor must be lowered to branches".into());
+                }
                 let input = ty(*lhs)?;
                 self.expect(ty(*rhs)?, input)?;
                 let result = match op {
-                    BinaryOp::Eq | BinaryOp::Ne => IrType::Bool,
-                    BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+                    BinaryOp::Eq => IrType::Bool,
+                    BinaryOp::Lt | BinaryOp::Gt => {
                         self.expect(input, IrType::Int32)?;
                         IrType::Bool
                     }
@@ -240,28 +237,29 @@ impl ProgramIr {
                 }
                 self.expect(ty(*value)?, *expected)
             }
-            InstructionKind::NullCheck { receiver, .. } => self.expect(ty(*receiver)?, IrType::Ref),
-            InstructionKind::Call {
-                dst,
-                target,
-                signature,
-                args,
-                ..
-            } => {
-                let sig = self.signature(*signature)?;
-                match target {
-                    CallTarget::Direct(id) => {
-                        if !self.types_match(
-                            self.operand_type(f, Operand::Symbol(*id))?,
-                            IrType::CodePtr(*signature),
-                        )? {
-                            return Err("call signature mismatch".into());
-                        }
-                    }
-                    CallTarget::Indirect(pointer) => {
-                        self.expect(ty(*pointer)?, IrType::CodePtr(*signature))?
-                    }
+            InstructionKind::RootStore { slot, value } => {
+                root_slot(f, *slot)?;
+                self.expect(ty(*value)?, IrType::Ref)
+            }
+            InstructionKind::RootLoad { dst, slot } => {
+                root_slot(f, *slot)?;
+                self.expect(value_type(f, *dst)?, IrType::Ref)
+            }
+            InstructionKind::RootAddr { dst, slot } => {
+                root_slot(f, *slot)?;
+                if self.startup != Some(f.symbol) {
+                    return Err("RootAddr is only permitted in the startup function".into());
                 }
+                self.expect(value_type(f, *dst)?, IrType::Ptr)
+            }
+            InstructionKind::Call { dst, target, args } => {
+                let sig = match target {
+                    CallTarget::Direct(id) => self.function_signature(*id)?,
+                    CallTarget::Indirect(pointer) => match ty(*pointer)? {
+                        IrType::CodePtr(id) => self.signature(id)?,
+                        _ => return Err("indirect call requires a CodePtr".into()),
+                    },
+                };
                 if args.len() != sig.params.len() {
                     return Err("call argument count mismatch".into());
                 }
@@ -269,12 +267,20 @@ impl ProgramIr {
                     self.expect(ty(arg)?, expected)?;
                 }
                 let result = dst.map(|id| value_type(f, id)).transpose()?;
-                if !self.optional_types_match(result, sig.result)? {
+                if result != sig.result {
                     return Err("call result type mismatch".into());
                 }
                 Ok(())
             }
         }
+    }
+}
+
+fn root_slot(f: &FunctionIr, slot: u32) -> Result<(), String> {
+    if slot < f.root_slots {
+        Ok(())
+    } else {
+        Err(format!("invalid root slot {slot}"))
     }
 }
 
@@ -358,22 +364,15 @@ fn verify_assignment(f: &FunctionIr) -> Result<(), String> {
             Ok(())
         };
         for inst in &block.instructions {
-            for operand in inst.kind.operands() {
+            for operand in inst.kind.uses() {
                 check(operand, &assigned)?;
             }
             if let Some(dst) = inst.kind.destination() {
                 assigned[dst.0] = true;
             }
         }
-        match &block.terminator {
-            Terminator::Branch { condition, .. } => check(*condition, &assigned)?,
-            Terminator::Return(Some(value)) => check(*value, &assigned)?,
-            Terminator::Abort { args, .. } => {
-                for &arg in args {
-                    check(arg, &assigned)?;
-                }
-            }
-            _ => {}
+        for operand in block.terminator.uses() {
+            check(operand, &assigned)?;
         }
     }
     Ok(())
