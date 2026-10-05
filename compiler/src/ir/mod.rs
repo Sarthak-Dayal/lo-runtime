@@ -1,6 +1,9 @@
 mod dump;
+pub mod lower;
 mod verify;
 
+#[cfg(test)]
+mod lower_tests;
 #[cfg(test)]
 mod tests;
 
