@@ -10,7 +10,7 @@ fn copy(value: i32) -> Instruction {
     }
 }
 fn example() -> ProgramIr {
-    ProgramIr {
+    let mut program = ProgramIr {
         data: vec![],
         startup: None,
         symbols: vec![Symbol {
@@ -24,8 +24,8 @@ fn example() -> ProgramIr {
         functions: vec![FunctionIr {
             symbol: SymbolId(0),
             params: vec![],
-            register_types: vec![IrType::Int32],
-            register_names: vec![Some("result".into())],
+            register_types: vec![],
+            register_names: vec![],
             root_slots: 0,
             entry: BlockId(0),
             blocks: vec![
@@ -51,7 +51,200 @@ fn example() -> ProgramIr {
                 },
             ],
         }],
-    }
+    };
+    program.functions[0].new_register(IrType::Int32, Some("result".into()));
+    program
+}
+
+#[test]
+fn new_register_keeps_types_and_names_aligned() {
+    let mut program = example();
+    let function = &mut program.functions[0];
+    let object = function.new_register(IrType::Ref, Some("object".into()));
+    let pointer = function.new_register(IrType::Ptr, None);
+    assert_eq!(object, VirtualRegId(1));
+    assert_eq!(pointer, VirtualRegId(2));
+    assert_eq!(
+        function.register_types,
+        vec![IrType::Int32, IrType::Ref, IrType::Ptr]
+    );
+    assert_eq!(
+        function.register_names,
+        vec![Some("result".into()), Some("object".into()), None]
+    );
+    program.validate().unwrap();
+}
+
+#[test]
+fn use_def_helpers_preserve_order_and_duplicate_reads() {
+    let register = VirtualRegId(0);
+    let binary = InstructionKind::Binary {
+        dst: register,
+        op: BinaryOp::Add,
+        lhs: Operand::Value(register),
+        rhs: Operand::Value(register),
+    };
+    assert_eq!(binary.destination(), Some(register));
+    assert_eq!(binary.used_registers(), vec![register, register]);
+
+    let pointer = VirtualRegId(1);
+    let call = InstructionKind::Call {
+        dst: Some(VirtualRegId(2)),
+        target: CallTarget::Indirect(Operand::Value(pointer)),
+        args: vec![
+            Operand::Value(register),
+            Operand::Int(7),
+            Operand::Value(register),
+        ],
+    };
+    assert_eq!(call.used_registers(), vec![register, register, pointer]);
+    let abort = Terminator::Abort {
+        target: SymbolId(0),
+        args: vec![
+            Operand::Value(register),
+            Operand::Null,
+            Operand::Value(register),
+        ],
+    };
+    assert_eq!(abort.used_registers(), vec![register, register]);
+}
+
+#[test]
+fn dump_preserves_external_data_and_function_layout() {
+    let mut program = example();
+    let receiver = program.functions[0].new_register(IrType::Ref, Some("receiver".into()));
+    let condition = program.functions[0].new_register(IrType::Bool, None);
+    program.functions[0].params = vec![receiver, condition];
+    program.signatures[0].params = vec![IrType::Ref, IrType::Bool];
+    program.functions[0].root_slots = 2;
+    program.startup = Some(SymbolId(0));
+    let runtime_signature = program.intern_signature(Signature {
+        params: vec![IrType::Int32, IrType::Ptr],
+        result: None,
+    });
+    program.symbols.extend([
+        Symbol {
+            name: "runtime".into(),
+            kind: SymbolKind::Function(runtime_signature),
+        },
+        Symbol {
+            name: "external_data".into(),
+            kind: SymbolKind::Data,
+        },
+        Symbol {
+            name: "empty_ref".into(),
+            kind: SymbolKind::StaticRef,
+        },
+        Symbol {
+            name: "constants".into(),
+            kind: SymbolKind::Data,
+        },
+        Symbol {
+            name: "globals".into(),
+            kind: SymbolKind::Data,
+        },
+    ]);
+    program.data = vec![
+        DataDef {
+            symbol: SymbolId(4),
+            section: Section::ReadOnly,
+            align: 4,
+            items: vec![
+                DataItem::Bytes(vec![0, 15, 255]),
+                DataItem::Bytes(vec![]),
+                DataItem::Addr(SymbolId(0)),
+            ],
+        },
+        DataDef {
+            symbol: SymbolId(5),
+            section: Section::Writable,
+            align: 8,
+            items: vec![DataItem::U32(42), DataItem::Zero(8)],
+        },
+    ];
+    program.validate().unwrap();
+    assert_eq!(
+        program.dump(),
+        concat!(
+            "extern func @runtime(Int32, Ptr) -> Void\n",
+            "extern data @external_data\n",
+            "extern ref @empty_ref\n",
+            ".rodata @constants align 4 {\n",
+            "  bytes 00 0f ff\n",
+            "  bytes\n",
+            "  addr @example\n",
+            "}\n",
+            ".data @globals align 8 {\n",
+            "  u32 42\n",
+            "  zero 8\n",
+            "}\n",
+            "\nfunc @example(receiver:Ref, t2:Bool) -> Int32 entry .L0 roots 2 startup {\n",
+            ".L0:\n",
+            "  cbr true, .L1, .L2\n",
+            ".L1:\n",
+            "  result:Int32 = 1 ; line 1\n",
+            "  br .L3\n",
+            ".L2:\n",
+            "  result:Int32 = 2 ; line 1\n",
+            "  br .L3\n",
+            ".L3:\n",
+            "  ret result\n",
+            "}\n",
+        )
+    );
+}
+
+#[test]
+fn dump_preserves_duplicate_names_and_malformed_register_fallbacks() {
+    let mut program = example();
+    program.functions[0].register_names[0] = Some("shared".into());
+    program.functions[0].new_register(IrType::Int32, Some("shared".into()));
+    program.functions[0].new_register(IrType::Int32, Some("t7".into()));
+    program.functions[0].new_register(IrType::Int32, Some("t+8".into()));
+    program.functions[0].new_register(IrType::Int32, Some("ordinary".into()));
+    program.functions[0].params = (0..5).map(VirtualRegId).collect();
+    assert!(program.dump().contains(
+        "func @example(shared.v0:Int32, shared.v1:Int32, t7.v2:Int32, t+8.v3:Int32, ordinary:Int32)"
+    ));
+
+    // Names beyond the type table still affect duplicate-name detection.
+    program.functions[0].register_types.truncate(1);
+    assert!(program
+        .dump()
+        .contains("shared.v0:Int32, shared.v1:<invalid type>"));
+    program.functions[0].register_names.clear();
+    program.functions[0].params = vec![VirtualRegId(99)];
+    assert!(program.dump().contains("func @example(t99:<invalid type>)"));
+    assert!(program.dump().contains("t0:Int32 = 1"));
+}
+
+#[test]
+fn dump_preserves_invalid_function_and_signature_markers() {
+    let mut program = example();
+    program.symbols[0].kind = SymbolKind::Function(SignatureId(99));
+    assert!(program
+        .dump()
+        .contains("func @example() -> <invalid signature>"));
+    program.functions[0].symbol = SymbolId(99);
+    let dump = program.dump();
+    assert!(dump.contains("extern func @example<invalid signature:99>"));
+    assert!(dump.contains("func @<invalid:99>() -> <invalid function>"));
+
+    program.functions[0].symbol = SymbolId(0);
+    program.symbols[0].kind = SymbolKind::Data;
+    assert!(program
+        .dump()
+        .contains("func @example() -> <invalid function>"));
+    program.symbols[0].kind = SymbolKind::Function(SignatureId(0));
+    program.signatures[0] = Signature {
+        params: vec![IrType::CodePtr(SignatureId(0))],
+        result: Some(IrType::CodePtr(SignatureId(0))),
+    };
+    program.functions[0].new_register(IrType::CodePtr(SignatureId(0)), None);
+    program.functions[0].params = vec![VirtualRegId(1)];
+    assert!(program
+        .dump()
+        .contains("t1:CodePtr(<invalid nested CodePtr>) -> <invalid nested CodePtr>"));
 }
 
 #[test]
@@ -282,10 +475,7 @@ fn indirect_calls_check_signature_and_initialization() {
         params: vec![IrType::Ref],
         result: Some(IrType::Int32),
     });
-    p.functions[0]
-        .register_types
-        .push(IrType::CodePtr(SignatureId(1)));
-    p.functions[0].register_names.push(None);
+    p.functions[0].new_register(IrType::CodePtr(SignatureId(1)), None);
     p.functions[0].blocks[0].instructions = vec![
         Instruction {
             kind: InstructionKind::Copy {
@@ -349,8 +539,7 @@ fn static_objects_are_references_not_raw_data() {
         name: "LO_EMPTY_STRING".into(),
         kind: SymbolKind::StaticRef,
     });
-    p.functions[0].register_types.push(IrType::Ref);
-    p.functions[0].register_names.push(None);
+    p.functions[0].new_register(IrType::Ref, None);
     p.functions[0].params.push(VirtualRegId(1));
     p.signatures[0].params.push(IrType::Ref);
     p.functions[0].blocks[0].instructions.push(Instruction {
@@ -436,10 +625,7 @@ fn checked_ir_must_be_unwrapped_before_editing() {
 
 fn indirect_example() -> ProgramIr {
     let mut p = example();
-    p.functions[0]
-        .register_types
-        .push(IrType::CodePtr(SignatureId(0)));
-    p.functions[0].register_names.push(None);
+    p.functions[0].new_register(IrType::CodePtr(SignatureId(0)), None);
     p.functions[0].blocks[0].instructions = vec![
         Instruction {
             kind: InstructionKind::Copy {
@@ -527,12 +713,8 @@ fn invalid_and_nested_signatures_are_rejected() {
 fn root_instructions_check_slots_types_and_startup() {
     let mut p = example();
     p.functions[0].root_slots = 1;
-    p.functions[0]
-        .register_types
-        .extend([IrType::Ref, IrType::Ptr]);
-    p.functions[0]
-        .register_names
-        .extend([Some("object".into()), Some("root_address".into())]);
+    p.functions[0].new_register(IrType::Ref, Some("object".into()));
+    p.functions[0].new_register(IrType::Ptr, Some("root_address".into()));
     p.functions[0].blocks[0].instructions = vec![
         Instruction {
             kind: InstructionKind::RootStore {
@@ -704,8 +886,7 @@ fn dump_uses_named_typed_calls_and_handles_invalid_ids() {
         name: "lo_class_6_circle".into(),
         kind: SymbolKind::Data,
     });
-    p.functions[0].register_types.push(IrType::Ref);
-    p.functions[0].register_names.push(None);
+    p.functions[0].new_register(IrType::Ref, None);
     p.functions[0].blocks[0].instructions.push(Instruction {
         kind: InstructionKind::Call {
             dst: Some(VirtualRegId(1)),
@@ -747,12 +928,8 @@ fn null_check_is_a_branch_to_an_abort_block() {
     });
     p.signatures[0].params.push(IrType::Ref);
     p.functions[0].params.push(VirtualRegId(1));
-    p.functions[0]
-        .register_types
-        .extend([IrType::Ref, IrType::Bool]);
-    p.functions[0]
-        .register_names
-        .extend([Some("receiver".into()), None]);
+    p.functions[0].new_register(IrType::Ref, Some("receiver".into()));
+    p.functions[0].new_register(IrType::Bool, None);
     p.functions[0].blocks = vec![
         BasicBlock {
             instructions: vec![Instruction {
@@ -793,8 +970,7 @@ fn null_check_is_a_branch_to_an_abort_block() {
 fn names_are_unambiguous_and_malformed_ir_can_be_dumped() {
     let mut p = example();
     p.functions[0].register_names[0] = Some("t1".into());
-    p.functions[0].register_types.push(IrType::Int32);
-    p.functions[0].register_names.push(None);
+    p.functions[0].new_register(IrType::Int32, None);
     p.functions[0].blocks[0].instructions.push(Instruction {
         kind: InstructionKind::Copy {
             dst: VirtualRegId(1),
@@ -823,8 +999,7 @@ fn names_are_unambiguous_and_malformed_ir_can_be_dumped() {
 fn root_stores_read_initialized_values() {
     let mut p = example();
     p.functions[0].root_slots = 1;
-    p.functions[0].register_types.push(IrType::Ref);
-    p.functions[0].register_names.push(None);
+    p.functions[0].new_register(IrType::Ref, None);
     p.functions[0].blocks[0].instructions.push(Instruction {
         kind: InstructionKind::RootStore {
             slot: 0,

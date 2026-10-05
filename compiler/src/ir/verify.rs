@@ -58,10 +58,13 @@ impl ProgramIr {
         Ok(())
     }
 
-    fn verify_function_definitions(&self, definitions: &mut HashSet<usize>) -> Result<(), String> {
+    fn verify_function_definitions(
+        &self,
+        definitions: &mut HashSet<SymbolId>,
+    ) -> Result<(), String> {
         for function in &self.functions {
             let symbol = self.symbol(function.symbol)?;
-            if !definitions.insert(function.symbol.0) {
+            if !definitions.insert(function.symbol) {
                 return Err(format!("duplicate function {}", symbol.name));
             }
             self.verify_function(function)
@@ -70,22 +73,22 @@ impl ProgramIr {
         Ok(())
     }
 
-    fn verify_startup(&self, definitions: &HashSet<usize>) -> Result<(), String> {
+    fn verify_startup(&self, definitions: &HashSet<SymbolId>) -> Result<(), String> {
         if let Some(startup) = self.startup {
             self.function_signature(startup)?;
-            if !definitions.contains(&startup.0) {
+            if !definitions.contains(&startup) {
                 return Err("startup function has no definition".into());
             }
         }
         Ok(())
     }
 
-    fn verify_data_definitions(&self, definitions: &mut HashSet<usize>) -> Result<(), String> {
+    fn verify_data_definitions(&self, definitions: &mut HashSet<SymbolId>) -> Result<(), String> {
         for data in &self.data {
             if matches!(self.symbol(data.symbol)?.kind, SymbolKind::Function(_)) {
                 return Err("data definition requires a data/static-reference symbol".into());
             }
-            if !definitions.insert(data.symbol.0) {
+            if !definitions.insert(data.symbol) {
                 return Err("duplicate data definition".into());
             }
             if !data.align.is_power_of_two() {
@@ -190,7 +193,7 @@ impl ProgramIr {
         }
         let mut params = HashSet::new();
         for (&id, &ty) in function.params.iter().zip(&signature.params) {
-            if !params.insert(id.0) {
+            if !params.insert(id) {
                 return Err("duplicate parameter value".into());
             }
             self.expect_type(value_type(function, id)?, ty)?;

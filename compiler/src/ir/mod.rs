@@ -8,20 +8,20 @@ mod lower_tests;
 mod tests;
 
 // IDs used to index into tables for registers, blocks, symbols, and signatures
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VirtualRegId(pub usize);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlockId(pub usize);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SymbolId(pub usize);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SignatureId(pub usize);
 
 // Types used in the IR and in the LO programs
-// Ref is a collectible heap object or static reference (like LO_EMPTY_STRING), 
+// Ref is a collectible heap object or static reference (like LO_EMPTY_STRING),
 // Ptr is a raw pointer, CodePtr is a function pointer
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrType {
@@ -87,7 +87,10 @@ pub struct ProgramIr {
 
 impl ProgramIr {
     pub fn intern_signature(&mut self, signature: Signature) -> SignatureId {
-        let existing_id = self.signatures.iter().position(|existing| existing == &signature);
+        let existing_id = self
+            .signatures
+            .iter()
+            .position(|existing| existing == &signature);
 
         if let Some(index) = existing_id {
             return SignatureId(index);
@@ -109,6 +112,24 @@ pub struct FunctionIr {
     pub root_slots: u32,
     pub blocks: Vec<BasicBlock>,
     pub entry: BlockId,
+}
+
+impl FunctionIr {
+    /// Adds a mutable virtual register, keeping its type and optional name together.
+    /// The register is initially unassigned unless it is added to `params`.
+    ///
+    /// Panics if the existing register tables have different lengths.
+    pub fn new_register(&mut self, ty: IrType, name: Option<String>) -> VirtualRegId {
+        assert_eq!(
+            self.register_types.len(),
+            self.register_names.len(),
+            "register_names must match register_types length"
+        );
+        let id = VirtualRegId(self.register_types.len());
+        self.register_types.push(ty);
+        self.register_names.push(name);
+        id
+    }
 }
 
 pub struct BasicBlock {
@@ -220,6 +241,8 @@ pub enum Terminator {
 }
 
 impl Terminator {
+    /// Returns read operands in their stored order, including duplicates.
+    /// Branch targets and direct function symbols are not read operands.
     pub fn operands(&self) -> Vec<Operand> {
         match self {
             Self::Branch { condition, .. } => vec![*condition],
@@ -229,16 +252,12 @@ impl Terminator {
         }
     }
 
+    /// Returns the registers in `operands()`, preserving order and duplicates.
     pub fn used_registers(&self) -> Vec<VirtualRegId> {
-        self.operands()
-            .into_iter()
-            .filter_map(|operand| match operand {
-                Operand::Value(reg) => Some(reg),
-                _ => None,
-            })
-            .collect()
+        registers_in_operands(self.operands())
     }
 
+    /// Returns successor blocks in their stored order, including duplicate targets.
     pub fn successors(&self) -> Vec<BlockId> {
         match self {
             Self::Jump(block) => vec![*block],
@@ -253,6 +272,7 @@ impl Terminator {
 }
 
 impl InstructionKind {
+    /// Returns the written register, if any. Reads occur before this write.
     pub fn destination(&self) -> Option<VirtualRegId> {
         match self {
             Self::Copy { dst, .. }
@@ -266,16 +286,13 @@ impl InstructionKind {
         }
     }
 
+    /// Returns the registers in `operands()`, preserving order and duplicates.
     pub fn used_registers(&self) -> Vec<VirtualRegId> {
-        self.operands()
-            .into_iter()
-            .filter_map(|operand| match operand {
-                Operand::Value(reg) => Some(reg),
-                _ => None,
-            })
-            .collect()
+        registers_in_operands(self.operands())
     }
 
+    /// Returns read operands, preserving order and duplicates, excluding the destination.
+    /// For indirect calls, the function pointer follows the argument operands.
     pub fn operands(&self) -> Vec<Operand> {
         match self {
             Self::Copy { src, .. } | Self::Unary { src, .. } => vec![*src],
@@ -293,4 +310,14 @@ impl InstructionKind {
             }
         }
     }
+}
+
+fn registers_in_operands(operands: Vec<Operand>) -> Vec<VirtualRegId> {
+    operands
+        .into_iter()
+        .filter_map(|operand| match operand {
+            Operand::Value(register) => Some(register),
+            _ => None,
+        })
+        .collect()
 }
