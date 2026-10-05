@@ -12,6 +12,8 @@ fn program(method: &TypedMethodDecl) -> Result<CheckedIr, String> {
     let mut params = vec![IrType::Ref];
     params.extend(method.formals.iter().map(|(_, t)| ty(t)));
     ProgramIr {
+        data: vec![],
+        startup: None,
         symbols: vec![Symbol {
             name: method.method_name.clone(),
             kind: SymbolKind::Function(SignatureId(0)),
@@ -70,26 +72,17 @@ fn execute_with_trace(function: &FunctionIr, args: &[i32]) -> (Option<i32>, usiz
                             BinaryOp::Mul => a.wrapping_mul(b),
                             BinaryOp::Div => {
                                 divisions += 1;
-                                if b == 0 {
-                                    -1
-                                } else {
-                                    a.wrapping_div(b)
-                                }
+                                assert!(b != 0 && b != -1, "unguarded division reached execution");
+                                a / b
                             }
                             BinaryOp::Mod => {
                                 divisions += 1;
-                                if b == 0 {
-                                    a
-                                } else {
-                                    a.wrapping_rem(b)
-                                }
+                                assert!(b != 0 && b != -1, "unguarded remainder reached execution");
+                                a % b
                             }
                             BinaryOp::Eq => i32::from(a == b),
-                            BinaryOp::Ne => i32::from(a != b),
                             BinaryOp::Lt => i32::from(a < b),
-                            BinaryOp::Le => i32::from(a <= b),
                             BinaryOp::Gt => i32::from(a > b),
-                            BinaryOp::Ge => i32::from(a >= b),
                         },
                     )
                 }
@@ -167,19 +160,19 @@ fn loops_and_break_use_innermost_exit() {
 fn short_circuit_skips_rhs() {
     assert_eq!(
         compare(
-            "if ((false & ((1 / 0) = 0))) { return 1; } else { return 2; }",
+            "if ((false & ((4 / 2) = 0))) { return 1; } else { return 2; }",
             2
         ),
         0
     );
     assert_eq!(
         compare(
-            "if ((true | ((1 / 0) = 0))) { return 3; } else { return 4; }",
+            "if ((true | ((4 / 2) = 0))) { return 3; } else { return 4; }",
             3
         ),
         0
     );
-    assert_eq!(compare("return (true ? 5 : (1 / 0));", 5), 0);
+    assert_eq!(compare("return (true ? 5 : (4 / 2));", 5), 0);
     assert_eq!(
         compare(
             "if ((true & ((4 / 2) = 2))) { return 1; } else { return 0; }",
@@ -242,4 +235,67 @@ fn receiver_formals_and_void_fallthrough() {
     assert_eq!(execute(&f.program().functions[0], &[1, 41]), Some(42));
     let g = program(&methods[2]).ok().unwrap();
     assert_eq!(execute(&g.program().functions[0], &[1]), None);
+}
+
+#[test]
+fn variable_division_guards_all_boundary_cases() {
+    for operator in ["/", "%"] {
+        let source = format!("class Main () {{ int main() {{ return 0; }} int calculate(int a, int b) {{ return (a {operator} b); }} }}");
+        let tokens = crate::lexer::tokenize(&source).unwrap();
+        let ast = crate::parser::parse_program(&tokens).unwrap();
+        let (typed, _) = crate::type_checker::check_program(ast).unwrap();
+        let method = &typed
+            .classes
+            .iter()
+            .find(|c| c.class_name == "Main")
+            .unwrap()
+            .methods[1];
+        let checked = program(method).ok().unwrap();
+        let function = &checked.program().functions[0];
+        for a in [i32::MIN, -7, 0, 7, i32::MAX] {
+            for b in [-3, -1, 0, 1, 3] {
+                let expected = match (operator, b) {
+                    ("/", 0) => -1,
+                    ("%", 0) => a,
+                    ("/", _) => a.wrapping_div(b),
+                    _ => a.wrapping_rem(b),
+                };
+                let (actual, divisions) = execute_with_trace(function, &[1, a, b]);
+                assert_eq!(actual, Some(expected), "{a} {operator} {b}");
+                assert_eq!(divisions, usize::from(b != 0 && b != -1));
+            }
+        }
+        let dump = checked.program().dump();
+        assert!(dump.contains("this:Ref, a:Int32, b:Int32"));
+        assert!(dump.contains(" == 0"));
+        assert!(dump.contains(" == -1"));
+    }
+}
+
+#[test]
+fn names_and_nested_division_survive_cfg_lowering() {
+    compare("int x, b; x = 7; b = 0; return ((x / b) + (x % b));", 6);
+    compare("int b; b = (~ 1); return ((2147483647 + 1) / b);", i32::MIN);
+    compare(
+        "int i, sum; while ((i < 3)) { sum = (sum + (6 / (i - 1))); i = (i + 1); } return sum;",
+        -1,
+    );
+    let tokens = crate::lexer::tokenize(
+        "class Main () { int main() { int count; count = 2; return count; } }",
+    )
+    .unwrap();
+    let ast = crate::parser::parse_program(&tokens).unwrap();
+    let (typed, _) = crate::type_checker::check_program(ast).unwrap();
+    let method = &typed
+        .classes
+        .iter()
+        .find(|c| c.class_name == "Main")
+        .unwrap()
+        .methods[0];
+    let checked = program(method).ok().unwrap();
+    let dump = checked.program().dump();
+    assert!(dump.contains("count:Int32 = 0"));
+    assert!(dump.contains("count:Int32 = 2"));
+    assert!(dump.contains(" = count"));
+    assert_eq!(checked.program().functions[0].root_slots, 0);
 }

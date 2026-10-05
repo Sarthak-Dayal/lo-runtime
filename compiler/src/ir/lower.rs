@@ -21,6 +21,8 @@ pub fn lower_method(symbol: SymbolId, method: &TypedMethodDecl) -> Result<Functi
             symbol,
             params: vec![ValueId(0)],
             value_types: vec![IrType::Ref],
+            value_names: vec![Some("this".into())],
+            root_slots: 0,
             blocks: vec![],
             entry: BlockId(0),
         },
@@ -32,11 +34,13 @@ pub fn lower_method(symbol: SymbolId, method: &TypedMethodDecl) -> Result<Functi
     builder.current = Some(builder.block());
     for (name, ty) in &method.formals {
         let id = builder.value(value_type(ty)?);
+        builder.function.value_names[id.0] = Some(name.clone());
         builder.function.params.push(id);
         builder.bindings.insert(name.clone(), id);
     }
     for (name, ty) in locals {
         let id = builder.value(value_type(ty)?);
+        builder.function.value_names[id.0] = Some(name.clone());
         builder.bindings.insert(name.clone(), id);
         let src = match ty {
             Type::Int => Operand::Int(0),
@@ -91,6 +95,7 @@ impl Builder {
     fn value(&mut self, ty: IrType) -> ValueId {
         let id = ValueId(self.function.value_types.len());
         self.function.value_types.push(ty);
+        self.function.value_names.push(None);
         id
     }
 
@@ -279,7 +284,11 @@ impl Builder {
                     Binop::Gt => BinaryOp::Gt,
                     Binop::And | Binop::Or => unreachable!(),
                 };
-                self.emit(InstructionKind::Binary { dst, op, lhs, rhs }, *line);
+                if matches!(op, BinaryOp::Div | BinaryOp::Mod) {
+                    self.division(dst, op, lhs, rhs, *line);
+                } else {
+                    self.emit(InstructionKind::Binary { dst, op, lhs, rhs }, *line);
+                }
                 Operand::Value(dst)
             }
             TypedExpr::Ternary {
@@ -315,6 +324,94 @@ impl Builder {
                 ))
             }
         })
+    }
+
+    fn division(&mut self, dst: ValueId, op: BinaryOp, lhs: Operand, rhs: Operand, line: u32) {
+        // Both operands have already been evaluated, even for a special divisor.
+        if let Operand::Int(divisor) = rhs {
+            match divisor {
+                0 => self.division_special(dst, op, lhs, false, line),
+                -1 => self.division_special(dst, op, lhs, true, line),
+                _ => self.emit(InstructionKind::Binary { dst, op, lhs, rhs }, line),
+            }
+            return;
+        }
+        let zero = self.block();
+        let check_negative_one = self.block();
+        let negative_one = self.block();
+        let ordinary = self.block();
+        let join = self.block();
+        let condition = self.value(IrType::Bool);
+        self.emit(
+            InstructionKind::Binary {
+                dst: condition,
+                op: BinaryOp::Eq,
+                lhs: rhs,
+                rhs: Operand::Int(0),
+            },
+            line,
+        );
+        self.finish(Terminator::Branch {
+            condition: Operand::Value(condition),
+            then_block: zero,
+            else_block: check_negative_one,
+        });
+        self.current = Some(zero);
+        self.division_special(dst, op, lhs, false, line);
+        self.finish(Terminator::Jump(join));
+
+        self.current = Some(check_negative_one);
+        let condition = self.value(IrType::Bool);
+        self.emit(
+            InstructionKind::Binary {
+                dst: condition,
+                op: BinaryOp::Eq,
+                lhs: rhs,
+                rhs: Operand::Int(-1),
+            },
+            line,
+        );
+        self.finish(Terminator::Branch {
+            condition: Operand::Value(condition),
+            then_block: negative_one,
+            else_block: ordinary,
+        });
+        self.current = Some(negative_one);
+        self.division_special(dst, op, lhs, true, line);
+        self.finish(Terminator::Jump(join));
+
+        self.current = Some(ordinary);
+        self.emit(InstructionKind::Binary { dst, op, lhs, rhs }, line);
+        self.finish(Terminator::Jump(join));
+        self.current = Some(join);
+    }
+
+    fn division_special(
+        &mut self,
+        dst: ValueId,
+        op: BinaryOp,
+        lhs: Operand,
+        negative_one: bool,
+        line: u32,
+    ) {
+        let kind = match (op, negative_one) {
+            (BinaryOp::Div, false) => InstructionKind::Copy {
+                dst,
+                src: Operand::Int(-1),
+            },
+            (BinaryOp::Mod, false) => InstructionKind::Copy { dst, src: lhs },
+            (BinaryOp::Div, true) => InstructionKind::Unary {
+                dst,
+                op: UnaryOp::Neg,
+                src: lhs,
+            },
+            (BinaryOp::Mod, true) => InstructionKind::Copy {
+                dst,
+                src: Operand::Int(0),
+            },
+            _ => unreachable!("division special case needs Div or Mod"),
+        };
+        self.emit(kind, line);
     }
 
     fn choose(
