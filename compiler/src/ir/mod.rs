@@ -19,7 +19,7 @@ pub enum IrType {
     Bool,
     Ref,
     Ptr,
-    CodePtr,
+    CodePtr(SignatureId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,6 +45,10 @@ pub struct ProgramIr {
     pub symbols: Vec<Symbol>,
     pub signatures: Vec<Signature>,
     pub functions: Vec<FunctionIr>,
+}
+
+pub struct CheckedIr {
+    program: ProgramIr,
 }
 
 pub struct FunctionIr {
@@ -92,6 +96,7 @@ pub enum InstructionKind {
         src: Operand,
     },
     // Load width comes from dst's type; offsets come from target layout.
+    // Code-pointer loads trust layout to supply the declared signature.
     Load {
         dst: ValueId,
         base: Operand,

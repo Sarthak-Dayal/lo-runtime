@@ -1,7 +1,27 @@
 use super::*;
 
+impl CheckedIr {
+    pub fn program(&self) -> &ProgramIr {
+        &self.program
+    }
+
+    pub fn into_program(self) -> ProgramIr {
+        self.program
+    }
+}
+
 impl ProgramIr {
-    pub fn verify(&self) -> Result<(), String> {
+    pub fn verify(self) -> Result<CheckedIr, String> {
+        self.validate()?;
+        Ok(CheckedIr { program: self })
+    }
+
+    pub(super) fn validate(&self) -> Result<(), String> {
+        for signature in &self.signatures {
+            for &ty in signature.params.iter().chain(signature.result.iter()) {
+                self.validate_type(ty)?;
+            }
+        }
         let mut names = std::collections::HashSet::new();
         for symbol in &self.symbols {
             if !names.insert(&symbol.name) {
@@ -21,6 +41,64 @@ impl ProgramIr {
                 .map_err(|e| format!("{}: {e}", symbol.name))?;
         }
         Ok(())
+    }
+
+    fn validate_type(&self, ty: IrType) -> Result<(), String> {
+        if let IrType::CodePtr(id) = ty {
+            self.signature(id)?;
+        }
+        Ok(())
+    }
+
+    fn types_match(&self, actual: IrType, expected: IrType) -> Result<bool, String> {
+        let mut pending = vec![(actual, expected)];
+        let mut seen = std::collections::HashSet::new();
+        while let Some((actual, expected)) = pending.pop() {
+            self.validate_type(actual)?;
+            self.validate_type(expected)?;
+            match (actual, expected) {
+                (IrType::CodePtr(a), IrType::CodePtr(b)) => {
+                    // Signature graphs may contain recursive callable types.
+                    if !seen.insert((a.0, b.0)) {
+                        continue;
+                    }
+                    let a = self.signature(a)?;
+                    let b = self.signature(b)?;
+                    if a.params.len() != b.params.len() {
+                        return Ok(false);
+                    }
+                    pending.extend(a.params.iter().copied().zip(b.params.iter().copied()));
+                    match (a.result, b.result) {
+                        (Some(a), Some(b)) => pending.push((a, b)),
+                        (None, None) => {}
+                        _ => return Ok(false),
+                    }
+                }
+                _ if actual != expected => return Ok(false),
+                _ => {}
+            }
+        }
+        Ok(true)
+    }
+
+    fn optional_types_match(
+        &self,
+        actual: Option<IrType>,
+        expected: Option<IrType>,
+    ) -> Result<bool, String> {
+        match (actual, expected) {
+            (Some(a), Some(b)) => self.types_match(a, b),
+            (None, None) => Ok(true),
+            _ => Ok(false),
+        }
+    }
+
+    fn expect(&self, actual: IrType, expected: IrType) -> Result<(), String> {
+        if self.types_match(actual, expected)? {
+            Ok(())
+        } else {
+            Err(format!("expected {expected:?}, got {actual:?}"))
+        }
     }
 
     fn symbol(&self, id: SymbolId) -> Result<&Symbol, String> {
@@ -49,7 +127,7 @@ impl ProgramIr {
             Operand::Bool(_) => Ok(IrType::Bool),
             Operand::Null => Ok(IrType::Ref),
             Operand::Symbol(id) => Ok(match self.symbol(id)?.kind {
-                SymbolKind::Function(_) => IrType::CodePtr,
+                SymbolKind::Function(id) => IrType::CodePtr(id),
                 SymbolKind::Data => IrType::Ptr,
                 SymbolKind::StaticRef => IrType::Ref,
             }),
@@ -57,6 +135,9 @@ impl ProgramIr {
     }
 
     fn verify_function(&self, f: &FunctionIr) -> Result<(), String> {
+        for &ty in &f.value_types {
+            self.validate_type(ty)?;
+        }
         let sig = self.function_signature(f.symbol)?;
         if f.entry.0 >= f.blocks.len() {
             return Err("invalid entry block".into());
@@ -69,7 +150,7 @@ impl ProgramIr {
             if !params.insert(id.0) {
                 return Err("duplicate parameter value".into());
             }
-            expect(value_type(f, id)?, ty)?;
+            self.expect(value_type(f, id)?, ty)?;
         }
         for (index, block) in f.blocks.iter().enumerate() {
             for successor in block.terminator.successors() {
@@ -83,11 +164,11 @@ impl ProgramIr {
             }
             match &block.terminator {
                 Terminator::Branch { condition, .. } => {
-                    expect(self.operand_type(f, *condition)?, IrType::Bool)?
+                    self.expect(self.operand_type(f, *condition)?, IrType::Bool)?
                 }
                 Terminator::Return(value) => {
                     let actual = value.map(|v| self.operand_type(f, v)).transpose()?;
-                    if actual != sig.result {
+                    if !self.optional_types_match(actual, sig.result)? {
                         return Err(format!("b{index}: return type mismatch"));
                     }
                 }
@@ -100,7 +181,7 @@ impl ProgramIr {
                         return Err("abort argument count mismatch".into());
                     }
                     for (&arg, &expected) in args.iter().zip(&sig.params) {
-                        expect(self.operand_type(f, arg)?, expected)?;
+                        self.expect(self.operand_type(f, arg)?, expected)?;
                     }
                 }
                 _ => {}
@@ -112,30 +193,30 @@ impl ProgramIr {
     fn verify_instruction(&self, f: &FunctionIr, inst: &InstructionKind) -> Result<(), String> {
         let ty = |operand| self.operand_type(f, operand);
         match inst {
-            InstructionKind::Copy { dst, src } => expect(ty(*src)?, value_type(f, *dst)?),
+            InstructionKind::Copy { dst, src } => self.expect(ty(*src)?, value_type(f, *dst)?),
             InstructionKind::Binary { dst, op, lhs, rhs } => {
                 let input = ty(*lhs)?;
-                expect(ty(*rhs)?, input)?;
+                self.expect(ty(*rhs)?, input)?;
                 let result = match op {
                     BinaryOp::Eq | BinaryOp::Ne => IrType::Bool,
                     BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                        expect(input, IrType::Int32)?;
+                        self.expect(input, IrType::Int32)?;
                         IrType::Bool
                     }
                     _ => {
-                        expect(input, IrType::Int32)?;
+                        self.expect(input, IrType::Int32)?;
                         IrType::Int32
                     }
                 };
-                expect(value_type(f, *dst)?, result)
+                self.expect(value_type(f, *dst)?, result)
             }
             InstructionKind::Unary { dst, op, src } => {
                 let expected = match op {
                     UnaryOp::Neg => IrType::Int32,
                     UnaryOp::Not => IrType::Bool,
                 };
-                expect(ty(*src)?, expected)?;
-                expect(value_type(f, *dst)?, expected)
+                self.expect(ty(*src)?, expected)?;
+                self.expect(value_type(f, *dst)?, expected)
             }
             InstructionKind::Load { dst, base, .. } => {
                 address(ty(*base)?)?;
@@ -157,9 +238,9 @@ impl ProgramIr {
                 if *expected == IrType::Ref && !static_ref {
                     return Err("reference stores require a write-barrier call".into());
                 }
-                expect(ty(*value)?, *expected)
+                self.expect(ty(*value)?, *expected)
             }
-            InstructionKind::NullCheck { receiver, .. } => expect(ty(*receiver)?, IrType::Ref),
+            InstructionKind::NullCheck { receiver, .. } => self.expect(ty(*receiver)?, IrType::Ref),
             InstructionKind::Call {
                 dst,
                 target,
@@ -170,20 +251,25 @@ impl ProgramIr {
                 let sig = self.signature(*signature)?;
                 match target {
                     CallTarget::Direct(id) => {
-                        if self.function_signature(*id)? != sig {
+                        if !self.types_match(
+                            self.operand_type(f, Operand::Symbol(*id))?,
+                            IrType::CodePtr(*signature),
+                        )? {
                             return Err("call signature mismatch".into());
                         }
                     }
-                    CallTarget::Indirect(pointer) => expect(ty(*pointer)?, IrType::CodePtr)?,
+                    CallTarget::Indirect(pointer) => {
+                        self.expect(ty(*pointer)?, IrType::CodePtr(*signature))?
+                    }
                 }
                 if args.len() != sig.params.len() {
                     return Err("call argument count mismatch".into());
                 }
                 for (&arg, &expected) in args.iter().zip(&sig.params) {
-                    expect(ty(arg)?, expected)?;
+                    self.expect(ty(arg)?, expected)?;
                 }
                 let result = dst.map(|id| value_type(f, id)).transpose()?;
-                if result != sig.result {
+                if !self.optional_types_match(result, sig.result)? {
                     return Err("call result type mismatch".into());
                 }
                 Ok(())
@@ -197,13 +283,6 @@ fn value_type(f: &FunctionIr, id: ValueId) -> Result<IrType, String> {
         .get(id.0)
         .copied()
         .ok_or_else(|| format!("unknown value v{}", id.0))
-}
-fn expect(actual: IrType, expected: IrType) -> Result<(), String> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(format!("expected {expected:?}, got {actual:?}"))
-    }
 }
 fn address(ty: IrType) -> Result<(), String> {
     if matches!(ty, IrType::Ref | IrType::Ptr) {
