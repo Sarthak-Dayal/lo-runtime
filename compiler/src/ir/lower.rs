@@ -93,10 +93,7 @@ struct Builder {
 
 impl Builder {
     fn value(&mut self, ty: IrType) -> VirtualRegId {
-        let id = VirtualRegId(self.function.register_types.len());
-        self.function.register_types.push(ty);
-        self.function.register_names.push(None);
-        id
+        self.function.new_register(ty, None)
     }
 
     fn block(&mut self) -> BlockId {
@@ -115,7 +112,12 @@ impl Builder {
         self.blocks[block.0].1 = Some(terminator);
     }
 
-    fn binding(&self, name: &str, binding: &BindingInfo, line: u32) -> Result<VirtualRegId, String> {
+    fn binding(
+        &self,
+        name: &str,
+        binding: &BindingInfo,
+        line: u32,
+    ) -> Result<VirtualRegId, String> {
         if !matches!(binding, BindingInfo::Local(_) | BindingInfo::Formal(_)) {
             return Err(format!(
                 "IR line {line}: field/prebound lowering is not implemented"
