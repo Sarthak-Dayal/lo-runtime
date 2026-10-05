@@ -3,7 +3,7 @@ use super::*;
 fn copy(value: i32) -> Instruction {
     Instruction {
         kind: InstructionKind::Copy {
-            dst: ValueId(0),
+            dst: VirtualRegId(0),
             src: Operand::Int(value),
         },
         line: 1,
@@ -24,8 +24,8 @@ fn example() -> ProgramIr {
         functions: vec![FunctionIr {
             symbol: SymbolId(0),
             params: vec![],
-            value_types: vec![IrType::Int32],
-            value_names: vec![Some("result".into())],
+            register_types: vec![IrType::Int32],
+            register_names: vec![Some("result".into())],
             root_slots: 0,
             entry: BlockId(0),
             blocks: vec![
@@ -47,7 +47,7 @@ fn example() -> ProgramIr {
                 },
                 BasicBlock {
                     instructions: vec![],
-                    terminator: Terminator::Return(Some(Operand::Value(ValueId(0)))),
+                    terminator: Terminator::Return(Some(Operand::Value(VirtualRegId(0)))),
                 },
             ],
         }],
@@ -70,8 +70,8 @@ fn rejects_uninitialized_merge_and_loop() {
     p.functions[0].blocks[2].terminator = Terminator::Jump(BlockId(0));
     p.functions[0].blocks[0].instructions.push(Instruction {
         kind: InstructionKind::Copy {
-            dst: ValueId(0),
-            src: Operand::Value(ValueId(0)),
+            dst: VirtualRegId(0),
+            src: Operand::Value(VirtualRegId(0)),
         },
         line: 1,
     });
@@ -84,9 +84,9 @@ fn accepts_initialized_loop() {
     p.functions[0].blocks[0].instructions.push(copy(0));
     p.functions[0].blocks[1].instructions = vec![Instruction {
         kind: InstructionKind::Binary {
-            dst: ValueId(0),
+            dst: VirtualRegId(0),
             op: BinaryOp::Add,
-            lhs: Operand::Value(ValueId(0)),
+            lhs: Operand::Value(VirtualRegId(0)),
             rhs: Operand::Int(1),
         },
         line: 2,
@@ -104,7 +104,7 @@ fn rejects_invalid_targets_ids_and_types() {
     let mut p = example();
     p.functions[0].blocks[0].terminator = Terminator::Jump(BlockId(99));
     assert!(p.validate().unwrap_err().contains("invalid target"));
-    p.functions[0].blocks[0].terminator = Terminator::Return(Some(Operand::Value(ValueId(99))));
+    p.functions[0].blocks[0].terminator = Terminator::Return(Some(Operand::Value(VirtualRegId(99))));
     assert!(p.validate().unwrap_err().contains("unknown value"));
     p.functions[0].blocks[0].terminator = Terminator::Return(Some(Operand::Bool(true)));
     assert!(p.validate().unwrap_err().contains("return type"));
@@ -122,21 +122,21 @@ fn indirect_calls_check_signature_and_initialization() {
         result: Some(IrType::Int32),
     });
     p.functions[0]
-        .value_types
+        .register_types
         .push(IrType::CodePtr(SignatureId(1)));
-    p.functions[0].value_names.push(None);
+    p.functions[0].register_names.push(None);
     p.functions[0].blocks[0].instructions = vec![
         Instruction {
             kind: InstructionKind::Copy {
-                dst: ValueId(1),
+                dst: VirtualRegId(1),
                 src: Operand::Symbol(SymbolId(1)),
             },
             line: 1,
         },
         Instruction {
             kind: InstructionKind::Call {
-                dst: Some(ValueId(0)),
-                target: CallTarget::Indirect(Operand::Value(ValueId(1))),
+                dst: Some(VirtualRegId(0)),
+                target: CallTarget::Indirect(Operand::Value(VirtualRegId(1))),
 
                 args: vec![Operand::Null],
             },
@@ -188,13 +188,13 @@ fn static_objects_are_references_not_raw_data() {
         name: "LO_EMPTY_STRING".into(),
         kind: SymbolKind::StaticRef,
     });
-    p.functions[0].value_types.push(IrType::Ref);
-    p.functions[0].value_names.push(None);
-    p.functions[0].params.push(ValueId(1));
+    p.functions[0].register_types.push(IrType::Ref);
+    p.functions[0].register_names.push(None);
+    p.functions[0].params.push(VirtualRegId(1));
     p.signatures[0].params.push(IrType::Ref);
     p.functions[0].blocks[0].instructions.push(Instruction {
         kind: InstructionKind::Store {
-            base: Operand::Value(ValueId(1)),
+            base: Operand::Value(VirtualRegId(1)),
             offset: 0,
             value: Operand::Symbol(SymbolId(1)),
             ty: IrType::Ref,
@@ -250,7 +250,7 @@ fn abort_is_a_checked_terminal_call() {
         .dump()
         .contains("abort @lo_abort_null_receiver(@method_name, 4)"));
     if let Terminator::Abort { args, .. } = &mut p.functions[0].blocks[0].terminator {
-        args[1] = Operand::Value(ValueId(0));
+        args[1] = Operand::Value(VirtualRegId(0));
     }
     assert!(p.validate().unwrap_err().contains("used before assignment"));
     p.functions[0].blocks[0].instructions.push(copy(4));
@@ -276,21 +276,21 @@ fn checked_ir_must_be_unwrapped_before_editing() {
 fn indirect_example() -> ProgramIr {
     let mut p = example();
     p.functions[0]
-        .value_types
+        .register_types
         .push(IrType::CodePtr(SignatureId(0)));
-    p.functions[0].value_names.push(None);
+    p.functions[0].register_names.push(None);
     p.functions[0].blocks[0].instructions = vec![
         Instruction {
             kind: InstructionKind::Copy {
-                dst: ValueId(1),
+                dst: VirtualRegId(1),
                 src: Operand::Symbol(SymbolId(0)),
             },
             line: 1,
         },
         Instruction {
             kind: InstructionKind::Call {
-                dst: Some(ValueId(0)),
-                target: CallTarget::Indirect(Operand::Value(ValueId(1))),
+                dst: Some(VirtualRegId(0)),
+                target: CallTarget::Indirect(Operand::Value(VirtualRegId(1))),
                 args: vec![],
             },
             line: 2,
@@ -313,7 +313,7 @@ fn signatures_are_interned_and_calls_use_pointer_types() {
         params: vec![IrType::Ref],
         result: Some(IrType::Int32),
     });
-    p.functions[0].value_types[1] = IrType::CodePtr(other);
+    p.functions[0].register_types[1] = IrType::CodePtr(other);
     assert!(p.validate().unwrap_err().contains("line 1"));
 }
 
@@ -331,7 +331,7 @@ fn vtable_data_and_load_preserve_declared_signature() {
         items: vec![DataItem::Addr(SymbolId(0))],
     });
     p.functions[0].blocks[0].instructions[0].kind = InstructionKind::Load {
-        dst: ValueId(1),
+        dst: VirtualRegId(1),
         base: Operand::Symbol(SymbolId(1)),
         offset: 0,
     };
@@ -345,16 +345,16 @@ fn vtable_data_and_load_preserve_declared_signature() {
         params: vec![],
         result: Some(IrType::Bool),
     });
-    p.functions[0].value_types[1] = IrType::CodePtr(other);
+    p.functions[0].register_types[1] = IrType::CodePtr(other);
     assert!(p.validate().unwrap_err().contains("result type"));
 }
 
 #[test]
 fn invalid_and_nested_signatures_are_rejected() {
     let mut p = indirect_example();
-    p.functions[0].value_types[1] = IrType::CodePtr(SignatureId(99));
+    p.functions[0].register_types[1] = IrType::CodePtr(SignatureId(99));
     assert!(p.validate().unwrap_err().contains("unknown signature"));
-    p.functions[0].value_types[1] = IrType::CodePtr(SignatureId(0));
+    p.functions[0].register_types[1] = IrType::CodePtr(SignatureId(0));
     p.signatures.push(p.signatures[0].clone());
     assert!(p.validate().unwrap_err().contains("duplicate signature"));
     p.signatures[1].result = Some(IrType::CodePtr(SignatureId(1)));
@@ -367,10 +367,10 @@ fn root_instructions_check_slots_types_and_startup() {
     let mut p = example();
     p.functions[0].root_slots = 1;
     p.functions[0]
-        .value_types
+        .register_types
         .extend([IrType::Ref, IrType::Ptr]);
     p.functions[0]
-        .value_names
+        .register_names
         .extend([Some("object".into()), Some("root_address".into())]);
     p.functions[0].blocks[0].instructions = vec![
         Instruction {
@@ -382,14 +382,14 @@ fn root_instructions_check_slots_types_and_startup() {
         },
         Instruction {
             kind: InstructionKind::RootLoad {
-                dst: ValueId(1),
+                dst: VirtualRegId(1),
                 slot: 0,
             },
             line: 2,
         },
         Instruction {
             kind: InstructionKind::RootAddr {
-                dst: ValueId(2),
+                dst: VirtualRegId(2),
                 slot: 0,
             },
             line: 3,
@@ -409,10 +409,10 @@ fn root_instructions_check_slots_types_and_startup() {
     };
     assert!(p.validate().unwrap_err().contains("expected Ref"));
     p.functions[0].blocks[0].instructions.remove(0);
-    p.functions[0].value_types[1] = IrType::Int32;
+    p.functions[0].register_types[1] = IrType::Int32;
     assert!(p.validate().unwrap_err().contains("expected Ref"));
-    p.functions[0].value_types[1] = IrType::Ref;
-    p.functions[0].value_types[2] = IrType::Ref;
+    p.functions[0].register_types[1] = IrType::Ref;
+    p.functions[0].register_types[2] = IrType::Ref;
     assert!(p.validate().unwrap_err().contains("expected Ptr"));
 }
 
@@ -460,7 +460,7 @@ fn division_literals_require_special_case_lowering() {
             let mut p = example();
             p.functions[0].blocks[0].instructions.push(Instruction {
                 kind: InstructionKind::Binary {
-                    dst: ValueId(0),
+                    dst: VirtualRegId(0),
                     op,
                     lhs: Operand::Int(i32::MIN),
                     rhs: Operand::Int(divisor),
@@ -475,36 +475,47 @@ fn division_literals_require_special_case_lowering() {
 #[test]
 fn public_use_def_helpers_include_calls_and_terminators() {
     let call = InstructionKind::Call {
-        dst: Some(ValueId(0)),
-        target: CallTarget::Indirect(Operand::Value(ValueId(1))),
-        args: vec![Operand::Value(ValueId(2))],
+        dst: Some(VirtualRegId(0)),
+        target: CallTarget::Indirect(Operand::Value(VirtualRegId(1))),
+        args: vec![Operand::Value(VirtualRegId(2))],
     };
-    assert_eq!(call.destination(), Some(ValueId(0)));
-    assert_eq!(call.uses().len(), 2);
-    assert!(matches!(call.uses()[1], Operand::Value(ValueId(1))));
+    assert_eq!(call.destination(), Some(VirtualRegId(0)));
+    assert_eq!(call.operands().len(), 2);
+    assert!(matches!(call.operands()[1], Operand::Value(VirtualRegId(1))));
+    assert_eq!(call.used_registers(), vec![VirtualRegId(2), VirtualRegId(1)]);
     let abort = Terminator::Abort {
         target: SymbolId(0),
-        args: vec![Operand::Value(ValueId(2))],
+        args: vec![Operand::Value(VirtualRegId(2))],
     };
-    assert!(matches!(abort.uses()[0], Operand::Value(ValueId(2))));
-    assert!(Terminator::Jump(BlockId(0)).uses().is_empty());
+    assert!(matches!(abort.operands()[0], Operand::Value(VirtualRegId(2))));
+    assert_eq!(abort.used_registers(), vec![VirtualRegId(2)]);
+    assert!(InstructionKind::Copy {
+        dst: VirtualRegId(0),
+        src: Operand::Int(42),
+    }
+    .used_registers()
+    .is_empty());
+    assert!(Terminator::Return(Some(Operand::Int(42)))
+        .used_registers()
+        .is_empty());
+    assert!(Terminator::Jump(BlockId(0)).operands().is_empty());
     assert!(matches!(
-        Terminator::Return(Some(Operand::Value(ValueId(0)))).uses()[0],
-        Operand::Value(ValueId(0))
+        Terminator::Return(Some(Operand::Value(VirtualRegId(0)))).operands()[0],
+        Operand::Value(VirtualRegId(0))
     ));
     assert!(InstructionKind::RootLoad {
-        dst: ValueId(0),
+        dst: VirtualRegId(0),
         slot: 0
     }
-    .uses()
+    .operands()
     .is_empty());
     assert_eq!(
         InstructionKind::RootAddr {
-            dst: ValueId(0),
+            dst: VirtualRegId(0),
             slot: 0
         }
         .destination(),
-        Some(ValueId(0))
+        Some(VirtualRegId(0))
     );
 }
 
@@ -523,11 +534,11 @@ fn dump_uses_named_typed_calls_and_handles_invalid_ids() {
         name: "lo_class_6_circle".into(),
         kind: SymbolKind::Data,
     });
-    p.functions[0].value_types.push(IrType::Ref);
-    p.functions[0].value_names.push(None);
+    p.functions[0].register_types.push(IrType::Ref);
+    p.functions[0].register_names.push(None);
     p.functions[0].blocks[0].instructions.push(Instruction {
         kind: InstructionKind::Call {
-            dst: Some(ValueId(1)),
+            dst: Some(VirtualRegId(1)),
             target: CallTarget::Direct(SymbolId(1)),
             args: vec![Operand::Symbol(SymbolId(2))],
         },
@@ -565,26 +576,26 @@ fn null_check_is_a_branch_to_an_abort_block() {
         items: vec![DataItem::Bytes(b"draw".to_vec())],
     });
     p.signatures[0].params.push(IrType::Ref);
-    p.functions[0].params.push(ValueId(1));
+    p.functions[0].params.push(VirtualRegId(1));
     p.functions[0]
-        .value_types
+        .register_types
         .extend([IrType::Ref, IrType::Bool]);
     p.functions[0]
-        .value_names
+        .register_names
         .extend([Some("receiver".into()), None]);
     p.functions[0].blocks = vec![
         BasicBlock {
             instructions: vec![Instruction {
                 kind: InstructionKind::Binary {
-                    dst: ValueId(2),
+                    dst: VirtualRegId(2),
                     op: BinaryOp::Eq,
-                    lhs: Operand::Value(ValueId(1)),
+                    lhs: Operand::Value(VirtualRegId(1)),
                     rhs: Operand::Null,
                 },
                 line: 1,
             }],
             terminator: Terminator::Branch {
-                condition: Operand::Value(ValueId(2)),
+                condition: Operand::Value(VirtualRegId(2)),
                 then_block: BlockId(1),
                 else_block: BlockId(2),
             },
@@ -611,12 +622,12 @@ fn null_check_is_a_branch_to_an_abort_block() {
 #[test]
 fn names_are_unambiguous_and_malformed_ir_can_be_dumped() {
     let mut p = example();
-    p.functions[0].value_names[0] = Some("t1".into());
-    p.functions[0].value_types.push(IrType::Int32);
-    p.functions[0].value_names.push(None);
+    p.functions[0].register_names[0] = Some("t1".into());
+    p.functions[0].register_types.push(IrType::Int32);
+    p.functions[0].register_names.push(None);
     p.functions[0].blocks[0].instructions.push(Instruction {
         kind: InstructionKind::Copy {
-            dst: ValueId(1),
+            dst: VirtualRegId(1),
             src: Operand::Int(7),
         },
         line: 1,
@@ -624,8 +635,8 @@ fn names_are_unambiguous_and_malformed_ir_can_be_dumped() {
     p.validate().unwrap();
     assert!(p.dump().contains("t1.v0:Int32 = 1"));
     assert!(p.dump().contains("t1:Int32 = 7"));
-    p.functions[0].value_names.clear();
-    assert!(p.validate().unwrap_err().contains("value_names"));
+    p.functions[0].register_names.clear();
+    assert!(p.validate().unwrap_err().contains("register_names"));
     assert!(p.dump().contains("t0:Int32 = 1"));
     p.signatures.push(Signature {
         params: vec![],
@@ -642,12 +653,12 @@ fn names_are_unambiguous_and_malformed_ir_can_be_dumped() {
 fn root_stores_read_initialized_values() {
     let mut p = example();
     p.functions[0].root_slots = 1;
-    p.functions[0].value_types.push(IrType::Ref);
-    p.functions[0].value_names.push(None);
+    p.functions[0].register_types.push(IrType::Ref);
+    p.functions[0].register_names.push(None);
     p.functions[0].blocks[0].instructions.push(Instruction {
         kind: InstructionKind::RootStore {
             slot: 0,
-            value: Operand::Value(ValueId(1)),
+            value: Operand::Value(VirtualRegId(1)),
         },
         line: 1,
     });
@@ -656,7 +667,7 @@ fn root_stores_read_initialized_values() {
         0,
         Instruction {
             kind: InstructionKind::Copy {
-                dst: ValueId(1),
+                dst: VirtualRegId(1),
                 src: Operand::Null,
             },
             line: 1,

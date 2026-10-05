@@ -152,10 +152,10 @@ struct FunctionDump<'a> {
 }
 
 impl FunctionDump<'_> {
-    fn value(&self, id: ValueId) -> String {
+    fn value(&self, id: VirtualRegId) -> String {
         match self
             .function
-            .value_names
+            .register_names
             .get(id.0)
             .and_then(|name| name.as_ref())
         {
@@ -165,7 +165,7 @@ impl FunctionDump<'_> {
                     .is_some_and(|suffix| suffix.parse::<usize>().is_ok())
                     || self
                         .function
-                        .value_names
+                        .register_names
                         .iter()
                         .filter(|other| other.as_ref() == Some(name))
                         .count()
@@ -180,10 +180,10 @@ impl FunctionDump<'_> {
         }
     }
 
-    fn typed_value(&self, id: ValueId) -> String {
+    fn typed_value(&self, id: VirtualRegId) -> String {
         let ty = self
             .function
-            .value_types
+            .register_types
             .get(id.0)
             .map(|ty| self.program.type_text(*ty))
             .unwrap_or_else(|| "<invalid type>".into());

@@ -4,15 +4,22 @@ mod verify;
 #[cfg(test)]
 mod tests;
 
+// IDs used to index into tables for registers, blocks, symbols, and signatures
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ValueId(pub usize);
+pub struct VirtualRegId(pub usize);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockId(pub usize);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SymbolId(pub usize);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SignatureId(pub usize);
 
+// Types used in the IR and in the LO programs
+// Ref is a collectible heap object or static reference (like LO_EMPTY_STRING), 
+// Ptr is a raw pointer, CodePtr is a function pointer
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrType {
     Int32,
@@ -41,15 +48,6 @@ pub enum SymbolKind {
     StaticRef,
 }
 
-pub struct ProgramIr {
-    pub symbols: Vec<Symbol>,
-    pub signatures: Vec<Signature>,
-    pub functions: Vec<FunctionIr>,
-    pub data: Vec<DataDef>,
-    // Explicitly identifies the function allowed to expose root-slot addresses.
-    pub startup: Option<SymbolId>,
-}
-
 pub struct DataDef {
     pub symbol: SymbolId,
     pub section: Section,
@@ -64,37 +62,46 @@ pub enum Section {
 
 pub enum DataItem {
     U32(u32),
-    // A relocation; the target determines address width.
+    // A relocation; the target determines address width
     Addr(SymbolId),
+    // For static strings and other raw data
     Bytes(Vec<u8>),
     Zero(u32),
-}
-
-impl ProgramIr {
-    pub fn intern_signature(&mut self, signature: Signature) -> SignatureId {
-        if let Some(id) = self
-            .signatures
-            .iter()
-            .position(|existing| *existing == signature)
-        {
-            return SignatureId(id);
-        }
-        let id = SignatureId(self.signatures.len());
-        self.signatures.push(signature);
-        id
-    }
 }
 
 pub struct CheckedIr {
     program: ProgramIr,
 }
 
+pub struct ProgramIr {
+    pub symbols: Vec<Symbol>,
+    pub signatures: Vec<Signature>,
+    pub functions: Vec<FunctionIr>,
+    pub data: Vec<DataDef>,
+    // Explicitly identifies the function allowed to expose root-slot addresses.
+    pub startup: Option<SymbolId>,
+}
+
+impl ProgramIr {
+    pub fn intern_signature(&mut self, signature: Signature) -> SignatureId {
+        let existing_id = self.signatures.iter().position(|existing| existing == &signature);
+
+        if let Some(index) = existing_id {
+            return SignatureId(index);
+        }
+
+        let id = SignatureId(self.signatures.len());
+        self.signatures.push(signature);
+        id
+    }
+}
+
 pub struct FunctionIr {
     pub symbol: SymbolId,
-    pub params: Vec<ValueId>,
+    pub params: Vec<VirtualRegId>,
     // Function-local IDs index these tables. Values are mutable, not SSA.
-    pub value_types: Vec<IrType>,
-    pub value_names: Vec<Option<String>>,
+    pub register_types: Vec<IrType>,
+    pub register_names: Vec<Option<String>>,
     // Frame construction initializes these slots to null.
     pub root_slots: u32,
     pub blocks: Vec<BasicBlock>,
@@ -111,35 +118,26 @@ pub struct Instruction {
     pub line: u32,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum Operand {
-    Value(ValueId),
-    Int(i32),
-    Bool(bool),
-    Null,
-    Symbol(SymbolId),
-}
-
 pub enum InstructionKind {
     Copy {
-        dst: ValueId,
+        dst: VirtualRegId,
         src: Operand,
     },
     Binary {
-        dst: ValueId,
+        dst: VirtualRegId,
         op: BinaryOp,
         lhs: Operand,
         rhs: Operand,
     },
     Unary {
-        dst: ValueId,
+        dst: VirtualRegId,
         op: UnaryOp,
         src: Operand,
     },
     // Load width comes from dst's type; offsets come from target layout.
     // Code-pointer loads trust layout to supply the declared signature.
     Load {
-        dst: ValueId,
+        dst: VirtualRegId,
         base: Operand,
         offset: i32,
     },
@@ -154,19 +152,28 @@ pub enum InstructionKind {
         value: Operand,
     },
     RootLoad {
-        dst: ValueId,
+        dst: VirtualRegId,
         slot: u32,
     },
     RootAddr {
-        dst: ValueId,
+        dst: VirtualRegId,
         slot: u32,
     },
     // Every call is conservatively treated as a GC safepoint.
     Call {
-        dst: Option<ValueId>,
+        dst: Option<VirtualRegId>,
         target: CallTarget,
         args: Vec<Operand>,
     },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Operand {
+    Value(VirtualRegId),
+    Int(i32),
+    Bool(bool),
+    Null,
+    Symbol(SymbolId),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -181,11 +188,13 @@ pub enum BinaryOp {
     Lt,
     Gt,
 }
+
 #[derive(Clone, Copy, Debug)]
 pub enum UnaryOp {
     Neg,
     Not,
 }
+
 #[derive(Clone, Copy, Debug)]
 pub enum CallTarget {
     Direct(SymbolId),
@@ -208,13 +217,23 @@ pub enum Terminator {
 }
 
 impl Terminator {
-    pub fn uses(&self) -> Vec<Operand> {
+    pub fn operands(&self) -> Vec<Operand> {
         match self {
             Self::Branch { condition, .. } => vec![*condition],
             Self::Return(Some(value)) => vec![*value],
             Self::Abort { args, .. } => args.clone(),
             Self::Jump(_) | Self::Return(None) => vec![],
         }
+    }
+
+    pub fn used_registers(&self) -> Vec<VirtualRegId> {
+        self.operands()
+            .into_iter()
+            .filter_map(|operand| match operand {
+                Operand::Value(reg) => Some(reg),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn successors(&self) -> Vec<BlockId> {
@@ -231,7 +250,7 @@ impl Terminator {
 }
 
 impl InstructionKind {
-    pub fn destination(&self) -> Option<ValueId> {
+    pub fn destination(&self) -> Option<VirtualRegId> {
         match self {
             Self::Copy { dst, .. }
             | Self::Binary { dst, .. }
@@ -240,11 +259,21 @@ impl InstructionKind {
             | Self::RootLoad { dst, .. }
             | Self::RootAddr { dst, .. } => Some(*dst),
             Self::Call { dst, .. } => *dst,
-            _ => None,
+            Self::Store { .. } | Self::RootStore { .. } => None,
         }
     }
 
-    pub fn uses(&self) -> Vec<Operand> {
+    pub fn used_registers(&self) -> Vec<VirtualRegId> {
+        self.operands()
+            .into_iter()
+            .filter_map(|operand| match operand {
+                Operand::Value(reg) => Some(reg),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn operands(&self) -> Vec<Operand> {
         match self {
             Self::Copy { src, .. } | Self::Unary { src, .. } => vec![*src],
             Self::Binary { lhs, rhs, .. } => vec![*lhs, *rhs],
