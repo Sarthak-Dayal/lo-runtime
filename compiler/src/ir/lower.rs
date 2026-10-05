@@ -19,9 +19,9 @@ pub fn lower_method(symbol: SymbolId, method: &TypedMethodDecl) -> Result<Functi
     let mut builder = Builder {
         function: FunctionIr {
             symbol,
-            params: vec![ValueId(0)],
-            value_types: vec![IrType::Ref],
-            value_names: vec![Some("this".into())],
+            params: vec![VirtualRegId(0)],
+            register_types: vec![IrType::Ref],
+            register_names: vec![Some("this".into())],
             root_slots: 0,
             blocks: vec![],
             entry: BlockId(0),
@@ -34,13 +34,13 @@ pub fn lower_method(symbol: SymbolId, method: &TypedMethodDecl) -> Result<Functi
     builder.current = Some(builder.block());
     for (name, ty) in &method.formals {
         let id = builder.value(value_type(ty)?);
-        builder.function.value_names[id.0] = Some(name.clone());
+        builder.function.register_names[id.0] = Some(name.clone());
         builder.function.params.push(id);
         builder.bindings.insert(name.clone(), id);
     }
     for (name, ty) in locals {
         let id = builder.value(value_type(ty)?);
-        builder.function.value_names[id.0] = Some(name.clone());
+        builder.function.register_names[id.0] = Some(name.clone());
         builder.bindings.insert(name.clone(), id);
         let src = match ty {
             Type::Int => Operand::Int(0),
@@ -87,15 +87,15 @@ struct Builder {
     function: FunctionIr,
     blocks: Vec<(Vec<Instruction>, Option<Terminator>)>,
     current: Option<BlockId>,
-    bindings: HashMap<String, ValueId>,
+    bindings: HashMap<String, VirtualRegId>,
     loop_exits: Vec<BlockId>,
 }
 
 impl Builder {
-    fn value(&mut self, ty: IrType) -> ValueId {
-        let id = ValueId(self.function.value_types.len());
-        self.function.value_types.push(ty);
-        self.function.value_names.push(None);
+    fn value(&mut self, ty: IrType) -> VirtualRegId {
+        let id = VirtualRegId(self.function.register_types.len());
+        self.function.register_types.push(ty);
+        self.function.register_names.push(None);
         id
     }
 
@@ -115,7 +115,7 @@ impl Builder {
         self.blocks[block.0].1 = Some(terminator);
     }
 
-    fn binding(&self, name: &str, binding: &BindingInfo, line: u32) -> Result<ValueId, String> {
+    fn binding(&self, name: &str, binding: &BindingInfo, line: u32) -> Result<VirtualRegId, String> {
         if !matches!(binding, BindingInfo::Local(_) | BindingInfo::Formal(_)) {
             return Err(format!(
                 "IR line {line}: field/prebound lowering is not implemented"
@@ -326,7 +326,7 @@ impl Builder {
         })
     }
 
-    fn division(&mut self, dst: ValueId, op: BinaryOp, lhs: Operand, rhs: Operand, line: u32) {
+    fn division(&mut self, dst: VirtualRegId, op: BinaryOp, lhs: Operand, rhs: Operand, line: u32) {
         // Both operands have already been evaluated, even for a special divisor.
         if let Operand::Int(divisor) = rhs {
             match divisor {
@@ -388,7 +388,7 @@ impl Builder {
 
     fn division_special(
         &mut self,
-        dst: ValueId,
+        dst: VirtualRegId,
         op: BinaryOp,
         lhs: Operand,
         negative_one: bool,

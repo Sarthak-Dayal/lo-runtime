@@ -38,7 +38,7 @@ fn execute(function: &FunctionIr, args: &[i32]) -> Option<i32> {
 
 fn execute_with_trace(function: &FunctionIr, args: &[i32]) -> (Option<i32>, usize) {
     let mut divisions = 0;
-    let mut values = vec![0; function.value_types.len()];
+    let mut values = vec![0; function.register_types.len()];
     for (&id, &value) in function.params.iter().zip(args) {
         values[id.0] = value;
     }

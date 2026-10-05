@@ -124,10 +124,10 @@ impl ProgramIr {
     }
 
     fn verify_function(&self, f: &FunctionIr) -> Result<(), String> {
-        if f.value_names.len() != f.value_types.len() {
-            return Err("value_names must match value_types length".into());
+        if f.register_names.len() != f.register_types.len() {
+            return Err("register_names must match register_types length".into());
         }
-        for &ty in &f.value_types {
+        for &ty in &f.register_types {
             self.validate_type(ty)?;
         }
         let sig = self.function_signature(f.symbol)?;
@@ -284,8 +284,8 @@ fn root_slot(f: &FunctionIr, slot: u32) -> Result<(), String> {
     }
 }
 
-fn value_type(f: &FunctionIr, id: ValueId) -> Result<IrType, String> {
-    f.value_types
+fn value_type(f: &FunctionIr, id: VirtualRegId) -> Result<IrType, String> {
+    f.register_types
         .get(id.0)
         .copied()
         .ok_or_else(|| format!("unknown value v{}", id.0))
@@ -314,7 +314,7 @@ fn verify_assignment(f: &FunctionIr) -> Result<(), String> {
             pending.push(next);
         }
     }
-    let mut initial = vec![false; f.value_types.len()];
+    let mut initial = vec![false; f.register_types.len()];
     for id in &f.params {
         initial[id.0] = true;
     }
@@ -364,14 +364,14 @@ fn verify_assignment(f: &FunctionIr) -> Result<(), String> {
             Ok(())
         };
         for inst in &block.instructions {
-            for operand in inst.kind.uses() {
+            for operand in inst.kind.operands() {
                 check(operand, &assigned)?;
             }
             if let Some(dst) = inst.kind.destination() {
                 assigned[dst.0] = true;
             }
         }
-        for operand in block.terminator.uses() {
+        for operand in block.terminator.operands() {
             check(operand, &assigned)?;
         }
     }
