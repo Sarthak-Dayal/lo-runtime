@@ -8,8 +8,6 @@ mod layout;
 mod lexer;
 mod parser;
 mod symbols;
-#[cfg(test)]
-mod test_support;
 mod token;
 mod type_checker;
 mod wasm;
