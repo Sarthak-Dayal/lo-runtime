@@ -1,5 +1,6 @@
 mod dump;
 pub mod lower;
+pub mod register_allocator;
 mod verify;
 
 #[cfg(test)]
