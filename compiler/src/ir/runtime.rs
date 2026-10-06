@@ -1,13 +1,8 @@
-//! The runtime library's entry points with IR types (`runtime-abi.md` §3).
-//! They are declared but never defined here; the linker resolves them.
-
 use crate::symbols;
 
 use super::*;
 use IrType::{Bool, Int32, Ptr, Ref};
 
-/// Descriptors and byte literals are raw `Ptr`s; ABI `u32` lengths and offsets
-/// are `Int32`. Every print takes a trailing `to_stderr` selector.
 pub const FUNCTIONS: &[RuntimeFunction] = &[
     RuntimeFunction::new("lo_runtime_init", &[], None),
     RuntimeFunction::new("lo_alloc", &[Ptr], Some(Ref)),

@@ -1,8 +1,4 @@
-//! Static data: each class's descriptor, vtable, pointer-offset array and
-//! name, plus the `in`/`out`/`err` binding words. Descriptor fields are placed
-//! at `layout` offsets, the same numbers lowering reads them from.
-
-use crate::layout::{class_layout, Target};
+use crate::layout::{class_layout, Target, U32_SIZE};
 use crate::symbols;
 use crate::type_checker::ClassTable;
 
@@ -56,7 +52,7 @@ pub fn define_static_data(
     for class in table.class_names() {
         define_class(program, table, target, class)?;
     }
-    // Each holds the address of an entry-function root slot, written at startup.
+    // Prebound bindings.
     for name in symbols::PREBOUND {
         let symbol = program.declare_symbol(&symbols::binding(name), SymbolKind::Data)?;
         program.data.push(DataDef {
@@ -111,7 +107,7 @@ fn define_class(
         DataItem::Addr(read_only(
             program,
             &symbols::pointer_offsets(class),
-            4,
+            U32_SIZE,
             items,
         )?)
     };
@@ -121,7 +117,6 @@ fn define_class(
         DataItem::U32(offsets.len() as u32),
     );
 
-    // An inherited method keeps the ancestor's code in its slot.
     let mut entries = Vec::with_capacity(info.vtable.len());
     for method in &info.vtable {
         let entry = &info.effective_methods[method];
@@ -173,7 +168,7 @@ fn null(target: Target) -> DataItem {
 
 fn width(target: Target, item: &DataItem) -> u32 {
     match item {
-        DataItem::U32(_) => 4,
+        DataItem::U32(_) => U32_SIZE,
         DataItem::Addr(_) => target.ptr,
         DataItem::Bytes(bytes) => bytes.len() as u32,
         DataItem::Zero(size) => *size,
@@ -220,7 +215,6 @@ mod tests {
         program.symbols[id.0].name.clone()
     }
 
-    /// The item starting at byte `offset` of a struct.
     fn at(def: &DataDef, offset: u32) -> &DataItem {
         let mut position = 0;
         for item in &def.items {

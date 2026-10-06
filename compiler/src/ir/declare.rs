@@ -1,6 +1,3 @@
-//! Declaring symbols. Declaring an existing name returns its existing ID, so
-//! lowering and the static data share one symbol per name.
-
 use crate::ast::Type;
 use crate::symbols;
 use crate::type_checker::{ConstructorSig, MethodSig};
@@ -79,7 +76,6 @@ impl ProgramIr {
     }
 }
 
-/// The IR type of an LO value; `None` for `void`.
 pub fn ir_type(ty: &Type) -> Option<IrType> {
     match ty {
         Type::Int => Some(IrType::Int32),

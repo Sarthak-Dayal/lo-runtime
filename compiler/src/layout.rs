@@ -1,24 +1,15 @@
-//! Byte layout of every runtime-visible structure (`runtime-abi.md` §2–3.3).
-//!
-//! Offsets follow C struct rules, matching the runtime's `#[repr(C)]` types in
-//! `rust/src/object.rs`, and derive from the pointer width alone.
-
 use crate::ast::Type;
 use crate::type_checker::ClassTable;
 
 pub const NATIVE: Target = Target { ptr: 8 };
 
-const U32_SIZE: u32 = 4;
-
-/// The preamble class whose objects carry a stdout/stderr selector.
-const OUTPUT_CLASS: &str = "Output";
+pub const U32_SIZE: u32 = std::mem::size_of::<u32>() as u32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Target {
     pub ptr: u32,
 }
 
-/// Offsets within a `ClassDescriptor`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DescriptorLayout {
     pub name: u32,
@@ -32,7 +23,6 @@ pub struct DescriptorLayout {
     pub size: u32,
 }
 
-/// Offsets within a `ShadowFrame`, whose roots array is inline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameLayout {
     pub parent: u32,
@@ -51,31 +41,22 @@ pub struct FieldSlot {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClassLayout {
-    /// Inherited fields first, so they keep their parent's offsets.
     pub fields: Vec<FieldSlot>,
-    /// Output's hidden `to_stderr` slot, after its declared fields.
     pub output_destination: Option<u32>,
     pub instance_size: u32,
-    /// String- and class-typed fields, for the collector.
     pub pointer_offsets: Vec<u32>,
-    /// String fields, which must be set to `LO_EMPTY_STRING` after `lo_alloc`.
     pub string_offsets: Vec<u32>,
 }
 
 impl Target {
     /// `Object { class_descriptor: ptr, gc_bits: u32, flags: u32 }`.
     pub fn header_size(self) -> u32 {
-        c_struct([self.ptr, U32_SIZE, U32_SIZE]).1
+        let (_, size) = c_struct([self.ptr, U32_SIZE, U32_SIZE]);
+        size
     }
 
-    /// Every field gets a pointer-sized slot, so pointer fields are always aligned.
     pub fn field_offset(self, index: usize) -> u32 {
         self.header_size() + self.ptr * index as u32
-    }
-
-    /// `StringObject { header, length: u32, data }`.
-    pub fn string_length_offset(self) -> u32 {
-        self.header_size()
     }
 
     pub fn descriptor(self) -> DescriptorLayout {
@@ -152,7 +133,7 @@ pub fn class_layout(target: Target, table: &ClassTable, class: &str) -> ClassLay
     };
     let pointer_offsets = offsets_where(|ty| matches!(ty, Type::String | Type::Class(_)));
     let string_offsets = offsets_where(|ty| *ty == Type::String);
-    let output_destination = (class == OUTPUT_CLASS).then(|| target.field_offset(fields.len()));
+    let output_destination = (class == "Output").then(|| target.field_offset(fields.len()));
     let slots = fields.len() + usize::from(output_destination.is_some());
     ClassLayout {
         instance_size: target.field_offset(slots),
@@ -167,7 +148,7 @@ fn align_up(offset: u32, align: u32) -> u32 {
     offset.div_ceil(align) * align
 }
 
-/// Offsets and total size of a C struct whose fields are aligned to their own size.
+/// C struct field offsets and total size.
 fn c_struct<const N: usize>(sizes: [u32; N]) -> ([u32; N], u32) {
     let mut offsets = [0; N];
     let mut end = 0;
@@ -183,7 +164,6 @@ fn c_struct<const N: usize>(sizes: [u32; N]) -> ([u32; N], u32) {
 pub(crate) mod tests {
     use super::*;
 
-    /// Runs the front end on `source` and returns its class table.
     pub(crate) fn check(source: &str) -> ClassTable {
         let tokens = crate::lexer::tokenize(source).expect("lex");
         let program = crate::parser::parse_program(&tokens)

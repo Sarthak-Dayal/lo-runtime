@@ -76,8 +76,6 @@ impl ClassTable {
         self.classes.contains_key(name)
     }
 
-    /// Every class, preamble included, in declaration order. Codegen walks this
-    /// so its output is deterministic (the map itself has no order).
     pub fn class_names(&self) -> &[String] {
         &self.order
     }

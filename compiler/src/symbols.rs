@@ -1,13 +1,4 @@
-//! Assembly-level names for everything codegen defines or references.
-//!
-//! Names are length-prefixed so derived names cannot collide (class `A_vtable`
-//! vs. class `A`'s vtable). The descriptor, method and constructor names match
-//! `wasm/mod.rs`.
-
-/// The pre-bound names, in the order their root slots are assigned.
 pub const PREBOUND: [&str; 3] = ["in", "out", "err"];
-
-/// Runtime exports (`runtime-abi.md` §2.3).
 pub const EMPTY_STRING: &str = "LO_EMPTY_STRING";
 pub const STRING_CLASS: &str = "LO_STRING_CLASS";
 
