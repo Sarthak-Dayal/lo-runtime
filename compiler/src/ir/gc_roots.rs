@@ -21,8 +21,10 @@ pub fn insert_gc_roots(ir: CheckedIr) -> ProgramIr {
 fn insert_function_roots(function: &mut FunctionIr) {
     let saved_at = refs_live_across_calls(function);
     let first_slot = function.root_slots;
+    let mut calls: Vec<_> = saved_at.iter().collect();
+    calls.sort_by_key(|(position, _)| **position);
     let mut slots: HashMap<VirtualRegId, u32> = HashMap::new();
-    for saved in saved_at.values() {
+    for (_, saved) in calls {
         for &register in saved {
             let next = first_slot + slots.len() as u32;
             slots.entry(register).or_insert(next);
