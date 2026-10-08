@@ -1,9 +1,5 @@
-//! Shadow-stack roots around calls (`runtime-abi.md` §3.3). The collector moves
-//! objects and only sees root slots, so every `Ref` live across a call is saved
-//! to a slot before it and reloaded after it. Every other slot this pass owns
-//! is nulled before the call, so the collector never follows a dead pointer.
-//! Slots below the function's existing `root_slots` (the startup function's
-//! `in`/`out`/`err`) belong to lowering and are left alone.
+//! Roots each `Ref` live across a call: save before, reload after, null the
+//! pass's other slots (`runtime-abi.md` §3.3). Slots below `root_slots` are lowering's.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -68,9 +64,7 @@ fn insert_function_roots(function: &mut FunctionIr) {
     function.root_slots = owned.end;
 }
 
-/// For each call, keyed by (block, instruction index): the `Ref` registers live
-/// after it, excluding the call's own result, in register order. Iterating the
-/// map visits calls in program order.
+/// `Ref`s live after each call, excluding its result. Keys sort in program order.
 fn refs_live_across_calls(function: &FunctionIr) -> BTreeMap<(usize, usize), Vec<VirtualRegId>> {
     let liveness = compute_function_liveness(function);
     let mut saved_at = BTreeMap::new();
@@ -102,9 +96,9 @@ fn refs_live_across_calls(function: &FunctionIr) -> BTreeMap<(usize, usize), Vec
 mod tests {
     use super::*;
 
-    const MAKE: SymbolId = SymbolId(0); // () -> Ref
-    const USE: SymbolId = SymbolId(1); // (Ref) -> Int32
-    const TICK: SymbolId = SymbolId(2); // () -> Int32
+    const MAKE: SymbolId = SymbolId(0);
+    const USE: SymbolId = SymbolId(1);
+    const TICK: SymbolId = SymbolId(2);
     const MAIN: SymbolId = SymbolId(3);
 
     fn program(function: FunctionIr, main_signature: Signature) -> CheckedIr {
@@ -155,7 +149,6 @@ mod tests {
 
     #[test]
     fn ref_live_across_a_call_is_saved_and_reloaded() {
-        // t1 = make(); t2 = use(t1); ret t1
         let function = FunctionIr {
             symbol: MAIN,
             params: vec![VirtualRegId(0)],
@@ -181,7 +174,6 @@ mod tests {
         assert_eq!(
             rendered(&out),
             [
-                // make(): t1 is its result and `this` is dead, so nothing is saved.
                 format!(
                     "{:?}",
                     InstructionKind::RootStore {
@@ -206,9 +198,6 @@ mod tests {
 
     #[test]
     fn loop_carried_ref_is_saved_and_lowering_slots_are_untouched() {
-        // .L0: t2 = make(); br .L1
-        // .L1: t3 = tick(); cbr t1, .L1, .L2
-        // .L2: ret t2
         let function = FunctionIr {
             symbol: MAIN,
             params: vec![VirtualRegId(0), VirtualRegId(1)],
