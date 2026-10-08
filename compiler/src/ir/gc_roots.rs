@@ -21,10 +21,8 @@ pub fn insert_gc_roots(ir: CheckedIr) -> ProgramIr {
 fn insert_function_roots(function: &mut FunctionIr) {
     let saved_at = refs_live_across_calls(function);
     let first_slot = function.root_slots;
-    let mut calls: Vec<_> = saved_at.iter().collect();
-    calls.sort_by_key(|(position, _)| **position);
     let mut slots: HashMap<VirtualRegId, u32> = HashMap::new();
-    for (_, saved) in calls {
+    for saved in saved_at.iter().flatten().flatten() {
         for &register in saved {
             let next = first_slot + slots.len() as u32;
             slots.entry(register).or_insert(next);
@@ -32,13 +30,13 @@ fn insert_function_roots(function: &mut FunctionIr) {
     }
     let owned = first_slot..first_slot + slots.len() as u32;
 
-    for (block_index, block) in function.blocks.iter_mut().enumerate() {
+    for (block, block_saved) in function.blocks.iter_mut().zip(&saved_at) {
         let mut instructions = Vec::with_capacity(block.instructions.len());
-        for (index, instruction) in std::mem::take(&mut block.instructions)
+        for (instruction, saved) in std::mem::take(&mut block.instructions)
             .into_iter()
-            .enumerate()
+            .zip(block_saved)
         {
-            let Some(saved) = saved_at.get(&(block_index, index)) else {
+            let Some(saved) = saved else {
                 instructions.push(instruction);
                 continue;
             };
@@ -70,12 +68,13 @@ fn insert_function_roots(function: &mut FunctionIr) {
     function.root_slots = owned.end;
 }
 
-/// For each call, keyed by (block, instruction index): the `Ref` registers live
-/// after it, excluding the call's own result, in register order.
-fn refs_live_across_calls(function: &FunctionIr) -> HashMap<(usize, usize), Vec<VirtualRegId>> {
+/// `saved_at[block][instruction]` is `Some` for each call: the `Ref` registers
+/// live after it, excluding the call's own result, in register order.
+fn refs_live_across_calls(function: &FunctionIr) -> Vec<Vec<Option<Vec<VirtualRegId>>>> {
     let liveness = compute_function_liveness(function);
-    let mut saved_at = HashMap::new();
+    let mut saved_at = Vec::with_capacity(function.blocks.len());
     for (block_index, block) in function.blocks.iter().enumerate() {
+        let mut block_saved = vec![None; block.instructions.len()];
         let mut live = liveness.live_out[block_index].clone();
         live.extend(block.terminator.used_registers());
         for (index, instruction) in block.instructions.iter().enumerate().rev() {
@@ -88,13 +87,14 @@ fn refs_live_across_calls(function: &FunctionIr) -> HashMap<(usize, usize), Vec<
                     .filter(|register| function.register_types[register.0] == IrType::Ref)
                     .collect();
                 saved.sort_by_key(|register| register.0);
-                saved_at.insert((block_index, index), saved);
+                block_saved[index] = Some(saved);
             }
             if let Some(destination) = destination {
                 live.remove(&destination);
             }
             live.extend(instruction.kind.used_registers());
         }
+        saved_at.push(block_saved);
     }
     saved_at
 }
