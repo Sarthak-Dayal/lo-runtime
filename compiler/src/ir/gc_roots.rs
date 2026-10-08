@@ -5,7 +5,7 @@
 //! Slots below the function's existing `root_slots` (the startup function's
 //! `in`/`out`/`err`) belong to lowering and are left alone.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::register_allocator::compute_function_liveness;
 use super::*;
@@ -22,7 +22,7 @@ fn insert_function_roots(function: &mut FunctionIr) {
     let saved_at = refs_live_across_calls(function);
     let first_slot = function.root_slots;
     let mut slots: HashMap<VirtualRegId, u32> = HashMap::new();
-    for saved in saved_at.iter().flatten().flatten() {
+    for saved in saved_at.values() {
         for &register in saved {
             let next = first_slot + slots.len() as u32;
             slots.entry(register).or_insert(next);
@@ -30,13 +30,13 @@ fn insert_function_roots(function: &mut FunctionIr) {
     }
     let owned = first_slot..first_slot + slots.len() as u32;
 
-    for (block, block_saved) in function.blocks.iter_mut().zip(&saved_at) {
+    for (block_index, block) in function.blocks.iter_mut().enumerate() {
         let mut instructions = Vec::with_capacity(block.instructions.len());
-        for (instruction, saved) in std::mem::take(&mut block.instructions)
+        for (index, instruction) in std::mem::take(&mut block.instructions)
             .into_iter()
-            .zip(block_saved)
+            .enumerate()
         {
-            let Some(saved) = saved else {
+            let Some(saved) = saved_at.get(&(block_index, index)) else {
                 instructions.push(instruction);
                 continue;
             };
@@ -68,13 +68,13 @@ fn insert_function_roots(function: &mut FunctionIr) {
     function.root_slots = owned.end;
 }
 
-/// `saved_at[block][instruction]` is `Some` for each call: the `Ref` registers
-/// live after it, excluding the call's own result, in register order.
-fn refs_live_across_calls(function: &FunctionIr) -> Vec<Vec<Option<Vec<VirtualRegId>>>> {
+/// For each call, keyed by (block, instruction index): the `Ref` registers live
+/// after it, excluding the call's own result, in register order. Iterating the
+/// map visits calls in program order.
+fn refs_live_across_calls(function: &FunctionIr) -> BTreeMap<(usize, usize), Vec<VirtualRegId>> {
     let liveness = compute_function_liveness(function);
-    let mut saved_at = Vec::with_capacity(function.blocks.len());
+    let mut saved_at = BTreeMap::new();
     for (block_index, block) in function.blocks.iter().enumerate() {
-        let mut block_saved = vec![None; block.instructions.len()];
         let mut live = liveness.live_out[block_index].clone();
         live.extend(block.terminator.used_registers());
         for (index, instruction) in block.instructions.iter().enumerate().rev() {
@@ -87,14 +87,13 @@ fn refs_live_across_calls(function: &FunctionIr) -> Vec<Vec<Option<Vec<VirtualRe
                     .filter(|register| function.register_types[register.0] == IrType::Ref)
                     .collect();
                 saved.sort_by_key(|register| register.0);
-                block_saved[index] = Some(saved);
+                saved_at.insert((block_index, index), saved);
             }
             if let Some(destination) = destination {
                 live.remove(&destination);
             }
             live.extend(instruction.kind.used_registers());
         }
-        saved_at.push(block_saved);
     }
     saved_at
 }
