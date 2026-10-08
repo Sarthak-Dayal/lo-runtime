@@ -27,6 +27,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const exit_codes = @import("exit_codes.zig");
+
 const is_wasm = builtin.cpu.arch.isWasm();
 
 /// Host stderr-write import (`runtime-abi.md` §3.7): `host.write_stderr(ptr, len)`
@@ -64,5 +66,5 @@ pub export fn lo_abort_null_receiver(method_name: ?[*]const u8, method_name_len:
         "lo_abort_null_receiver: cannot dispatch {s}",
         .{name},
     ) catch "lo_abort_null_receiver: cannot dispatch";
-    runtimeAbort(msg, 102);
+    runtimeAbort(msg, exit_codes.EXIT_NULL_DISPATCH);
 }

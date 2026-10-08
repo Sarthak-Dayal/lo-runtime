@@ -14,6 +14,7 @@
 //! identical. (The Zig and C++ skeletons use their native libc / `<cstdio>`
 //! directly, where stdin *is* readily accessible.)
 
+use crate::exit_codes::{EXIT_EOF_BEFORE_INT, EXIT_INVALID_BOOL, EXIT_MALFORMED_INT};
 use crate::object::{string_data_offset, Object, StringObject};
 
 // ---------------------------------------------------------------------------
@@ -215,7 +216,7 @@ pub extern "C" fn lo_read_int() -> i32 {
         // present means input exists; failure to parse it is a malformed token
         // (exit 110), not EOF.
         if sys::peek_byte().is_none() {
-            crate::abort::runtime_abort("lo_read_int: end of input", 111);
+            crate::abort::runtime_abort("lo_read_int: end of input", EXIT_EOF_BEFORE_INT);
         }
         let mut token = String::new();
         if let Some(b) = sys::peek_byte() {
@@ -235,11 +236,11 @@ pub extern "C" fn lo_read_int() -> i32 {
             }
         }
         if !saw_digit {
-            crate::abort::runtime_abort("lo_read_int: malformed token", 110);
+            crate::abort::runtime_abort("lo_read_int: malformed token", EXIT_MALFORMED_INT);
         }
         match token.parse::<i32>() {
             Ok(n) => n,
-            Err(_) => crate::abort::runtime_abort("lo_read_int: malformed token", 110),
+            Err(_) => crate::abort::runtime_abort("lo_read_int: malformed token", EXIT_MALFORMED_INT),
         }
     }
     #[cfg(target_arch = "wasm32")]
@@ -266,7 +267,7 @@ pub extern "C" fn lo_read_bool() -> bool {
         match token.as_str() {
             "true" => true,
             "false" => false,
-            _ => crate::abort::runtime_abort("lo_read_bool: invalid token", 112),
+            _ => crate::abort::runtime_abort("lo_read_bool: invalid token", EXIT_INVALID_BOOL),
         }
     }
     #[cfg(target_arch = "wasm32")]

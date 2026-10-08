@@ -24,6 +24,7 @@ mod abort;
 mod alloc;
 mod cast;
 mod descriptors;
+mod exit_codes;
 mod gc;
 mod init;
 mod io;

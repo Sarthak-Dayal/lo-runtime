@@ -6,6 +6,11 @@ use crate::type_checker::{
     TypedClassDecl, TypedConstructor, TypedDelegation, TypedMethodBody, TypedMethodDecl,
 };
 
+use super::abi::{
+    CLASS_DESCRIPTOR_OFFSET, FRAME_PARENT_OFFSET, FRAME_ROOTS_OFFSET, FRAME_ROOT_COUNT_OFFSET,
+    OUTPUT_DESTINATION_OFFSET, ROOT_SLOT_SIZE, STACK_ALIGN, VTABLE_ADDRESS_OFFSET,
+    VTABLE_ENTRY_SIZE,
+};
 use super::module::Module;
 use super::{ctor_symbol, is_reference, method_symbol, signature};
 
@@ -210,7 +215,7 @@ impl<'m, 'a> Function<'m, 'a> {
             // formals, and aliases of either pre-bound object.
             let destination = self.temporary(&Type::Int);
             self.get(0);
-            self.ins("i32.load 12");
+            self.ins(format!("i32.load {OUTPUT_DESTINATION_OFFSET}"));
             self.set(destination);
             args.push(destination);
         }
@@ -225,7 +230,7 @@ impl<'m, 'a> Function<'m, 'a> {
         for (slot, name) in ["in", "out", "err"].iter().enumerate() {
             f.ins(format!("i32.const lo_binding_{name}"));
             f.get(f.frame);
-            f.ins(format!("i32.const {}", 8 + 4 * slot));
+            f.ins(format!("i32.const {}", FRAME_ROOTS_OFFSET + ROOT_SLOT_SIZE * slot));
             f.ins("i32.add");
             f.ins("i32.store 0");
             let class = if *name == "in" { "Input" } else { "Output" };
@@ -233,11 +238,14 @@ impl<'m, 'a> Function<'m, 'a> {
             if class == "Output" {
                 f.get(object);
                 f.ins(format!("i32.const {}", i32::from(*name == "err")));
-                f.ins("i32.store 12");
+                f.ins(format!("i32.store {OUTPUT_DESTINATION_OFFSET}"));
             }
             f.get(f.frame);
             f.get(object);
-            f.ins(format!("i32.store {}", 8 + 4 * slot));
+            f.ins(format!(
+                "i32.store {}",
+                FRAME_ROOTS_OFFSET + ROOT_SLOT_SIZE * slot
+            ));
             f.release(object);
         }
         let main = f.allocate("Main", &[]);
@@ -315,7 +323,7 @@ impl<'m, 'a> Function<'m, 'a> {
     }
 
     fn root_offset(&self, value: Value) -> usize {
-        8 + 4 * self.locals[value].root.unwrap()
+        FRAME_ROOTS_OFFSET + ROOT_SLOT_SIZE * self.locals[value].root.unwrap()
     }
 
     fn publish(&mut self, roots: &[Value]) {
@@ -371,9 +379,11 @@ impl<'m, 'a> Function<'m, 'a> {
     ) -> Option<Value> {
         let index = self.temporary(&Type::Int);
         self.get(receiver);
-        self.ins("i32.load 0 # Object.class_descriptor");
-        self.ins("i32.load 28 # ClassDescriptor.vtable");
-        self.ins(format!("i32.load {}", slot * 4));
+        self.ins(format!(
+            "i32.load {CLASS_DESCRIPTOR_OFFSET} # Object.class_descriptor"
+        ));
+        self.ins(format!("i32.load {VTABLE_ADDRESS_OFFSET} # ClassDescriptor.vtable"));
+        self.ins(format!("i32.load {}", slot * VTABLE_ENTRY_SIZE));
         self.set(index);
         let args: Vec<_> = std::iter::once(receiver)
             .chain(actuals.iter().copied())
@@ -449,12 +459,19 @@ impl<'m, 'a> Function<'m, 'a> {
         self.ins("global.get __stack_pointer");
         self.set(self.old_sp);
         self.get(self.old_sp);
-        self.ins(format!("i32.const {}", (8 + 4 * self.roots + 15) & !15));
+        let frame_size = FRAME_ROOTS_OFFSET + ROOT_SLOT_SIZE * self.roots;
+        self.ins(format!(
+            "i32.const {}",
+            (frame_size + STACK_ALIGN - 1) & !(STACK_ALIGN - 1)
+        ));
         self.ins("i32.sub");
         self.set(self.frame);
         self.get(self.frame);
         self.ins("global.set __stack_pointer");
-        for (offset, value) in [(0, 0), (4, self.roots)] {
+        for (offset, value) in [
+            (FRAME_PARENT_OFFSET, 0),
+            (FRAME_ROOT_COUNT_OFFSET, self.roots),
+        ] {
             self.get(self.frame);
             self.ins(format!("i32.const {value}"));
             self.ins(format!("i32.store {offset}"));
@@ -462,7 +479,10 @@ impl<'m, 'a> Function<'m, 'a> {
         for slot in 0..self.roots {
             self.get(self.frame);
             self.ins("i32.const 0");
-            self.ins(format!("i32.store {}", 8 + 4 * slot));
+            self.ins(format!(
+                "i32.store {}",
+                FRAME_ROOTS_OFFSET + ROOT_SLOT_SIZE * slot
+            ));
         }
         let initial = self.initial_roots.clone();
         self.publish(&initial);

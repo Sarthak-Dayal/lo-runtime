@@ -66,6 +66,6 @@ I/O uses injectable buffered streams so the same evaluator supports process I/O 
 
 We would first introduce a structured WASM instruction representation instead of emitting assembly strings directly. This would make stack effects and branch targets easier to validate before invoking `llvm-mc`.
 
-We would also replace repeated ABI numbers such as `12` and `28` with named constants, making the implementation easier to audit and adapt to Project 2's different pointer size.
+We initially left repeated ABI numbers such as `12` and `28` as bare literals scattered across the WASM emitter. These have since been pulled into `compiler/src/wasm/abi.rs` (`FIRST_FIELD_OFFSET`, `VTABLE_ADDRESS_OFFSET`, and friends), which now serves as the single source of truth for object-header, class-descriptor, and frame-layout offsets, making the implementation easier to audit and adapt to Project 2's different pointer size.
 
 Finally, we would test code generation earlier with small inheritance, call, and nested-loop programs. While the type checker was incomplete, several larger tests failed before reaching the backend, hiding an assembly-generation bug until later.

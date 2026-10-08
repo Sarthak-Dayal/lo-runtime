@@ -12,6 +12,7 @@ const builtin = @import("builtin");
 const object = @import("object.zig");
 const alloc = @import("alloc.zig");
 const abort = @import("abort.zig");
+const exit_codes = @import("exit_codes.zig");
 const Object = object.Object;
 const StringObject = object.StringObject;
 
@@ -125,7 +126,7 @@ pub export fn lo_read_int() i32 {
         // EOF before any integer characters -> 111. A non-whitespace byte present
         // means input exists; failure to parse it is malformed (110), not EOF.
         if (peekByte() == null) {
-            abort.runtimeAbort("lo_read_int: end of input", 111);
+            abort.runtimeAbort("lo_read_int: end of input", exit_codes.EXIT_EOF_BEFORE_INT);
         }
         var buf: [32]u8 = undefined;
         var idx: usize = 0;
@@ -148,10 +149,10 @@ pub export fn lo_read_int() i32 {
             } else break;
         }
         if (!saw_digit) {
-            abort.runtimeAbort("lo_read_int: malformed token", 110);
+            abort.runtimeAbort("lo_read_int: malformed token", exit_codes.EXIT_MALFORMED_INT);
         }
         return std.fmt.parseInt(i32, buf[0..idx], 10) catch
-            abort.runtimeAbort("lo_read_int: malformed token", 110);
+            abort.runtimeAbort("lo_read_int: malformed token", exit_codes.EXIT_MALFORMED_INT);
     }
 }
 
@@ -175,7 +176,7 @@ pub export fn lo_read_bool() bool {
         const tok = buf[0..idx];
         if (std.mem.eql(u8, tok, "true")) return true;
         if (std.mem.eql(u8, tok, "false")) return false;
-        abort.runtimeAbort("lo_read_bool: invalid token", 112);
+        abort.runtimeAbort("lo_read_bool: invalid token", exit_codes.EXIT_INVALID_BOOL);
     }
 }
 

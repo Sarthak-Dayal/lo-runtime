@@ -4,6 +4,7 @@ use std::fmt::Write;
 use crate::ast::Type;
 use crate::type_checker::{ClassTable, TypedClassDecl, TypedConstructor, TypedProgram};
 
+use super::abi::{FIRST_FIELD_OFFSET, WORD_SIZE};
 use super::function::Function;
 use super::{class_symbol, ctor_symbol, is_reference, method_symbol, signature};
 
@@ -112,7 +113,7 @@ impl Module<'_> {
             .iter()
             .enumerate()
             .filter(|(_, field)| is_reference(&field.ty))
-            .map(|(i, _)| (12 + i * 4).to_string())
+            .map(|(i, _)| (FIRST_FIELD_OFFSET + i * WORD_SIZE).to_string())
             .collect();
         let vtable: Vec<_> = info
             .vtable
@@ -121,7 +122,9 @@ impl Module<'_> {
             .collect();
         self.words(&format!("{symbol}_pointers"), &pointers, false);
         self.words(&format!("{symbol}_vtable"), &vtable, false);
-        let size = 12 + 4 * info.effective_fields.len() + if name == "Output" { 4 } else { 0 };
+        let size = FIRST_FIELD_OFFSET
+            + WORD_SIZE * info.effective_fields.len()
+            + if name == "Output" { WORD_SIZE } else { 0 };
         self.words(
             &symbol,
             &[
@@ -180,13 +183,14 @@ impl Module<'_> {
     }
 
     pub(super) fn field_offset(&self, owner: &str, name: &str) -> usize {
-        12 + 4 * self
+        let index = self
             .classes
             .get(owner)
             .expect("checked field owner")
             .effective_fields
             .iter()
             .position(|f| f.name == name)
-            .expect("checked field")
+            .expect("checked field");
+        FIRST_FIELD_OFFSET + WORD_SIZE * index
     }
 }

@@ -7,6 +7,7 @@
 //! null. `lo_instanceof` returns a bool and never aborts; a null receiver yields
 //! `false`. Both walk `ClassDescriptor.parent` up the single-inheritance chain.
 
+use crate::exit_codes::EXIT_CAST_FAILURE;
 use crate::object::{ClassDescriptor, Object};
 
 /// Checked downcast: return `obj` if its class is `target` or a descendant; abort
@@ -30,7 +31,7 @@ pub unsafe extern "C" fn lo_cast_check(
             class_name(source),
             class_name(target)
         ),
-        101,
+        EXIT_CAST_FAILURE,
     )
 }
 

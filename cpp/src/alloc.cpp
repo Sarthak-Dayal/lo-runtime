@@ -2,6 +2,7 @@
 
 #include "lo_runtime/abort.h"
 #include "lo_runtime/descriptors.h"
+#include "lo_runtime/exit_codes.h"
 #include "lo_runtime/gc.h"
 
 #include <cstdlib>
@@ -29,6 +30,9 @@ std::uint8_t *g_to_limit = nullptr;
 
 constexpr std::size_t kDefaultHeapSize = std::size_t{16} * 1024 * 1024;
 constexpr std::size_t kHeapAlign = 16;
+// Every allocation's size is rounded up to this so Object's 8-byte pointer
+// field (native) stays aligned within the semispace.
+constexpr std::size_t kObjectAlign = 8;
 
 std::size_t align_up(std::size_t n, std::size_t a) { return (n + a - 1) & ~(a - 1); }
 std::size_t align_down(std::size_t n, std::size_t a) { return n & ~(a - 1); }
@@ -62,7 +66,7 @@ Object *alloc_raw(std::size_t size, const ClassDescriptor *cls) {
     lo_gc_collect();
     slot = bump_if_fits(size);
     if (slot == nullptr) {
-      lo::runtime_abort("lo_alloc: out of memory", 137);
+      lo::runtime_abort("lo_alloc: out of memory", lo::kExitOom);
     }
   }
   std::memset(slot, 0, size);
@@ -105,7 +109,7 @@ void heap_shutdown() {
 }
 
 Object *bump_alloc_string(std::uint32_t len) {
-  const std::size_t size = align_up(string_data_offset() + len, 8);
+  const std::size_t size = align_up(string_data_offset() + len, kObjectAlign);
   Object *o = alloc_raw(size, &LO_STRING_CLASS);
   auto *so = reinterpret_cast<StringObject *>(o);
   so->length = len;
@@ -133,6 +137,6 @@ std::size_t heap_used() {
 } // namespace lo
 
 extern "C" Object *lo_alloc(const ClassDescriptor *cls) {
-  const std::size_t size = align_up(static_cast<std::size_t>(cls->instance_size), 8);
+  const std::size_t size = align_up(static_cast<std::size_t>(cls->instance_size), kObjectAlign);
   return alloc_raw(size, cls);
 }
