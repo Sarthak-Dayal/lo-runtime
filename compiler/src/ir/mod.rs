@@ -1,4 +1,5 @@
 mod dump;
+pub mod gc_roots;
 pub mod lower;
 pub mod register_allocator;
 mod verify;
@@ -143,6 +144,7 @@ pub struct Instruction {
     pub line: u32,
 }
 
+#[derive(Debug)]
 pub enum InstructionKind {
     Copy {
         dst: VirtualRegId,
