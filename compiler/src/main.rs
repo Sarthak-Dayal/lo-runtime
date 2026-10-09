@@ -3,6 +3,7 @@
 mod add_io_classes;
 mod ast;
 mod interpreter;
+mod ir;
 mod lexer;
 mod parser;
 mod token;
