@@ -1,4 +1,7 @@
+mod declare;
 mod dump;
+pub mod runtime;
+pub mod statics;
 mod verify;
 
 #[cfg(test)]
@@ -55,11 +58,13 @@ pub struct DataDef {
     pub items: Vec<DataItem>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
     ReadOnly,
     Writable,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DataItem {
     U32(u32),
     // A relocation; the target determines address width

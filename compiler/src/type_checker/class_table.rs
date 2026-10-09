@@ -76,6 +76,10 @@ impl ClassTable {
         self.classes.contains_key(name)
     }
 
+    pub fn class_names(&self) -> &[String] {
+        &self.order
+    }
+
     pub fn is_subtype(&self, a: &str, b: &str) -> bool {
         a == b
             || self
