@@ -139,7 +139,11 @@ impl ProgramIr {
         }
     }
 
-    fn operand_type(&self, function: &FunctionIr, operand: Operand) -> Result<IrType, String> {
+    pub(crate) fn operand_type(
+        &self,
+        function: &FunctionIr,
+        operand: Operand,
+    ) -> Result<IrType, String> {
         match operand {
             Operand::Value(id) => value_type(function, id),
             Operand::Int(_) => Ok(IrType::Int32),

@@ -21,6 +21,7 @@ moves, spill loads/stores, callee-save prologs/epilogs, and stack frame layout.
 mod allocation;
 mod live_intervals;
 mod liveness;
+pub mod spill_all;
 mod target;
 
 #[cfg(test)]
