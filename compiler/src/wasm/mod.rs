@@ -1,6 +1,7 @@
 //! LO-3/LO-4 typed AST -> LLVM WebAssembly assembly.
 //! Production numbers follow LO Appendix A.5. Encoding belongs to llvm-mc.
 
+mod abi;
 mod expressions;
 mod function;
 mod module;

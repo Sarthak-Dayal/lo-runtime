@@ -3,6 +3,7 @@ use crate::type_checker::{
     BindingInfo, CastDirection, MethodResolution, TypedExpr, TypedMethodCall, TypedObjName,
 };
 
+use super::abi::{FIRST_FIELD_OFFSET, WORD_SIZE};
 use super::function::{Function, Value};
 use super::{class_symbol, ctor_symbol, method_symbol};
 
@@ -70,7 +71,7 @@ impl Function<'_, '_> {
             .iter()
             .enumerate()
             .filter(|(_, field)| field.ty == Type::String)
-            .map(|(i, _)| 12 + 4 * i)
+            .map(|(i, _)| FIRST_FIELD_OFFSET + WORD_SIZE * i)
             .collect();
         for offset in string_offsets {
             let empty = self.constant("LO_EMPTY_STRING");

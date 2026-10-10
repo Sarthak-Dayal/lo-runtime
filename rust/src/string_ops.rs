@@ -7,6 +7,7 @@
 //! ordering; `lo_string_reverse` reverses codepoints, not bytes. The internal
 //! variable-size allocator to build results with is `alloc::bump_alloc_string`.
 
+use crate::exit_codes::{EXIT_NEGATIVE_REPEAT, EXIT_OOM};
 use crate::object::{string_data_offset, Object, StringObject};
 
 unsafe fn bytes(object: *mut Object) -> &'static [u8] {
@@ -17,7 +18,7 @@ unsafe fn bytes(object: *mut Object) -> &'static [u8] {
 
 unsafe fn allocate_bytes(contents: &[u8]) -> *mut Object {
     let length = u32::try_from(contents.len())
-        .unwrap_or_else(|_| crate::abort::runtime_abort("lo_alloc: out of memory", 137));
+        .unwrap_or_else(|_| crate::abort::runtime_abort("lo_alloc: out of memory", EXIT_OOM));
     let object = crate::alloc::bump_alloc_string(length);
     if !contents.is_empty() {
         core::ptr::copy_nonoverlapping(
@@ -53,7 +54,7 @@ pub unsafe extern "C" fn lo_string_concat(a: *mut Object, b: *mut Object) -> *mu
     let length = a
         .len()
         .checked_add(b.len())
-        .unwrap_or_else(|| crate::abort::runtime_abort("lo_alloc: out of memory", 137));
+        .unwrap_or_else(|| crate::abort::runtime_abort("lo_alloc: out of memory", EXIT_OOM));
     let mut contents = Vec::with_capacity(length);
     contents.extend_from_slice(a);
     contents.extend_from_slice(b);
@@ -68,13 +69,13 @@ pub unsafe extern "C" fn lo_string_concat(a: *mut Object, b: *mut Object) -> *mu
 #[no_mangle]
 pub unsafe extern "C" fn lo_string_repeat(s: *mut Object, n: i32) -> *mut Object {
     if n < 0 {
-        crate::abort::runtime_abort(&format!("lo_string_repeat: negative count {n}"), 120);
+        crate::abort::runtime_abort(&format!("lo_string_repeat: negative count {n}"), EXIT_NEGATIVE_REPEAT);
     }
     let input = bytes(s);
     let length = input
         .len()
         .checked_mul(n as usize)
-        .unwrap_or_else(|| crate::abort::runtime_abort("lo_alloc: out of memory", 137));
+        .unwrap_or_else(|| crate::abort::runtime_abort("lo_alloc: out of memory", EXIT_OOM));
     let mut contents = Vec::with_capacity(length);
     for _ in 0..n {
         contents.extend_from_slice(input);
