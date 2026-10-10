@@ -1,0 +1,17 @@
+// Calling a method on a null reference aborts with exit status 102.
+// Expected stdout: 1. Expected exit status: 102
+
+class Box ( int v; ) [
+    Box() { v = 1; }
+] {
+    int get() { return v; }
+}
+
+class Main () {
+    int main() {
+        Box b;
+        out.print_int(1);
+        out.println();
+        return b.get();
+    }
+}

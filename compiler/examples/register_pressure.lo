@@ -1,0 +1,25 @@
+// Fifteen ints live at once: more than the registers available, so some must spill.
+// Expected exit status: 120 (1 + 2 + ... + 15)
+
+class Main () {
+    int main() {
+        int a; int b; int c; int d; int e; int f; int g; int h; int i; int j; int k; int l; int m; int n; int o;
+        int s;
+        a = 1; b = 2; c = 3; d = 4; e = 5; f = 6; g = 7; h = 8; i = 9; j = 10; k = 11; l = 12; m = 13; n = 14; o = 15;
+        s = (a + b);
+        s = (s + c);
+        s = (s + d);
+        s = (s + e);
+        s = (s + f);
+        s = (s + g);
+        s = (s + h);
+        s = (s + i);
+        s = (s + j);
+        s = (s + k);
+        s = (s + l);
+        s = (s + m);
+        s = (s + n);
+        s = (s + o);
+        return s;
+    }
+}

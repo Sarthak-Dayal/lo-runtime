@@ -1,0 +1,14 @@
+// Values that stay live across calls must survive them (callee-saved registers).
+// Expected exit status: 130 ((10+20+30) + (30+20+10) + 10)
+
+class Main () {
+    int add3(int a, int b, int c) {
+        return ((a + b) + c);
+    }
+
+    int main() {
+        int x; int y; int z;
+        x = 10; y = 20; z = 30;
+        return ((this.add3(x, y, z) + this.add3(z, y, x)) + x);
+    }
+}

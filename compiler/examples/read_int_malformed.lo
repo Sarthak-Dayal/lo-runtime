@@ -1,0 +1,2 @@
+// A token that is not an integer aborts with exit status 110.
+class Main () { int main() { return in.read_int(); } }

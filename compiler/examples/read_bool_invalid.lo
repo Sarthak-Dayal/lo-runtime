@@ -1,0 +1,2 @@
+// A token that is neither true nor false aborts with exit status 112.
+class Main () { int main() { return (in.read_bool() ? 1 : 0); } }
