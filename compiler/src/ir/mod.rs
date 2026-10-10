@@ -1,9 +1,14 @@
 mod declare;
 mod dump;
+pub mod lower;
 pub mod runtime;
 pub mod statics;
 mod verify;
 
+#[cfg(test)]
+mod lower_tests;
+#[cfg(test)]
+mod program_tests;
 #[cfg(test)]
 mod tests;
 
@@ -83,7 +88,7 @@ pub struct ProgramIr {
     pub signatures: Vec<Signature>,
     pub functions: Vec<FunctionIr>,
     pub data: Vec<DataDef>,
-    // Explicitly identifies the function allowed to expose root-slot addresses.
+    // Identifies the entry function responsible for runtime initialization.
     pub startup: Option<SymbolId>,
 }
 
@@ -178,10 +183,6 @@ pub enum InstructionKind {
         value: Operand,
     },
     RootLoad {
-        dst: VirtualRegId,
-        slot: u32,
-    },
-    RootAddr {
         dst: VirtualRegId,
         slot: u32,
     },
@@ -281,8 +282,7 @@ impl InstructionKind {
             | Self::Binary { dst, .. }
             | Self::Unary { dst, .. }
             | Self::Load { dst, .. }
-            | Self::RootLoad { dst, .. }
-            | Self::RootAddr { dst, .. } => Some(*dst),
+            | Self::RootLoad { dst, .. } => Some(*dst),
             Self::Call { dst, .. } => *dst,
             Self::Store { .. } | Self::RootStore { .. } => None,
         }
@@ -302,7 +302,7 @@ impl InstructionKind {
             Self::Load { base, .. } => vec![*base],
             Self::Store { base, value, .. } => vec![*base, *value],
             Self::RootStore { value, .. } => vec![*value],
-            Self::RootLoad { .. } | Self::RootAddr { .. } => vec![],
+            Self::RootLoad { .. } => vec![],
             Self::Call { target, args, .. } => {
                 let mut operands = args.clone();
                 if let CallTarget::Indirect(pointer) = target {
