@@ -1,0 +1,10 @@
+// hello.lo: prints a greeting and exits with status 0.
+// Expected stdout: Hello, world!
+
+class Main () {
+    int main() {
+        out.print_string("Hello, world!");
+        out.println();
+        return 0;
+    }
+}
