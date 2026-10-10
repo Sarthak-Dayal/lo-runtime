@@ -139,7 +139,11 @@ impl ProgramIr {
         }
     }
 
-    fn operand_type(&self, function: &FunctionIr, operand: Operand) -> Result<IrType, String> {
+    pub(crate) fn operand_type(
+        &self,
+        function: &FunctionIr,
+        operand: Operand,
+    ) -> Result<IrType, String> {
         match operand {
             Operand::Value(id) => value_type(function, id),
             Operand::Int(_) => Ok(IrType::Int32),
@@ -334,7 +338,22 @@ impl ProgramIr {
                     Operand::Symbol(id) => matches!(self.symbol(*id)?.kind, SymbolKind::StaticRef),
                     _ => false,
                 };
-                if *expected == IrType::Ref && !static_ref {
+                // Write permission is independent of the GC barrier exemption.
+                // A direct symbolic destination lets us check its declared section;
+                // register-based addresses do not establish static provenance.
+                let static_base = match base {
+                    Operand::Symbol(id) => {
+                        let symbol = self.symbol(*id)?;
+                        let data = self.data.iter().find(|data| data.symbol == *id);
+                        if data.is_some_and(|data| data.section == Section::ReadOnly) {
+                            return Err(format!("store to read-only data {}", symbol.name));
+                        }
+                        matches!(symbol.kind, SymbolKind::Data)
+                            && data.is_some_and(|data| data.section == Section::Writable)
+                    }
+                    _ => false,
+                };
+                if *expected == IrType::Ref && !static_ref && !static_base {
                     return Err("reference stores require a write-barrier call".into());
                 }
                 self.expect_type(operand_type(*value)?, *expected)
@@ -346,13 +365,6 @@ impl ProgramIr {
             InstructionKind::RootLoad { dst, slot } => {
                 verify_root_slot(function, *slot)?;
                 self.expect_type(value_type(function, *dst)?, IrType::Ref)
-            }
-            InstructionKind::RootAddr { dst, slot } => {
-                verify_root_slot(function, *slot)?;
-                if self.startup != Some(function.symbol) {
-                    return Err("RootAddr is only permitted in the startup function".into());
-                }
-                self.expect_type(value_type(function, *dst)?, IrType::Ptr)
             }
             InstructionKind::Call { dst, target, args } => {
                 let signature = match target {

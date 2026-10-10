@@ -710,11 +710,10 @@ fn invalid_and_nested_signatures_are_rejected() {
 }
 
 #[test]
-fn root_instructions_check_slots_types_and_startup() {
+fn root_instructions_check_slots_and_types() {
     let mut p = example();
     p.functions[0].root_slots = 1;
-    p.functions[0].new_register(IrType::Ref, Some("object".into()));
-    p.functions[0].new_register(IrType::Ptr, Some("root_address".into()));
+    let object = p.functions[0].new_register(IrType::Ref, Some("object".into()));
     p.functions[0].blocks[0].instructions = vec![
         Instruction {
             kind: InstructionKind::RootStore {
@@ -725,24 +724,14 @@ fn root_instructions_check_slots_types_and_startup() {
         },
         Instruction {
             kind: InstructionKind::RootLoad {
-                dst: VirtualRegId(1),
+                dst: object,
                 slot: 0,
             },
             line: 2,
         },
-        Instruction {
-            kind: InstructionKind::RootAddr {
-                dst: VirtualRegId(2),
-                slot: 0,
-            },
-            line: 3,
-        },
     ];
-    assert!(p.validate().unwrap_err().contains("startup"));
-    p.startup = Some(SymbolId(0));
     p.validate().unwrap();
     assert!(p.dump().contains("object:Ref = root_load root0"));
-    assert!(p.dump().contains("root_address:Ptr = root_addr root0"));
     p.functions[0].root_slots = 0;
     assert!(p.validate().unwrap_err().contains("root slot"));
     p.functions[0].root_slots = 1;
@@ -752,11 +741,8 @@ fn root_instructions_check_slots_types_and_startup() {
     };
     assert!(p.validate().unwrap_err().contains("expected Ref"));
     p.functions[0].blocks[0].instructions.remove(0);
-    p.functions[0].register_types[1] = IrType::Int32;
+    p.functions[0].register_types[object.0] = IrType::Int32;
     assert!(p.validate().unwrap_err().contains("expected Ref"));
-    p.functions[0].register_types[1] = IrType::Ref;
-    p.functions[0].register_types[2] = IrType::Ref;
-    assert!(p.validate().unwrap_err().contains("expected Ptr"));
 }
 
 #[test]
@@ -861,14 +847,6 @@ fn public_use_def_helpers_include_calls_and_terminators() {
     }
     .operands()
     .is_empty());
-    assert_eq!(
-        InstructionKind::RootAddr {
-            dst: VirtualRegId(0),
-            slot: 0
-        }
-        .destination(),
-        Some(VirtualRegId(0))
-    );
 }
 
 #[test]
@@ -1019,4 +997,113 @@ fn root_stores_read_initialized_values() {
         },
     );
     p.validate().unwrap();
+}
+
+#[test]
+fn reference_stores_accept_writable_data_symbols_but_not_ptr_registers() {
+    let mut p = example();
+    p.symbols.push(Symbol {
+        name: "lo_bindings".into(),
+        kind: SymbolKind::Data,
+    });
+    p.data.push(DataDef {
+        symbol: SymbolId(1),
+        section: Section::Writable,
+        align: 8,
+        items: vec![DataItem::Zero(40)],
+    });
+    let store = Instruction {
+        kind: InstructionKind::Store {
+            base: Operand::Symbol(SymbolId(1)),
+            offset: 16,
+            value: Operand::Null,
+            ty: IrType::Ref,
+        },
+        line: 1,
+    };
+    p.functions[0].blocks[0].instructions.push(store);
+    p.validate().unwrap();
+    let address = p.functions[0].new_register(IrType::Ptr, Some("address".into()));
+    p.functions[0].blocks[0].instructions.insert(
+        0,
+        Instruction {
+            kind: InstructionKind::Copy {
+                dst: address,
+                src: Operand::Symbol(SymbolId(1)),
+            },
+            line: 1,
+        },
+    );
+    p.functions[0].blocks[0].instructions[1].kind = InstructionKind::Store {
+        base: Operand::Value(address),
+        offset: 16,
+        value: Operand::Null,
+        ty: IrType::Ref,
+    };
+    assert!(p.validate().unwrap_err().contains("write-barrier call"));
+}
+
+#[test]
+fn stores_to_read_only_symbols_are_rejected_for_all_value_types() {
+    let mut p = example();
+    p.symbols.push(Symbol {
+        name: "descriptor".into(),
+        kind: SymbolKind::Data,
+    });
+    p.symbols.push(Symbol {
+        name: "LO_EMPTY_STRING".into(),
+        kind: SymbolKind::StaticRef,
+    });
+    p.data.push(DataDef {
+        symbol: SymbolId(1),
+        section: Section::ReadOnly,
+        align: 8,
+        items: vec![DataItem::Zero(56)],
+    });
+    for (value, ty) in [
+        (Operand::Int(1), IrType::Int32),
+        (Operand::Bool(true), IrType::Bool),
+        (Operand::Null, IrType::Ref),
+        (Operand::Symbol(SymbolId(2)), IrType::Ref),
+        (Operand::Symbol(SymbolId(1)), IrType::Ptr),
+    ] {
+        p.functions[0].blocks[0].instructions = vec![Instruction {
+            kind: InstructionKind::Store {
+                base: Operand::Symbol(SymbolId(1)),
+                offset: 0,
+                value,
+                ty,
+            },
+            line: 1,
+        }];
+        assert!(
+            p.validate()
+                .unwrap_err()
+                .contains("store to read-only data descriptor"),
+            "{ty:?}"
+        );
+        // The same typed store is legal when its destination is writable.
+        p.data[0].section = Section::Writable;
+        p.validate().unwrap();
+        p.data[0].section = Section::ReadOnly;
+    }
+}
+
+#[test]
+fn external_data_does_not_get_the_writable_root_exemption() {
+    let mut p = example();
+    p.symbols.push(Symbol {
+        name: "external_data".into(),
+        kind: SymbolKind::Data,
+    });
+    p.functions[0].blocks[0].instructions.push(Instruction {
+        kind: InstructionKind::Store {
+            base: Operand::Symbol(SymbolId(1)),
+            offset: 0,
+            value: Operand::Null,
+            ty: IrType::Ref,
+        },
+        line: 1,
+    });
+    assert!(p.validate().unwrap_err().contains("write-barrier call"));
 }
