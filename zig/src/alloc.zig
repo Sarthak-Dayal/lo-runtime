@@ -20,6 +20,7 @@ const builtin = @import("builtin");
 const object = @import("object.zig");
 const descriptors = @import("descriptors.zig");
 const abort = @import("abort.zig");
+const exit_codes = @import("exit_codes.zig");
 const gc = @import("gc.zig");
 const Object = object.Object;
 const ClassDescriptor = object.ClassDescriptor;
@@ -28,6 +29,9 @@ const StringObject = object.StringObject;
 /// Default total heap size (16 MiB), overridable via `LO_HEAP_SIZE` at init.
 const DEFAULT_HEAP_SIZE: usize = 16 * 1024 * 1024;
 const HEAP_ALIGN: usize = 16;
+/// Every allocation's size is rounded up to this so `Object`'s 8-byte pointer
+/// field (native) stays aligned within the semispace.
+const OBJECT_ALIGN: usize = 8;
 const is_wasm = builtin.cpu.arch.isWasm();
 
 /// Backing region for the whole heap (both semispaces); freed at shutdown.
@@ -78,7 +82,7 @@ pub fn heapInitWith(total: usize) void {
     const semi = alignDown(total / 2, HEAP_ALIGN);
     const region = semi * 2;
     const slice = std.heap.page_allocator.alignedAlloc(u8, HEAP_ALIGN, region) catch
-        abort.runtimeAbort("lo_alloc: out of memory", 137);
+        abort.runtimeAbort("lo_alloc: out of memory", exit_codes.EXIT_OOM);
     @memset(slice, 0);
     heap_slice = slice;
     const base = @intFromPtr(slice.ptr);
@@ -117,7 +121,7 @@ fn allocRaw(size: usize, class: *const ClassDescriptor) *Object {
     const slot = bumpIfFits(size) orelse blk: {
         gc.lo_gc_collect();
         break :blk bumpIfFits(size) orelse
-            abort.runtimeAbort("lo_alloc: out of memory", 137);
+            abort.runtimeAbort("lo_alloc: out of memory", exit_codes.EXIT_OOM);
     };
     const bytes: [*]u8 = @ptrFromInt(slot);
     @memset(bytes[0..size], 0);
@@ -133,7 +137,7 @@ fn allocRaw(size: usize, class: *const ClassDescriptor) *Object {
 /// on a full semispace; aborts (exit 137) only on live-set overflow. Codegen
 /// finalizes String fields to `LO_EMPTY_STRING` after this returns.
 pub export fn lo_alloc(class: *const ClassDescriptor) *Object {
-    const size = alignUp(class.instance_size, 8);
+    const size = alignUp(class.instance_size, OBJECT_ALIGN);
     return allocRaw(size, class);
 }
 
@@ -143,7 +147,7 @@ pub export fn lo_alloc(class: *const ClassDescriptor) *Object {
 /// and the team-implemented `lo_string_*` ops; `lo_alloc` can't size a string
 /// itself.
 pub fn bumpAllocString(len: u32) *Object {
-    const size = alignUp(object.stringDataOffset() + len, 8);
+    const size = alignUp(object.stringDataOffset() + len, OBJECT_ALIGN);
     const o = allocRaw(size, &descriptors.LO_STRING_CLASS);
     const so: *StringObject = @ptrCast(@alignCast(o));
     so.length = len;

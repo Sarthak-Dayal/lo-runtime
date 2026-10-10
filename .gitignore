@@ -11,9 +11,14 @@
 
 # C++
 /cpp/build/
+/build/
 *.o
 *.a
 compile_commands.json
+
+# Editor / tooling caches
+.vscode/
+.cache/
 
 # Platform noise
 .DS_Store

@@ -1,34 +1,21 @@
 use super::*;
-use crate::ast::Type;
-use crate::type_checker::TypedMethodDecl;
 
-fn program(method: &TypedMethodDecl) -> Result<CheckedIr, String> {
-    let ty = |ty: &Type| match ty {
-        Type::Int => IrType::Int32,
-        Type::Bool => IrType::Bool,
-        Type::Class(_) | Type::String => IrType::Ref,
-        Type::Void => panic!("void parameter"),
-    };
-    let mut params = vec![IrType::Ref];
-    params.extend(method.formals.iter().map(|(_, t)| ty(t)));
-    ProgramIr {
-        data: vec![],
-        startup: None,
-        symbols: vec![Symbol {
-            name: method.method_name.clone(),
-            kind: SymbolKind::Function(SignatureId(0)),
-        }],
-        signatures: vec![Signature {
-            params,
-            result: if method.return_type == Type::Void {
-                None
-            } else {
-                Some(ty(&method.return_type))
-            },
-        }],
-        functions: vec![lower::lower_method(SymbolId(0), method)?],
-    }
-    .verify()
+fn program(
+    typed: &crate::type_checker::TypedProgram,
+    classes: &crate::type_checker::ClassTable,
+    method: &str,
+) -> CheckedIr {
+    let mut ir = lower::lower_program(typed, classes, lower::TargetLayout::Wasm32)
+        .unwrap()
+        .into_program();
+    let name = format!("lo_method_4_Main_{}_{}", method.len(), method);
+    let index = ir
+        .functions
+        .iter()
+        .position(|f| ir.symbols[f.symbol.0].name == name)
+        .unwrap();
+    ir.functions.swap(0, index);
+    ir.verify().unwrap()
 }
 
 // Execute just the scalar CFG subset to check behavior, not only IR shape.
@@ -115,13 +102,7 @@ fn compare(body: &str, expected: i32) -> usize {
     let tokens = crate::lexer::tokenize(&source).unwrap();
     let ast = crate::parser::parse_program(&tokens).unwrap();
     let (typed, table) = crate::type_checker::check_program(ast).unwrap();
-    let method = &typed
-        .classes
-        .iter()
-        .find(|c| c.class_name == "Main")
-        .unwrap()
-        .methods[0];
-    let checked = program(method).ok().unwrap();
+    let checked = program(&typed, &table, "main");
     let (result, divisions) = execute_with_trace(&checked.program().functions[0], &[1]);
     assert_eq!(result, Some(expected));
     let io = crate::interpreter::Io::new(
@@ -199,41 +180,14 @@ fn integer_boundary_cases_follow_lo_reference() {
 }
 
 #[test]
-fn unsupported_runtime_operations_are_errors() {
-    for body in [
-        "out.println(); return 0;",
-        "String s; return 0;",
-        "Main x; x = new Main(); return 0;",
-    ] {
-        let source = format!("class Main () {{ int main() {{ {body} }} }}");
-        let tokens = crate::lexer::tokenize(&source).unwrap();
-        let ast = crate::parser::parse_program(&tokens).unwrap();
-        let (typed, _) = crate::type_checker::check_program(ast).unwrap();
-        let method = &typed
-            .classes
-            .iter()
-            .find(|c| c.class_name == "Main")
-            .unwrap()
-            .methods[0];
-        assert!(program(method).err().unwrap().contains("not implemented"));
-    }
-}
-
-#[test]
 fn receiver_formals_and_void_fallthrough() {
     let tokens = crate::lexer::tokenize("class Main () { int main() { return 0; } int f(int x) { x = (x + 1); return x; } void g() { ; } }").unwrap();
     let ast = crate::parser::parse_program(&tokens).unwrap();
-    let (typed, _) = crate::type_checker::check_program(ast).unwrap();
-    let methods = &typed
-        .classes
-        .iter()
-        .find(|c| c.class_name == "Main")
-        .unwrap()
-        .methods;
-    let f = program(&methods[1]).ok().unwrap();
+    let (typed, table) = crate::type_checker::check_program(ast).unwrap();
+    let f = program(&typed, &table, "f");
     assert_eq!(f.program().functions[0].params.len(), 2);
     assert_eq!(execute(&f.program().functions[0], &[1, 41]), Some(42));
-    let g = program(&methods[2]).ok().unwrap();
+    let g = program(&typed, &table, "g");
     assert_eq!(execute(&g.program().functions[0], &[1]), None);
 }
 
@@ -243,14 +197,8 @@ fn variable_division_guards_all_boundary_cases() {
         let source = format!("class Main () {{ int main() {{ return 0; }} int calculate(int a, int b) {{ return (a {operator} b); }} }}");
         let tokens = crate::lexer::tokenize(&source).unwrap();
         let ast = crate::parser::parse_program(&tokens).unwrap();
-        let (typed, _) = crate::type_checker::check_program(ast).unwrap();
-        let method = &typed
-            .classes
-            .iter()
-            .find(|c| c.class_name == "Main")
-            .unwrap()
-            .methods[1];
-        let checked = program(method).ok().unwrap();
+        let (typed, table) = crate::type_checker::check_program(ast).unwrap();
+        let checked = program(&typed, &table, "calculate");
         let function = &checked.program().functions[0];
         for a in [i32::MIN, -7, 0, 7, i32::MAX] {
             for b in [-3, -1, 0, 1, 3] {
@@ -285,14 +233,8 @@ fn names_and_nested_division_survive_cfg_lowering() {
     )
     .unwrap();
     let ast = crate::parser::parse_program(&tokens).unwrap();
-    let (typed, _) = crate::type_checker::check_program(ast).unwrap();
-    let method = &typed
-        .classes
-        .iter()
-        .find(|c| c.class_name == "Main")
-        .unwrap()
-        .methods[0];
-    let checked = program(method).ok().unwrap();
+    let (typed, table) = crate::type_checker::check_program(ast).unwrap();
+    let checked = program(&typed, &table, "main");
     let dump = checked.program().dump();
     assert!(dump.contains("count:Int32 = 0"));
     assert!(dump.contains("count:Int32 = 2"));

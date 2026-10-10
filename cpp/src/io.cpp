@@ -2,6 +2,7 @@
 
 #include "lo_runtime/abort.h"
 #include "lo_runtime/alloc.h"
+#include "lo_runtime/exit_codes.h"
 
 #include <cctype>
 #include <cstdint>
@@ -98,7 +99,7 @@ extern "C" std::int32_t lo_read_int() {
   // EOF before any integer characters -> 111. A non-whitespace byte present means
   // input exists; failure to parse it is malformed (110), not EOF.
   if (peek_char() == EOF) {
-    lo::runtime_abort("lo_read_int: end of input", 111);
+    lo::runtime_abort("lo_read_int: end of input", lo::kExitEofBeforeInt);
   }
   std::string token;
   int c = peek_char();
@@ -113,12 +114,12 @@ extern "C" std::int32_t lo_read_int() {
     saw_digit = true;
   }
   if (!saw_digit) {
-    lo::runtime_abort("lo_read_int: malformed token", 110);
+    lo::runtime_abort("lo_read_int: malformed token", lo::kExitMalformedInt);
   }
   char *end = nullptr;
   const long value = std::strtol(token.c_str(), &end, 10);
   if (end == token.c_str() || *end != '\0' || value < INT32_MIN || value > INT32_MAX) {
-    lo::runtime_abort("lo_read_int: malformed token", 110);
+    lo::runtime_abort("lo_read_int: malformed token", lo::kExitMalformedInt);
   }
   return static_cast<std::int32_t>(value);
 #endif
@@ -141,7 +142,7 @@ extern "C" bool lo_read_bool() {
   if (token == "false") {
     return false;
   }
-  lo::runtime_abort("lo_read_bool: invalid token", 112);
+  lo::runtime_abort("lo_read_bool: invalid token", lo::kExitInvalidBool);
 #endif
 }
 

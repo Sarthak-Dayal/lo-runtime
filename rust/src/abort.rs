@@ -55,6 +55,6 @@ pub unsafe extern "C" fn lo_abort_null_receiver(method_name: *const u8, method_n
     };
     runtime_abort(
         &format!("lo_abort_null_receiver: cannot dispatch {name}"),
-        102,
+        crate::exit_codes::EXIT_NULL_DISPATCH,
     )
 }

@@ -1,5 +1,7 @@
 #include "lo_runtime/abort.h"
 
+#include "lo_runtime/exit_codes.h"
+
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -71,7 +73,7 @@ extern "C" void lo_abort_null_receiver(const char *method_name, std::uint32_t me
     n += sizeof(unknown) - 1;
   }
   buf[n] = '\0';
-  lo::runtime_abort(buf, 102);
+  lo::runtime_abort(buf, lo::kExitNullDispatch);
 #else
   std::string msg = "lo_abort_null_receiver: cannot dispatch ";
   if (method_name != nullptr) {
@@ -80,6 +82,6 @@ extern "C" void lo_abort_null_receiver(const char *method_name, std::uint32_t me
     msg.append("<unknown>");
   }
   std::fprintf(stderr, "%s\n", msg.c_str());
-  std::exit(102);
+  std::exit(lo::kExitNullDispatch);
 #endif
 }

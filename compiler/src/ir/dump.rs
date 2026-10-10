@@ -291,7 +291,6 @@ impl<'a> FunctionDump<'a> {
                 format!("root_store root{slot}, {}", self.operand_text(*value))
             }
             InstructionKind::RootLoad { slot, .. } => format!("root_load root{slot}"),
-            InstructionKind::RootAddr { slot, .. } => format!("root_addr root{slot}"),
             InstructionKind::Call { target, args, .. } => self.call_text(*target, args),
         }
     }
