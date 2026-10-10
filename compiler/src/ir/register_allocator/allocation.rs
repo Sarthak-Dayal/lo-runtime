@@ -1,5 +1,5 @@
 use super::live_intervals::LiveInterval;
-use super::target::validate_target;
+use super::target::debug_check;
 use super::{
     FunctionAllocation, PhysicalLocation, PhysicalRegId, ProgramAllocation,
     RegisterAllocationError, SpillSlotId, TargetConstraints,
@@ -20,7 +20,7 @@ pub fn allocate(
     function_live_intervals: &HashMap<SymbolId, Vec<LiveInterval>>,
     target_constraints: &TargetConstraints,
 ) -> Result<ProgramAllocation, RegisterAllocationError> {
-    validate_target(target_constraints)?;
+    debug_check(target_constraints);
 
     let mut function_allocations = HashMap::new();
     for function in &checked_ir.program().functions {

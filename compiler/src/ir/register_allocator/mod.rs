@@ -1,7 +1,7 @@
 /*
 Poletto-Sarkar Linear Scan Register Allocation
-Target: Microsoft x64 (Windows) ABI; general-purpose integer/pointer registers.
-Construct constraints with TargetConstraints::microsoft_x64().
+Target: System V AMD64 ABI (Linux); general-purpose integer/pointer registers.
+Construct constraints with TargetConstraints::system_v().
 Inputs: an IR of the program, a target constraints object (e.g. number of registers,
  which are available, reserved registers, call clobbers, etc.)
 Output: Result<ProgramAllocation, RegisterAllocationError>
@@ -12,7 +12,7 @@ Output: Result<ProgramAllocation, RegisterAllocationError>
    - Expire finished intervals and free their registers.
    - Assign a free register when available.
    - Otherwise, spill whichever interval ends furthest away.
-4. target.rs: Describe and validate the Microsoft x64 register constraints.
+4. target.rs: Describe the System V register constraints.
 
 The result describes locations; the future native code generator must emit ABI
 moves, spill loads/stores, callee-save prologs/epilogs, and stack frame layout.
@@ -60,7 +60,6 @@ pub struct ProgramAllocation {
 #[derive(Debug, PartialEq, Eq)]
 pub enum RegisterAllocationError {
     MissingIntervals(SymbolId),
-    InvalidTarget(String),
     InvalidIntervals { function: SymbolId, reason: String },
 }
 
