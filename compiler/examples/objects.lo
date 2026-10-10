@@ -1,0 +1,32 @@
+// Inheritance, virtual dispatch, constructors, a String field.
+// Expected stdout: 16 then square9. Expected exit status: 16
+
+class Shape ( int id; ) [
+    Shape(int i) { id = i; }
+] {
+    int area() { return 0; }
+    int ident() { return id; }
+}
+
+class Square extends Shape ( int side; String label; ) [
+    Square(int i, int s) { super(i); side = s; label = "square"; }
+] {
+    int area() { return (side * side); }
+    void describe() {
+        out.print_string(label);
+        out.print_int(this.area());
+        out.println();
+    }
+}
+
+class Main () {
+    int main() {
+        Shape s; Square q;
+        s = new Square(7, 4);
+        q = new Square(1, 3);
+        out.print_int(s.area());
+        out.println();
+        q.describe();
+        return (s.ident() + q.area());
+    }
+}

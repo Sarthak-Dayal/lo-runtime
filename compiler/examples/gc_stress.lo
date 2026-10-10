@@ -1,0 +1,42 @@
+// Keeps a 500-node list alive while allocating 1000000 short-lived nodes (32 MB against an 8 MiB semispace), so the
+// collector runs and moves objects. The list must still sum correctly afterwards.
+// Expected stdout: 124750. Expected exit status: 0
+
+class Node (int v; Node next;) [
+    Node(int x) { v = x; next = null; }
+] {
+    int get() { return v; }
+    Node getNext() { return next; }
+    void link(Node n) { next = n; }
+}
+
+class Main () {
+    int main() {
+        Node head; Node n; Node t;
+        int i; int sum;
+        head = new Node(0);
+        i = 1;
+        while ((i < 500)) {
+            n = new Node(i);
+            n.link(head);
+            head = n;
+            i = (i + 1);
+        }
+        i = 0;
+        while ((i < 1000000)) {
+            t = new Node(i);
+            i = (i + 1);
+        }
+        sum = 0;
+        t = head;
+        i = 0;
+        while ((i < 500)) {
+            sum = (sum + t.get());
+            t = t.getNext();
+            i = (i + 1);
+        }
+        out.print_int(sum);
+        out.println();
+        return 0;
+    }
+}

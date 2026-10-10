@@ -19,6 +19,16 @@ compile_commands.json
 # Editor / tooling caches
 .vscode/
 .cache/
+.clangd/
+.idea/
+.zig-cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# Course handouts (large binaries; kept locally)
+*.pdf
 
 # Platform noise
 .DS_Store

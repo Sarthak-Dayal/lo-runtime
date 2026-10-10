@@ -1,0 +1,38 @@
+// Casts and instanceof: successful downcast, instanceof true/false, null handling.
+
+class Animal () [
+    Animal() { ; }
+] {
+    int value() { return 1; }
+}
+
+class Dog extends Animal () [
+    Dog() { super(); }
+] {
+    int value() { return 2; }
+    int bark() { return 20; }
+}
+
+class Cat extends Animal () [
+    Cat() { super(); }
+] {
+    int value() { return 3; }
+}
+
+class Main () {
+    int main() {
+        Animal a; Animal c; Animal n; Dog d; int r;
+        a = new Dog();
+        c = new Cat();
+        d = ((Dog) a);
+        r = d.bark();
+        r = (r + ((a instanceof Dog) ? 1 : 0));
+        r = (r + ((c instanceof Dog) ? 100 : 0));
+        r = (r + ((c instanceof Animal) ? 10 : 0));
+        r = (r + ((n instanceof Animal) ? 1000 : 0));
+        out.print_int(((Animal) d).value());
+        d = ((Dog) n);
+        r = (r + ((d instanceof Dog) ? 1000 : 0));
+        return r;
+    }
+}

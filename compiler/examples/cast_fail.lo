@@ -1,0 +1,16 @@
+// A failing downcast aborts with exit status 101 and names both classes.
+
+class Animal () [ Animal() { ; } ] { }
+class Dog extends Animal () [ Dog() { super(); } ] { }
+class Cat extends Animal () [ Cat() { super(); } ] { }
+
+class Main () {
+    int main() {
+        Animal a; Cat k;
+        a = new Dog();
+        out.print_int(1);
+        out.println();
+        k = ((Cat) a);
+        return 0;
+    }
+}

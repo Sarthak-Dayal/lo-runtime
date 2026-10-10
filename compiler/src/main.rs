@@ -2,6 +2,7 @@
 
 mod add_io_classes;
 mod ast;
+mod codegen;
 mod interpreter;
 mod ir;
 mod layout;
@@ -19,6 +20,19 @@ fn main() -> std::process::ExitCode {
     // abort code) — which `run()`'s String result cannot express — while `run()` and
     // the P1 grading contract (`--check`/`--compile`/`--emit-wasm`) stay untouched.
     let args: Vec<_> = std::env::args_os().collect();
+    // Native back end modes (`--dump-ir`, `--emit-asm`, `--native`).
+    if let Some(result) = codegen::driver::cli(&args) {
+        return match result {
+            Ok(output) => {
+                print!("{output}");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
     if let [_, mode, path] = args.as_slice() {
         if mode == "--run" {
             return run_interpreter(path);

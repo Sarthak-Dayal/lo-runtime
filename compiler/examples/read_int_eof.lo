@@ -1,0 +1,2 @@
+// read_int at end of input aborts with exit status 111.
+class Main () { int main() { return in.read_int(); } }

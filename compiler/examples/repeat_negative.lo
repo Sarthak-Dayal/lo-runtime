@@ -1,0 +1,8 @@
+// Repeating a string a negative number of times aborts with exit status 120.
+class Main () {
+    int main() {
+        String s;
+        s = ("a" * (0 - 1));
+        return 0;
+    }
+}

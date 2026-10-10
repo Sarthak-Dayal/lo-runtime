@@ -1,0 +1,24 @@
+// Reading ints, bools and lines from stdin until end of input.
+// (read_string returns the rest of the current line, so the first one is empty.)
+
+class Main () {
+    int main() {
+        int n; bool b; String s; String t; int sum;
+        n = in.read_int();
+        b = in.read_bool();
+        s = in.read_string();
+        t = in.read_string();
+        out.print_int(n);
+        out.print_bool(b);
+        out.print_string(s);
+        out.print_string(t);
+        out.println();
+        sum = 0;
+        while ((! in.eof())) {
+            sum = (sum + in.read_int());
+        }
+        out.print_int(sum);
+        out.println();
+        return (in.eof() ? 1 : 0);
+    }
+}

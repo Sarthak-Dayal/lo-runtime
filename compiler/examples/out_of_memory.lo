@@ -1,0 +1,21 @@
+// Keeping every node alive exhausts the heap: abort with exit status 137.
+class Node (int v; Node next;) [
+    Node(int x) { v = x; next = null; }
+] {
+    void link(Node n) { next = n; }
+}
+
+class Main () {
+    int main() {
+        Node head; Node n; int i;
+        head = new Node(0);
+        i = 0;
+        while ((i < 100000000)) {
+            n = new Node(i);
+            n.link(head);
+            head = n;
+            i = (i + 1);
+        }
+        return 0;
+    }
+}

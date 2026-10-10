@@ -1,0 +1,16 @@
+// Reassigning the prebound out/err streams.
+// Expected stdout: 2true. Expected stderr: 1. Expected exit status: 0
+
+class Main () {
+    int main() {
+        Output saved;
+        saved = out;
+        out = err;
+        out.print_int(1);
+        saved.print_int(2);
+        err = saved;
+        err.print_bool(true);
+        out.println();
+        return 0;
+    }
+}

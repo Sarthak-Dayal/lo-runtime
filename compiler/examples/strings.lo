@@ -1,0 +1,25 @@
+// String operators on UTF-8 text: concatenate, repeat, reverse, compare, empty strings.
+
+class Main () {
+    int main() {
+        String a; String b; String c;
+        a = "héllo";
+        b = " wörld🙂";
+        c = (a + b);
+        out.print_string(c);
+        out.println();
+        out.print_string((a * 3));
+        out.println();
+        out.print_string((~ c));
+        out.println();
+        out.print_bool((a = a));
+        out.print_bool((a < b));
+        out.print_bool((b > a));
+        out.print_bool((a = b));
+        out.println();
+        out.print_string(("" + ""));
+        out.print_string((a * 0));
+        out.println();
+        return (((~ "ab") = "ba") ? 7 : 0);
+    }
+}
