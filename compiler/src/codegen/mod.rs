@@ -4,6 +4,7 @@
 pub mod data;
 pub mod driver;
 pub mod frame;
+pub mod moves;
 pub mod print;
 pub mod select;
 pub mod x86;

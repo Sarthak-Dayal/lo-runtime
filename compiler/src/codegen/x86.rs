@@ -5,7 +5,7 @@
 //! jumps, 8-bit registers only as `al`/`cl`), and `Inst::check` rejects operand
 //! combinations x86 cannot encode, such as memory-to-memory moves.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Reg {
     Rax,
     Rcx,

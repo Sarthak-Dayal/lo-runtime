@@ -22,6 +22,7 @@ use crate::ir::register_allocator::{
 use crate::ir::{FunctionIr, InstructionKind, IrType};
 use crate::layout::{FrameLayout as ShadowLayout, NATIVE};
 
+use super::moves::{parallel_move, Move};
 use super::x86::{Alu, Inst, Mem, Operand, Reg, Width};
 
 /// System V AMD64 integer argument registers, in order.
@@ -259,31 +260,50 @@ impl Frame {
         ]
     }
 
+    /// Moves incoming parameters to their allocated locations, in three phases so
+    /// nothing is overwritten before it is read:
+    ///   1. stores to memory (they only read argument registers, and stack
+    ///      arguments to memory go through rax, which is no one's source);
+    ///   2. register-to-register moves as one parallel move (they may form cycles
+    ///      when a leaf function allocates rsi/rdi/r8/r9, which are also the
+    ///      incoming argument registers);
+    ///   3. stack-passed arguments into registers (memory sources are never
+    ///      clobbered, but their destinations may be argument registers still
+    ///      needed in phase 2).
     fn move_params(&self, params: &[Param], out: &mut Vec<Inst>) -> Result<(), String> {
+        let mut register_moves = vec![];
+        let mut stack_loads = vec![];
         for (i, param) in params.iter().enumerate() {
             let width = width_of(param.ty);
-            let Operand::Mem(..) = param.dest else {
-                // Register destinations may overlap argument registers and need a
-                // parallel move; that arrives with linear-scan integration.
-                return Err(format!(
-                    "parameter {i}: register destinations are not supported yet"
-                ));
+            let stack_source = || {
+                Operand::Mem(
+                    Self::at(FIRST_STACK_ARGUMENT + SLOT * (i - ARGUMENT_REGISTERS.len()) as i32),
+                    width,
+                )
             };
-            let source = match ARGUMENT_REGISTERS.get(i) {
-                Some(arg) => Operand::Reg(*arg, width),
-                None => {
-                    let stack = Operand::Mem(
-                        Self::at(
-                            FIRST_STACK_ARGUMENT + SLOT * (i - ARGUMENT_REGISTERS.len()) as i32,
-                        ),
-                        width,
-                    );
-                    out.push(Inst::Mov(Operand::Reg(Reg::Rax, width), stack));
-                    Operand::Reg(Reg::Rax, width)
+            match (&param.dest, ARGUMENT_REGISTERS.get(i)) {
+                (Operand::Mem(..), Some(arg)) => {
+                    out.push(Inst::Mov(param.dest.clone(), Operand::Reg(*arg, width)));
                 }
-            };
-            out.push(Inst::Mov(param.dest.clone(), source));
+                (Operand::Mem(..), None) => {
+                    out.push(Inst::Mov(Operand::Reg(Reg::Rax, width), stack_source()));
+                    out.push(Inst::Mov(param.dest.clone(), Operand::Reg(Reg::Rax, width)));
+                }
+                (Operand::Reg(dst, _), Some(arg)) => register_moves.push(Move {
+                    dst: *dst,
+                    src: *arg,
+                    width,
+                }),
+                (Operand::Reg(dst, _), None) => {
+                    stack_loads.push(Inst::Mov(Operand::Reg(*dst, width), stack_source()));
+                }
+                (Operand::Imm(_), _) => {
+                    return Err(format!("parameter {i}: destination cannot be an immediate"))
+                }
+            }
         }
+        out.extend(parallel_move(&register_moves)?);
+        out.extend(stack_loads);
         Ok(())
     }
 
@@ -459,12 +479,75 @@ mod tests {
         );
     }
 
+    fn reg_param(ty: IrType, dest: Reg) -> Param {
+        Param {
+            ty,
+            dest: Operand::Reg(dest, width_of(ty)),
+        }
+    }
+
     #[test]
-    fn register_destination_parameters_are_rejected_for_now() {
+    fn parameters_in_callee_saved_registers_move_directly() {
+        let frame = Frame::new(params(0, 0, &[PhysicalRegId::Rbx], false)).unwrap();
+        let lines = text(
+            &frame
+                .prologue(&[reg_param(IrType::Int32, Reg::Rbx)])
+                .unwrap(),
+        );
+        assert!(lines.contains(&"mov ebx, edi".to_string()));
+    }
+
+    #[test]
+    fn swapped_argument_registers_go_through_r11() {
+        // Parameter 0 (edi) is allocated to esi and parameter 1 (rsi) to rdi.
+        let frame = Frame::new(params(0, 0, &[], false)).unwrap();
+        let lines = text(
+            &frame
+                .prologue(&[
+                    reg_param(IrType::Int32, Reg::Rsi),
+                    reg_param(IrType::Ref, Reg::Rdi),
+                ])
+                .unwrap(),
+        );
+        assert_eq!(lines[2..], ["mov r11, rsi", "mov esi, edi", "mov rdi, r11"]);
+    }
+
+    #[test]
+    fn stack_arguments_load_into_registers_after_the_register_moves() {
+        // Eight parameters; the 7th is allocated to rsi, which parameter 1 arrives in.
+        let frame = Frame::new(params(0, 1, &[PhysicalRegId::Rbx], false)).unwrap();
+        let mut ps: Vec<Param> = (0..8).map(|_| reg_param(IrType::Int32, Reg::Rbx)).collect();
+        // Distinct destinations: 0 -> r8, 1 -> rbx, 6 -> rsi, rest unused-ish.
+        ps[0] = reg_param(IrType::Int32, Reg::R8);
+        ps[1] = reg_param(IrType::Int32, Reg::Rbx);
+        for (k, dest) in [(2, Reg::R12), (3, Reg::R13), (4, Reg::R14), (5, Reg::R15)] {
+            ps[k] = reg_param(IrType::Int32, dest);
+        }
+        ps[6] = reg_param(IrType::Int32, Reg::Rsi);
+        ps[7] = Param {
+            ty: IrType::Int32,
+            dest: Operand::Mem(frame.spill(SpillSlotId(0)), Width::W32),
+        };
+        let lines = text(&frame.prologue(&ps).unwrap());
+        let read_rsi = lines.iter().position(|l| l == "mov ebx, esi").unwrap();
+        let load_rsi = lines
+            .iter()
+            .position(|l| l == "mov esi, dword ptr [rbp + 16]")
+            .unwrap();
+        assert!(
+            read_rsi < load_rsi,
+            "rsi was overwritten before it was read: {lines:?}"
+        );
+        // The 8th goes to memory through rax.
+        assert!(lines.contains(&"mov eax, dword ptr [rbp + 24]".to_string()));
+    }
+
+    #[test]
+    fn immediate_parameter_destinations_are_rejected() {
         let frame = Frame::new(params(0, 0, &[], false)).unwrap();
         let param = Param {
             ty: IrType::Int32,
-            dest: Operand::r32(Reg::Rbx),
+            dest: Operand::imm(0),
         };
         assert!(frame.prologue(&[param]).is_err());
     }
