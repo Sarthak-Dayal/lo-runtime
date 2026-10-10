@@ -1,6 +1,6 @@
 # P2 codegen: instruction selection
 
-Decision: **no low-level IR. Select directly from `InstructionKind`/`Terminator` into a typed `X86Inst` enum.**
+Decision: **no low-level IR. Select directly from `InstructionKind`/`Terminator` into a typed `Inst` enum.**
 
 ## 1. The question
 
@@ -25,7 +25,7 @@ What the handout actually asks for is a *discipline you can state*. That is a pr
    - `dst(vreg)`: returns the destination location, or the scratch plus a pending write-back.
 3. **Reserved scratch registers:** `rax`, `rcx`, `rdx`, `r10`, `r11`. The allocator already reserves exactly these (`target.rs`), so the selector cannot clobber an allocated value. `rax`/`rdx` double as the `cdq`/`idiv` registers.
 4. **Width discipline.** `Int32` and `Bool` use 32-bit registers (`eax`); `Ref`, `Ptr`, `CodePtr` use 64-bit (`rax`). Width comes from the register or operand type, never from the call site. Writing a 32-bit register zero-extends, so no extra instruction is needed.
-5. **Typed output.** The selector produces `X86Inst` values. The enum contains only subset instructions, so out-of-subset code cannot be emitted. Tests compare instruction lists structurally; `print.rs` is the only place that formats text.
+5. **Typed output.** The selector produces `Inst` values. The enum contains only subset instructions, so out-of-subset code cannot be emitted. Tests compare instruction lists structurally; `print.rs` is the only place that formats text.
 
 ## 4. Emission table
 
@@ -64,7 +64,7 @@ Spill-everything locations are written `[rbp-k]`; with linear scan the same temp
 - `rsp` must be 16-byte aligned at the `call`. The frame is sized so it is aligned at function body level; when an odd number of stack arguments are pushed, pad with `sub rsp, 8` first, and clean up after the call.
 - `Int32` and `Bool` arguments are passed in the 32-bit register half. `Ref`/`Ptr` are 64-bit.
 - **Bool returns:** System V leaves bits 8-31 of `eax` undefined for a `bool`-returning callee. After any call whose result type is `Bool` (for example `lo_instanceof`), emit `movzx eax, al`.
-- Argument sources in spill-everything mode are memory or immediates, so loading straight into argument registers cannot conflict. With linear scan this becomes a parallel-move problem; see the regalloc doc.
+- Sequential argument moves are correct because a function that makes a call is allocated only callee-saved registers, so no operand is ever in an argument register. The selector returns an error if that invariant is ever violated. Incoming *parameters* are a different case (they arrive in the argument registers) and are handled by the parallel move in the prologue; see [register allocation](p2-codegen-regalloc-integration.md).
 - Indirect callee goes to `r11`, which is never an argument register.
 
 ## 6. Out of scope / notes
@@ -76,6 +76,6 @@ Spill-everything locations are written `[rbp-k]`; with linear scan the same temp
 
 ## 7. Testing
 
-- Per-operator golden tests: IR instruction in, expected `X86Inst` list out (structural), plus a small set of printed-text checks for `print.rs`.
-- Every mnemonic printed must appear in `instruction_subset.md`; add a test that scans `X86Inst` variants against the allowed list.
-- Run each emitted program through `as` in the amd64 container (see overview §5).
+- Per-operator golden tests: IR instruction in, expected `Inst` list out (structural), plus a small set of printed-text checks for `print.rs`.
+- Subset conformance is by construction: `Inst` has no variant outside `instruction_subset.md`, and `Inst::check` rejects unencodable operand forms (memory-to-memory, width mismatch, 64-bit immediates outside `mov reg64, imm`).
+- Every emitted program is assembled, linked and run in an amd64 Linux container, and its stdout, stderr and exit status must match the interpreter's.

@@ -1,6 +1,6 @@
 # P2 codegen: frame and shadow stack
 
-`FrameLayout` (`codegen/frame.rs`) owns every stack offset and the prologue/epilogue. The selector never computes an offset; it asks the frame. This is the seam that stays stable while instruction selection and allocation change.
+`Frame` (`codegen/frame.rs`) owns every stack offset and the prologue/epilogue. The selector never computes an offset; it asks the frame. This is the seam that stays stable while instruction selection and allocation change.
 
 ## 1. Inputs
 
@@ -8,11 +8,9 @@
 |---|---|
 | Root slot count | `FunctionIr.root_slots` (after `insert_gc_roots`) |
 | Spill slot count | `FunctionAllocation` (spill-everything: one per virtual register) |
-| Callee-saved registers used | `FunctionAllocation` (none in spill-everything mode) |
-| Max outgoing stack args | scan the function's `Call`/`Abort` instructions |
+| Callee-saved registers used | `FunctionAllocation.used_callee_saved_registers` (none under spill-everything) |
+| Whether the function calls | scan for `Call` (decides if there is a shadow frame) |
 | Parameter count and types | `FunctionIr.params`, `register_types` |
-
-Verify the exact `FunctionAllocation` fields when implementing; adjust here if a field is missing.
 
 ## 2. Layout (stack grows down)
 
@@ -39,7 +37,7 @@ Alignment: at function entry `rsp ≡ 8 (mod 16)`; after `push rbp`, `rsp ≡ 0`
 
 1. `push rbp ; mov rbp, rsp ; sub rsp, N`
 2. Save used callee-saved registers into their slots.
-3. Move incoming parameters from `rdi, rsi, rdx, rcx, r8, r9` (and `[rbp+16+8*k]` for the rest) to their allocated locations. In spill-everything mode: store each to its spill slot.
+3. Move incoming parameters from `rdi, rsi, rdx, rcx, r8, r9` (and `[rbp+16+8*k]` for the rest) to their allocated locations, in three ordered phases: stores to memory, then the register-to-register moves as one parallel move (cycles broken through `r11`), then stack-passed arguments into registers. See [register allocation](p2-codegen-regalloc-integration.md) §4.
 4. Write the shadow frame: `parent = 0` (the runtime fills it in), `num_roots = n`, every root slot `= 0`. Roots must be null before the first safepoint.
 5. `lea rdi, [shadow] ; call lo_push_frame`
 
@@ -70,12 +68,12 @@ For `void` functions, skip the `ret_save` steps.
 
 Rule (confirmed by the language reference via NotebookLM): **register a frame iff the function contains at least one `Call`**, even when `root_slots == 0`, because every call is a safepoint and the frame keeps the parent chain intact. A leaf function (no `Call`) skips `lo_push_frame`/`lo_pop_frame` entirely: no safepoint, so the GC cannot run inside it. A leaf has no shadow frame, no root slots, and no `ret_save` slot, and its epilogue is just `leave ; ret`.
 
-`FrameLayout` takes a `has_calls` flag (computed by scanning the function for `Call`) and omits the shadow frame, `ret_save`, and the `lo_push_frame`/`lo_pop_frame` calls when it is false. An `Abort`-only function counts as a leaf (confirmed, overview §6b).
+`Frame` takes a `has_calls` flag (computed by scanning the function for `Call`) and omits the shadow frame, `ret_save`, and the `lo_push_frame`/`lo_pop_frame` calls when it is false. An `Abort`-only function counts as a leaf (confirmed, overview §6b).
 
 **A leaf is not stack-less.** A function that only aborts still calls `lo_abort_*`, which runs libc `fprintf`; a misaligned `rsp` at that `call` can fault on SSE. Every function, leaf or not, keeps `push rbp ; mov rbp, rsp ; sub rsp, N` with `N` chosen so `rsp` is 16-byte aligned at every `call`/`Abort`. Test: an abort-only function and a leaf with spills, checking alignment.
 
 ## 7. Testing
 
-- Unit-test `FrameLayout` offsets against the table in `native-layout-reference-guide.md` (shadow frame `16 + 8n`).
+- Unit-test `Frame` offsets against the table in `native-layout-reference-guide.md` (shadow frame `16 + 8n`).
 - Assert 16-byte alignment: for generated frames with 0..8 roots, 0..8 spills and 0..3 stack args, `N + pushed bytes` keeps `rsp` aligned at calls.
 - End to end: a program that allocates in a loop (forces collection) with live references across calls; run under the Cheney collector in the container.

@@ -12,10 +12,10 @@ Source: the `lo-runtime-wt` worktree (branch `feat/ast-to-ir-lowering`, uncommit
      |  lower_program(program, classes, TargetLayout)          <-- NEW (this PR)
      v
  CheckedIr  (verified ProgramIr: functions, symbols, data, startup = lo_entry)
-     |  insert_gc_roots          (feat/gc-roots, already here)
+     |  insert_gc_roots
      v
  ProgramIr  (+ RootStore/RootLoad around every Call)
-     |  allocate_registers       (linear scan; spill-everything first)
+     |  allocation               (linear scan by default; --spill-all for the reference)
      v
  ProgramAllocation
      |  codegen::emit_program    <-- what we are building
