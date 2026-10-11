@@ -1000,7 +1000,7 @@ fn root_stores_read_initialized_values() {
 }
 
 #[test]
-fn reference_stores_accept_writable_data_symbols_but_not_ptr_registers() {
+fn reference_stores_accept_only_the_bindings_frame_and_not_ptr_registers() {
     let mut p = example();
     p.symbols.push(Symbol {
         name: "lo_bindings".into(),
@@ -1023,6 +1023,9 @@ fn reference_stores_accept_writable_data_symbols_but_not_ptr_registers() {
     };
     p.functions[0].blocks[0].instructions.push(store);
     p.validate().unwrap();
+    p.symbols[1].name = "other_static".into();
+    assert!(p.validate().unwrap_err().contains("write-barrier call"));
+    p.symbols[1].name = "lo_bindings".into();
     let address = p.functions[0].new_register(IrType::Ptr, Some("address".into()));
     p.functions[0].blocks[0].instructions.insert(
         0,
@@ -1067,6 +1070,7 @@ fn stores_to_read_only_symbols_are_rejected_for_all_value_types() {
         (Operand::Symbol(SymbolId(2)), IrType::Ref),
         (Operand::Symbol(SymbolId(1)), IrType::Ptr),
     ] {
+        let null_reference = matches!(value, Operand::Null);
         p.functions[0].blocks[0].instructions = vec![Instruction {
             kind: InstructionKind::Store {
                 base: Operand::Symbol(SymbolId(1)),
@@ -1082,10 +1086,13 @@ fn stores_to_read_only_symbols_are_rejected_for_all_value_types() {
                 .contains("store to read-only data descriptor"),
             "{ty:?}"
         );
-        // The same typed store is legal when its destination is writable.
-        p.data[0].section = Section::Writable;
-        p.validate().unwrap();
-        p.data[0].section = Section::ReadOnly;
+        // The same typed store is legal when its destination is writable,
+        // except a heap reference, which needs a barrier outside lo_bindings.
+        if !null_reference {
+            p.data[0].section = Section::Writable;
+            p.validate().unwrap();
+            p.data[0].section = Section::ReadOnly;
+        }
     }
 }
 

@@ -348,7 +348,10 @@ impl ProgramIr {
                         if data.is_some_and(|data| data.section == Section::ReadOnly) {
                             return Err(format!("store to read-only data {}", symbol.name));
                         }
-                        matches!(symbol.kind, SymbolKind::Data)
+                        // Only the prebound frame is a registered GC root; a pointer
+                        // stored into any other static would be invisible to the GC.
+                        symbol.name == crate::symbols::BINDINGS
+                            && matches!(symbol.kind, SymbolKind::Data)
                             && data.is_some_and(|data| data.section == Section::Writable)
                     }
                     _ => false,
