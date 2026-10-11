@@ -1,8 +1,10 @@
-//! Typed x86-64 instructions, restricted to the LO subset (instruction_subset.md).
+//! Typed x86-64 instructions, restricted to the LO subset (language reference,
+//! chapter 8, "LO Architecture Reference").
 //!
 //! The selector emits `Inst` values; `print.rs` is the only code that formats text.
-//! The types make out-of-subset instructions unrepresentable (no SIMD, no unsigned
-//! jumps, 8-bit registers only as `al`/`cl`), and `Inst::check` rejects operand
+//! The types rule out most out-of-subset instructions (no SIMD, no unsigned
+//! jumps, 8-bit registers only as `al`/`cl`). `Inst::check` rejects the rest:
+//! operand forms the subset excludes, such as `push` from memory, and
 //! combinations x86 cannot encode, such as memory-to-memory moves.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -224,18 +226,15 @@ impl Inst {
             }
             Inst::Lea(_, Mem::Base { .. } | Mem::Rip(_)) => Ok(()),
             Inst::Push(src) => match src {
-                Operand::Reg(_, Width::W32) | Operand::Mem(_, Width::W32) => {
-                    Err("push takes a 64-bit operand".into())
-                }
+                Operand::Mem(..) => Err("push takes a register or an immediate".into()),
+                Operand::Reg(_, Width::W32) => Err("push takes a 64-bit operand".into()),
                 _ => imm_ok(src, Width::W64, false),
             },
-            Inst::Pop(dst) => {
-                not_imm(dst, "pop destination")?;
-                match dst.width() {
-                    Some(Width::W64) => Ok(()),
-                    _ => Err("pop takes a 64-bit operand".into()),
-                }
-            }
+            Inst::Pop(dst) => match dst {
+                Operand::Reg(_, Width::W64) => Ok(()),
+                _ => Err("pop takes a 64-bit register".into()),
+            },
+            Inst::SetCc(_, Reg8::Cl) => Err("setcc writes al only".into()),
             Inst::Movzx(_, _, _) => Ok(()),
             Inst::Alu(op, dst, src) => {
                 not_imm(dst, "first operand")?;
@@ -269,7 +268,7 @@ impl Inst {
             Inst::Cdq
             | Inst::Cqo
             | Inst::Jcc(..)
-            | Inst::SetCc(..)
+            | Inst::SetCc(_, Reg8::Al)
             | Inst::Jmp(_)
             | Inst::Call(_)
             | Inst::Ret
@@ -344,5 +343,14 @@ mod tests {
         assert!(Inst::Push(Operand::r32(Rax)).check().is_err());
         assert!(Inst::Pop(Operand::r32(Rax)).check().is_err());
         assert!(Inst::CallIndirect(Operand::r32(R11)).check().is_err());
+    }
+
+    #[test]
+    fn forms_outside_the_subset_are_rejected() {
+        let slot = Operand::mem(Rbp, -8, Width::W64);
+        assert!(Inst::Push(slot.clone()).check().is_err());
+        assert!(Inst::Pop(slot).check().is_err());
+        assert!(Inst::SetCc(Cond::E, Reg8::Cl).check().is_err());
+        assert_eq!(Inst::SetCc(Cond::E, Reg8::Al).check(), Ok(()));
     }
 }

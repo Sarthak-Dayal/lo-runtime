@@ -31,7 +31,14 @@ pub fn emit_program(program: &ProgramIr, allocation: &ProgramAllocation) -> Resu
             program, function, allocation, is_startup,
         )?);
     }
-    items.extend(main_wrapper(program)?);
+    let wrapper = main_wrapper(program)?;
+    for item in &wrapper {
+        if let Item::Inst(inst) = item {
+            inst.check()
+                .map_err(|error| format!("main: {error}: {inst:?}"))?;
+        }
+    }
+    items.extend(wrapper);
     items.extend(data::emit_data(program)?);
     // Without this note the linker assumes an executable stack.
     items.push(Item::Directive(String::new()));

@@ -426,8 +426,8 @@ impl Selector<'_> {
     }
 
     /// Sequential argument moves are only correct when no argument lives in an
-    /// argument register. Spill-everything guarantees that; a register allocator
-    /// must use a parallel move instead.
+    /// argument register. Spill-everything uses no registers, and linear scan
+    /// gives functions that call only callee-saved registers, so this holds.
     fn reject_argument_register_sources(
         &self,
         target: &CallTarget,
