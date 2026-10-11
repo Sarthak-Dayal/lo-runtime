@@ -89,10 +89,8 @@ impl<'a> Context<'a> {
                 self.ir
                     .declare_method(name, &info.effective_methods[&method.method_name].sig)?;
             }
-            self.layouts.insert(
-                name.clone(),
-                class_layout(self.target, self.classes, name),
-            );
+            self.layouts
+                .insert(name.clone(), class_layout(self.target, self.classes, name));
         }
         crate::ir::statics::define_static_data(&mut self.ir, self.classes, self.target)?;
         let startup = self

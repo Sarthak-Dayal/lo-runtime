@@ -4,8 +4,8 @@ use crate::type_checker::{
 };
 
 use super::{length, value_type, Builder};
-use crate::symbols;
 use crate::ir::*;
+use crate::symbols;
 
 impl Builder<'_, '_> {
     pub(super) fn load(&mut self, base: Operand, offset: i32, ty: IrType, line: u32) -> Operand {
@@ -102,7 +102,9 @@ impl Builder<'_, '_> {
                 self.store_field(self.receiver(), offset, value, value_type(ty)?, line)?;
             }
             BindingInfo::Prebound(_) => {
-                self.store_binding(name, value, line)?;
+                return Err(format!(
+                    "IR: assignment to pre-bound {name} passed type checking"
+                ));
             }
         }
         Ok(())
@@ -175,7 +177,9 @@ impl Builder<'_, '_> {
         for offset in self.ctx.string_offsets(class)? {
             self.store_field(object, offset, empty, IrType::Ref, line)?;
         }
-        let ctor = self.ctx.symbol(&symbols::constructor(class, actuals.len()))?;
+        let ctor = self
+            .ctx
+            .symbol(&symbols::constructor(class, actuals.len()))?;
         let mut args = vec![object];
         args.extend(actuals);
         self.call(ctor, args, line);
@@ -294,7 +298,9 @@ impl Builder<'_, '_> {
                 } else {
                     "Output"
                 };
-                let symbol = self.ctx.symbol(&symbols::method(class, &call.method_name))?;
+                let symbol = self
+                    .ctx
+                    .symbol(&symbols::method(class, &call.method_name))?;
                 let mut args = vec![receiver];
                 args.extend(actuals);
                 Ok(self.call(symbol, args, call.line))
@@ -323,12 +329,7 @@ impl Builder<'_, '_> {
             .collect();
         if output {
             let destination = self.ctx.output_destination()?;
-            args.push(self.load(
-                self.receiver(),
-                destination,
-                IrType::Int32,
-                line,
-            ));
+            args.push(self.load(self.receiver(), destination, IrType::Int32, line));
         }
         let result = self.runtime(name, args, line)?;
         self.finish(Terminator::Return(result));

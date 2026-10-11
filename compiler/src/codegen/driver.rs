@@ -16,10 +16,10 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::ir::lower::lower_program;
-use crate::layout::NATIVE;
 use crate::ir::register_allocator::spill_all::spill_everything_program;
 use crate::ir::register_allocator::{allocate_registers, TargetConstraints};
 use crate::ir::{gc_roots, CheckedIr};
+use crate::layout::NATIVE;
 
 use super::emit_program;
 
@@ -189,7 +189,7 @@ mod tests {
         include_str!("../../../tests/lo_programs/string_basic.lo"),
         "class Parent (int n;) { int value() { return n; } } class Child extends Parent (int m; String text;) [ Child() { super(1); m = 2; text = \"hi\"; } ] { int value() { return (super.value() + m); } int sum() { return (n + m); } } class Main () { int main() { Parent p; p = new Child(); out.print_int(p.value()); out.print_string((\"x\" + \"y\")); return ((p instanceof Child) ? ((Child) p).sum() : 0); } }",
         "class Main () { int f(int a, int b, int c, int d, int e, int g, int h, int i) { return ((((a + b) + (c * d)) + ((e - g) / h)) % i); } int fact(int n) { return ((n < 2) ? 1 : (n * this.fact((n - 1)))); } int main() { return (this.f(1,2,3,4,5,6,7,8) + this.fact(5)); } }",
-        "class Main () { int main() { Output saved; saved = out; out = err; out.print_int(1); saved.print_int(2); err = saved; err.print_bool(true); out.println(); return 0; } }",
+        "class Main () { int main() { Output saved; saved = err; out.print_int(1); saved.print_int(2); saved.print_bool(true); out.println(); return 0; } }",
         "class Main () { int main() { int i; String s; i = 0; s = \"\"; while ((i < 5)) { s = (s + \"a\"); i = (i + 1); if ((i > 3)) { break; } else { i = i; } } out.print_string(s); return ((10 / (i - 4)) + (7 % (0 - 1))); } }",
         "class Node (int v; Node next;) [ Node(int x) { v = x; next = null; } ] { int get() { return v; } void link(Node n) { next = n; } } class Main () { int main() { Node a; Node b; a = new Node(1); b = new Node(2); a.link(b); return (a.get() + b.get()); } }",
     ];

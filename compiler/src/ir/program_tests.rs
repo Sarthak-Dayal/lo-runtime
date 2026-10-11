@@ -1,8 +1,8 @@
 //! Behavioral test machine for semantic IR; deliberately does not simulate GC.
 //! It executes target-width data, memory, dispatch, roots, and runtime calls.
 use super::lower::lower_program;
-use crate::layout::{Target, NATIVE};
 use super::*;
+use crate::layout::{Target, NATIVE};
 use crate::type_checker::{ClassTable, TypedProgram};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -70,11 +70,7 @@ impl<'a> Machine<'a> {
                         address += 4;
                     }
                     DataItem::Addr(id) => {
-                        m.write(
-                            address,
-                            target.ptr as usize,
-                            m.addresses[id.0] as i64,
-                        );
+                        m.write(address, target.ptr as usize, m.addresses[id.0] as i64);
                         address += target.ptr as usize;
                     }
                     DataItem::Bytes(b) => {
@@ -258,10 +254,7 @@ impl<'a> Machine<'a> {
 
     fn string(&mut self, bytes: &[u8]) -> i64 {
         let header = self.target.header_size() as usize;
-        let address = self.allocate(
-            header + 4 + bytes.len(),
-            self.target.ptr as usize,
-        );
+        let address = self.allocate(header + 4 + bytes.len(), self.target.ptr as usize);
         self.write(address + header, 4, bytes.len() as i64);
         self.memory[address + header + 4..address + header + 4 + bytes.len()]
             .copy_from_slice(bytes);
@@ -430,8 +423,8 @@ fn compare(source: &str, input: &str, expected: Result<i32, i32>, stdout: &str, 
     compare_impl(source, input, expected, stdout, stderr, true);
 }
 
-// The AST interpreter rejects prebound writes internally and null-checks before
-// actuals, unlike the existing WASM backend and the agreed lowering contract.
+// The AST interpreter null-checks a receiver before evaluating the actuals,
+// unlike the WASM backend and LO-3 §3.4.3.
 fn compare_ir(source: &str, input: &str, expected: Result<i32, i32>, stdout: &str, stderr: &str) {
     compare_impl(source, input, expected, stdout, stderr, false);
 }
@@ -571,17 +564,9 @@ fn casts_instanceof_and_abort_paths() {
 
 #[test]
 fn prebound_reassignment_and_io_wrappers() {
-    compare_ir("class Main () { int main() { Output saved; saved = out; out = err; out.print_int(1); saved.print_int(2); err = saved; err.print_bool(true); out.println(); return 0; } }", "", Ok(0), "2true", "1\n");
+    compare("class Main () { int main() { Output saved; saved = err; out.print_int(1); saved.print_int(2); saved.print_bool(true); out.println(); return 0; } }", "", Ok(0), "1\n", "2true");
     compare("class Main () { int main() { int n; bool b; n = in.read_int(); b = in.read_bool(); out.print_int(n); err.print_bool(b); out.println(); return (in.eof() ? 1 : 0); } }", "41 true", Ok(1), "41\n", "true");
     compare("class Main () { int main() { String s; while ((! in.eof())) { s = in.read_string(); out.print_string(s); } return 0; } }", "hello\né🙂\n", Ok(0), "helloé🙂", "");
-    compare_ir("class Main () { int main() { Input saved; saved = in; in = null; return saved.read_int(); } }", "8", Ok(8), "", "");
-    compare_ir(
-        "class Main () { int main() { out = null; out.println(); return 0; } }",
-        "",
-        Err(102),
-        "",
-        "",
-    );
     compare(
         "class Main () { int main() { return in.read_int(); } }",
         "",
@@ -653,10 +638,7 @@ fn target_layout_metadata_and_inherited_slots() {
         assert_eq!(machine.read(refs, IrType::Int32), text);
         assert_eq!(machine.read(refs + 4, IrType::Int32), link);
         assert_eq!(machine.read(child + slots_offset, IrType::Int32), 2);
-        let table = machine.read(
-            child + target.descriptor().vtable as usize,
-            IrType::Ptr,
-        ) as usize;
+        let table = machine.read(child + target.descriptor().vtable as usize, IrType::Ptr) as usize;
         assert_eq!(
             machine.read(table, IrType::Ptr),
             address("lo_method_5_Child_5_value") as i64
@@ -680,14 +662,7 @@ fn target_layout_metadata_and_inherited_slots() {
                 DataItem::Bytes(b) => b.len(),
             })
             .sum();
-        assert_eq!(
-            size,
-            if target == WASM32 {
-                32
-            } else {
-                56
-            }
-        );
+        assert_eq!(size, if target == WASM32 { 32 } else { 56 });
         let frame = target.frame();
         let id = ir.find_symbol("lo_bindings").unwrap();
         let data = ir.data.iter().find(|d| d.symbol == id).unwrap();
@@ -715,14 +690,7 @@ fn target_layout_metadata_and_inherited_slots() {
             })
             .sum();
         assert_eq!(size, frame.size(3) as usize);
-        assert_eq!(
-            size,
-            if target == WASM32 {
-                20
-            } else {
-                40
-            }
-        );
+        assert_eq!(size, if target == WASM32 { 20 } else { 40 });
         assert!(!ir.symbols.iter().any(|s| s.name.starts_with("lo_binding_")));
     }
 }
@@ -742,10 +710,7 @@ fn allocation_evaluates_actuals_before_constructor_and_defaults() {
         "12",
         "",
     );
-    let (_, _, ir) = checked(
-        "class Main () { int main() { return 0; } }",
-        WASM32,
-    );
+    let (_, _, ir) = checked("class Main () { int main() { return 0; } }", WASM32);
     let startup = ir
         .program()
         .functions
@@ -894,11 +859,6 @@ fn shared_smoke_fixtures_match_interpreter_on_both_targets() {
 }
 
 #[test]
-fn receiver_snapshot_survives_prebound_changes_in_arguments() {
-    compare_ir("class Main () { int redirect() { out = err; return 7; } int main() { out.print_int(this.redirect()); out.print_int(8); return 0; } }", "", Ok(0), "7", "8");
-}
-
-#[test]
 fn upcasts_and_literal_null_casts_emit_no_runtime_check() {
     let source = "class Animal () { int value() { return 1; } } class Dog extends Animal () [ Dog() { super(); } ] { int value() { return 2; } } class Main () { int main() { Animal a; Dog d; d = ((Dog) null); a = ((Animal) d); return ((a instanceof Animal) ? 1 : 0); } }";
     compare(source, "", Ok(0), "", "");
@@ -906,4 +866,20 @@ fn upcasts_and_literal_null_casts_emit_no_runtime_check() {
     assert!(!ir.program().functions.iter().flat_map(|f| &f.blocks).flat_map(|b| &b.instructions).any(|i| {
         matches!(i.kind, InstructionKind::Call { target: CallTarget::Direct(id), .. } if ir.program().symbols[id.0].name == "lo_cast_check")
     }));
+}
+
+#[test]
+fn assignment_to_prebound_names_is_rejected() {
+    for source in [
+        "class Main () { int main() { out = err; return 0; } }",
+        "class Main () { int main() { in = null; return 0; } }",
+    ] {
+        let tokens = crate::lexer::tokenize(source).unwrap();
+        let ast = crate::parser::parse_program(&tokens).unwrap();
+        let error = crate::type_checker::check_program(ast).err().expect(source);
+        assert_eq!(
+            error.code,
+            crate::type_checker::ErrorCode::EWellFormednessOther
+        );
+    }
 }

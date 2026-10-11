@@ -80,7 +80,9 @@ fn lower_constructor(
                 };
                 let mut args = vec![builder.receiver()];
                 args.extend(builder.actuals(actuals)?);
-                let symbol = builder.ctx.symbol(&symbols::constructor(&target, actuals.len()))?;
+                let symbol = builder
+                    .ctx
+                    .symbol(&symbols::constructor(&target, actuals.len()))?;
                 builder.call(symbol, args, line);
             }
             builder.statements(stmts)?;

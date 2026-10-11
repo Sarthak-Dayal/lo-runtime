@@ -277,6 +277,14 @@ fn check_stmt(
                     format!("unknown variable '{}'", name),
                 )
             })?;
+            // P17 assigns only to fields, formals and locals; `in`/`out`/`err` are none of these.
+            if matches!(binding, BindingInfo::Prebound(_)) {
+                return Err(TypeError::new(
+                    ErrorCode::EWellFormednessOther,
+                    *line,
+                    format!("cannot assign to pre-bound name '{}'", name),
+                ));
+            }
             let typed_value = check_expr(expr, scope, ctx, table)?;
             if !assignment_compatible(&typed_of(&typed_value), binding.ty(), table) {
                 return Err(TypeError::new(
