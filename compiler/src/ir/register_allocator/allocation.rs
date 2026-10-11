@@ -4,7 +4,7 @@ use super::{
     FunctionAllocation, PhysicalLocation, PhysicalRegId, ProgramAllocation,
     RegisterAllocationError, SpillSlotId, TargetConstraints,
 };
-use crate::ir::{CheckedIr, FunctionIr, InstructionKind, SymbolId, Terminator};
+use crate::ir::{CheckedIr, FunctionIr, SymbolId};
 use std::collections::HashMap;
 
 // An interval currently occupying a physical register.
@@ -29,14 +29,8 @@ pub fn allocate(
             .ok_or(RegisterAllocationError::MissingIntervals(function.symbol))?;
         validate_intervals(function, live_intervals)?;
 
-        let has_calls = function.blocks.iter().any(|block| {
-            block
-                .instructions
-                .iter()
-                .any(|instruction| matches!(instruction.kind, InstructionKind::Call { .. }))
-                || matches!(block.terminator, Terminator::Abort { .. })
-        });
-        let function_allocation = allocate_function(live_intervals, target_constraints, has_calls);
+        let function_allocation =
+            allocate_function(live_intervals, target_constraints, function.has_calls());
         function_allocations.insert(function.symbol, function_allocation);
     }
 
@@ -78,6 +72,14 @@ pub(super) fn allocate_function(
             &mut active_intervals,
             &mut free_physical_registers,
         );
+        // Hand out registers in pool order, so caller-saved ones stay preferred
+        // after others are freed.
+        free_physical_registers.sort_by_key(|register| {
+            target_constraints
+                .allocatable_registers
+                .iter()
+                .position(|r| r == register)
+        });
 
         if free_physical_registers.is_empty() {
             spill_at_interval(

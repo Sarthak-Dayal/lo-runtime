@@ -124,6 +124,15 @@ pub struct FunctionIr {
 }
 
 impl FunctionIr {
+    /// True if the function contains a `Call`. `Abort` does not count: it never
+    /// returns, so nothing it clobbers is observed, and it is not a safepoint.
+    pub fn has_calls(&self) -> bool {
+        self.blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| matches!(instruction.kind, InstructionKind::Call { .. }))
+    }
+
     /// Adds a mutable virtual register, keeping its type and optional name together.
     /// The register is initially unassigned unless it is added to `params`.
     ///

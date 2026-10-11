@@ -18,7 +18,7 @@
 use crate::ir::register_allocator::{
     FunctionAllocation, PhysicalLocation, PhysicalRegId, SpillSlotId,
 };
-use crate::ir::{FunctionIr, InstructionKind, IrType};
+use crate::ir::{FunctionIr, IrType};
 use crate::layout::{FrameLayout as ShadowLayout, NATIVE};
 
 use super::moves::{parallel_move, Move};
@@ -87,12 +87,7 @@ impl FrameParams {
         allocation: &FunctionAllocation,
         is_startup: bool,
     ) -> FrameParams {
-        // `Abort` is not a safepoint (gc_roots.rs), so an abort-only function is a leaf.
-        let has_calls = function
-            .blocks
-            .iter()
-            .flat_map(|block| &block.instructions)
-            .any(|instruction| matches!(instruction.kind, InstructionKind::Call { .. }));
+        let has_calls = function.has_calls();
         FrameParams {
             root_slots: function.root_slots,
             spill_slot_count: allocation.spill_slot_count,
