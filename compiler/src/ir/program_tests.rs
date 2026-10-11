@@ -1,12 +1,15 @@
 //! Behavioral test machine for semantic IR; deliberately does not simulate GC.
 //! It executes target-width data, memory, dispatch, roots, and runtime calls.
-use super::lower::{lower_program, TargetLayout};
+use super::lower::lower_program;
+use crate::layout::{Target, NATIVE};
 use super::*;
 use crate::type_checker::{ClassTable, TypedProgram};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-fn checked(source: &str, target: TargetLayout) -> (TypedProgram, ClassTable, CheckedIr) {
+const WASM32: Target = Target { ptr: 4 };
+
+fn checked(source: &str, target: Target) -> (TypedProgram, ClassTable, CheckedIr) {
     let tokens = crate::lexer::tokenize(source).unwrap();
     let ast = crate::parser::parse_program(&tokens).unwrap();
     let (typed, classes) = crate::type_checker::check_program(ast).unwrap();
@@ -16,7 +19,7 @@ fn checked(source: &str, target: TargetLayout) -> (TypedProgram, ClassTable, Che
 
 struct Machine<'a> {
     program: &'a ProgramIr,
-    target: TargetLayout,
+    target: Target,
     memory: Vec<u8>,
     addresses: Vec<usize>,
     input: Vec<u8>,
@@ -28,7 +31,7 @@ struct Machine<'a> {
 }
 
 impl<'a> Machine<'a> {
-    fn new(program: &'a ProgramIr, target: TargetLayout, input: &str) -> Self {
+    fn new(program: &'a ProgramIr, target: Target, input: &str) -> Self {
         let mut m = Self {
             program,
             target,
@@ -51,7 +54,7 @@ impl<'a> Machine<'a> {
                 .iter()
                 .map(|item| match item {
                     DataItem::U32(_) => 4,
-                    DataItem::Addr(_) => target.pointer_bytes() as usize,
+                    DataItem::Addr(_) => target.ptr as usize,
                     DataItem::Bytes(b) => b.len(),
                     DataItem::Zero(n) => *n as usize,
                 })
@@ -69,10 +72,10 @@ impl<'a> Machine<'a> {
                     DataItem::Addr(id) => {
                         m.write(
                             address,
-                            target.pointer_bytes() as usize,
+                            target.ptr as usize,
                             m.addresses[id.0] as i64,
                         );
-                        address += target.pointer_bytes() as usize;
+                        address += target.ptr as usize;
                     }
                     DataItem::Bytes(b) => {
                         m.memory[address..address + b.len()].copy_from_slice(b);
@@ -103,7 +106,7 @@ impl<'a> Machine<'a> {
     fn width(&self, ty: IrType) -> usize {
         match ty {
             IrType::Int32 | IrType::Bool => 4,
-            _ => self.target.pointer_bytes() as usize,
+            _ => self.target.ptr as usize,
         }
     }
 
@@ -150,7 +153,7 @@ impl<'a> Machine<'a> {
         for (&id, &value) in function.params.iter().zip(args) {
             values[id.0] = value;
         }
-        let ptr = self.target.pointer_bytes() as usize;
+        let ptr = self.target.ptr as usize;
         let roots = self.allocate(function.root_slots as usize * ptr, ptr);
         let mut block = function.entry;
         loop {
@@ -254,10 +257,10 @@ impl<'a> Machine<'a> {
     }
 
     fn string(&mut self, bytes: &[u8]) -> i64 {
-        let header = self.target.object_header_bytes() as usize;
+        let header = self.target.header_size() as usize;
         let address = self.allocate(
             header + 4 + bytes.len(),
-            self.target.pointer_bytes() as usize,
+            self.target.ptr as usize,
         );
         self.write(address + header, 4, bytes.len() as i64);
         self.memory[address + header + 4..address + header + 4 + bytes.len()]
@@ -266,7 +269,7 @@ impl<'a> Machine<'a> {
     }
 
     fn string_bytes(&self, address: i64) -> &[u8] {
-        let base = address as usize + self.target.object_header_bytes() as usize;
+        let base = address as usize + self.target.header_size() as usize;
         let length = self.read(base, IrType::Int32) as usize;
         &self.memory[base + 4..base + 4 + length]
     }
@@ -276,11 +279,7 @@ impl<'a> Machine<'a> {
             return false;
         }
         let mut descriptor = self.read(object as usize, IrType::Ptr);
-        let parent_offset = if self.target == TargetLayout::Wasm32 {
-            8
-        } else {
-            16
-        };
+        let parent_offset = self.target.descriptor().parent as usize;
         while descriptor != 0 {
             if descriptor == target {
                 return true;
@@ -305,20 +304,16 @@ impl<'a> Machine<'a> {
         let result = match name {
             "lo_runtime_init" | "lo_push_frame" | "lo_pop_frame" => None,
             "lo_alloc" => {
-                let size_offset = if self.target == TargetLayout::Wasm32 {
-                    12
-                } else {
-                    24
-                };
+                let size_offset = self.target.descriptor().instance_size as usize;
                 let size = self.read(args[0] as usize + size_offset, IrType::Int32) as usize;
-                let object = self.allocate(size, self.target.pointer_bytes() as usize);
-                self.write(object, self.target.pointer_bytes() as usize, args[0]);
+                let object = self.allocate(size, self.target.ptr as usize);
+                self.write(object, self.target.ptr as usize, args[0]);
                 Some(object as i64)
             }
             "lo_gc_write_barrier" => {
                 self.write(
                     (args[0] + args[1]) as usize,
-                    self.target.pointer_bytes() as usize,
+                    self.target.ptr as usize,
                     args[2],
                 );
                 None
@@ -449,7 +444,7 @@ fn compare_impl(
     stderr: &str,
     check_ast: bool,
 ) {
-    for target in [TargetLayout::Wasm32, TargetLayout::X86_64] {
+    for target in [WASM32, NATIVE] {
         let (typed, classes, ir) = checked(source, target);
         let mut machine = Machine::new(ir.program(), target, input);
         assert_eq!(machine.run(), expected, "{target:?}: {source}");
@@ -620,7 +615,7 @@ fn target_layout_metadata_and_inherited_slots() {
         class Parent (int count; bool flag; String text;) { int value() { return count; } }
         class Main () { int main() { return 0; } }
     "#;
-    for target in [TargetLayout::Wasm32, TargetLayout::X86_64] {
+    for target in [WASM32, NATIVE] {
         let (_, _, checked) = checked(source, target);
         let ir = checked.program();
         let machine = Machine::new(ir, target, "");
@@ -628,7 +623,7 @@ fn target_layout_metadata_and_inherited_slots() {
             |name: &str| machine.addresses[ir.symbols.iter().position(|s| s.name == name).unwrap()];
         let child = address("lo_class_5_Child");
         let parent = address("lo_class_6_Parent");
-        let ptr = target.pointer_bytes() as usize;
+        let ptr = target.ptr as usize;
         let (
             parent_offset,
             size_offset,
@@ -639,9 +634,10 @@ fn target_layout_metadata_and_inherited_slots() {
             child_size,
             text,
             link,
-        ) = match target {
-            TargetLayout::Wasm32 => (8, 12, 16, 20, 24, 24, 32, 20, 24),
-            TargetLayout::X86_64 => (16, 24, 32, 40, 44, 40, 56, 32, 40),
+        ) = if target == WASM32 {
+            (8, 12, 16, 20, 24, 24, 32, 20, 24)
+        } else {
+            (16, 24, 32, 40, 44, 40, 56, 32, 40)
         };
         assert_eq!(
             machine.read(child + parent_offset, IrType::Ptr),
@@ -658,7 +654,7 @@ fn target_layout_metadata_and_inherited_slots() {
         assert_eq!(machine.read(refs + 4, IrType::Int32), link);
         assert_eq!(machine.read(child + slots_offset, IrType::Int32), 2);
         let table = machine.read(
-            child + target.descriptor_vtable_offset() as usize,
+            child + target.descriptor().vtable as usize,
             IrType::Ptr,
         ) as usize;
         assert_eq!(
@@ -686,16 +682,13 @@ fn target_layout_metadata_and_inherited_slots() {
             .sum();
         assert_eq!(
             size,
-            if target == TargetLayout::Wasm32 {
+            if target == WASM32 {
                 32
             } else {
                 56
             }
         );
-        let frame = crate::layout::Target {
-            ptr: target.pointer_bytes(),
-        }
-        .frame();
+        let frame = target.frame();
         let id = ir.find_symbol("lo_bindings").unwrap();
         let data = ir.data.iter().find(|d| d.symbol == id).unwrap();
         assert_eq!(data.align as usize, ptr);
@@ -724,7 +717,7 @@ fn target_layout_metadata_and_inherited_slots() {
         assert_eq!(size, frame.size(3) as usize);
         assert_eq!(
             size,
-            if target == TargetLayout::Wasm32 {
+            if target == WASM32 {
                 20
             } else {
                 40
@@ -751,7 +744,7 @@ fn allocation_evaluates_actuals_before_constructor_and_defaults() {
     );
     let (_, _, ir) = checked(
         "class Main () { int main() { return 0; } }",
-        TargetLayout::Wasm32,
+        WASM32,
     );
     let startup = ir
         .program()
@@ -817,7 +810,7 @@ fn allocation_evaluates_actuals_before_constructor_and_defaults() {
 fn static_bytes_are_interned_and_string_calls_keep_distinct_types() {
     let (_, _, ir) = checked(
         r#"class Main () { int main() { out.print_string("é🙂"); out.print_string("é🙂"); return (("a" < "b") ? 1 : 0); } }"#,
-        TargetLayout::X86_64,
+        NATIVE,
     );
     let program = ir.program();
     let literals: Vec<_> = program
@@ -864,9 +857,9 @@ fn static_bytes_are_interned_and_string_calls_keep_distinct_types() {
 fn scalar_fields_use_pointer_sized_slots_and_four_byte_accesses() {
     let source = "class Parent (int n;) { int value() { return n; } } class Child extends Parent (int m;) [ Child() { super(1); m = 2; } ] { int sum() { return (n + m); } } class Main () { int main() { Child c; c = new Child(); return c.sum(); } }";
     compare(source, "", Ok(3), "", "");
-    for target in [TargetLayout::Wasm32, TargetLayout::X86_64] {
+    for target in [WASM32, NATIVE] {
         let (_, _, ir) = checked(source, target);
-        let expected = target.object_header_bytes() + target.pointer_bytes();
+        let expected = target.header_size() + target.ptr;
         assert!(ir
             .program()
             .dump()
@@ -909,60 +902,8 @@ fn receiver_snapshot_survives_prebound_changes_in_arguments() {
 fn upcasts_and_literal_null_casts_emit_no_runtime_check() {
     let source = "class Animal () { int value() { return 1; } } class Dog extends Animal () [ Dog() { super(); } ] { int value() { return 2; } } class Main () { int main() { Animal a; Dog d; d = ((Dog) null); a = ((Animal) d); return ((a instanceof Animal) ? 1 : 0); } }";
     compare(source, "", Ok(0), "", "");
-    let (_, _, ir) = checked(source, TargetLayout::Wasm32);
+    let (_, _, ir) = checked(source, WASM32);
     assert!(!ir.program().functions.iter().flat_map(|f| &f.blocks).flat_map(|b| &b.instructions).any(|i| {
         matches!(i.kind, InstructionKind::Call { target: CallTarget::Direct(id), .. } if ir.program().symbols[id.0].name == "lo_cast_check")
     }));
-}
-
-#[test]
-fn lowering_layout_matches_shared_class_layout_for_fixtures() {
-    let fixtures = [
-        include_str!("../../../tests/lo_programs/alloc_basic.lo"),
-        include_str!("../../../tests/lo_programs/class_basic.lo"),
-        include_str!("../../../tests/lo_programs/string_basic.lo"),
-        "class Parent (int a; int b; bool flag; String text;) { int get() { return a; } } class Child extends Parent (Parent link; int n;) [ Child() { super(0, 0, false, \"\"); } ] { int get() { return n; } } class Main () { int main() { return 0; } }",
-    ];
-    for target in [TargetLayout::X86_64, TargetLayout::Wasm32] {
-        let shared_target = crate::layout::Target {
-            ptr: target.pointer_bytes(),
-        };
-        for source in fixtures {
-            let (typed, table, ir) = checked(source, target);
-            let machine = Machine::new(ir.program(), target, "");
-            for class in &typed.classes {
-                let expected =
-                    crate::layout::class_layout(shared_target, &table, &class.class_name);
-                let (fields, size) =
-                    lower::class_layout_for_test(&table, target, &class.class_name).unwrap();
-                assert_eq!(
-                    size, expected.instance_size,
-                    "{target:?}: {}",
-                    class.class_name
-                );
-                assert_eq!(fields.len(), expected.fields.len());
-                for field in &expected.fields {
-                    assert_eq!(
-                        fields[&field.name] as u32, field.offset,
-                        "{target:?}: {}.{}",
-                        class.class_name, field.name
-                    );
-                }
-                let name = crate::symbols::class_descriptor(&class.class_name);
-                let id = ir.program().find_symbol(&name).unwrap();
-                let descriptor = machine.addresses[id.0];
-                let abi = shared_target.descriptor();
-                assert_eq!(
-                    machine.read(descriptor + abi.instance_size as usize, IrType::Int32) as u32,
-                    expected.instance_size
-                );
-                let refs =
-                    machine.read(descriptor + abi.pointer_offsets as usize, IrType::Ptr) as usize;
-                let actual_refs = (0..expected.pointer_offsets.len())
-                    .map(|i| machine.read(refs + i * 4, IrType::Int32) as u32)
-                    .collect::<Vec<_>>();
-                assert_eq!(actual_refs, expected.pointer_offsets);
-            }
-        }
-    }
 }

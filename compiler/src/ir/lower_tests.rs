@@ -5,7 +5,7 @@ fn program(
     classes: &crate::type_checker::ClassTable,
     method: &str,
 ) -> CheckedIr {
-    let mut ir = lower::lower_program(typed, classes, lower::TargetLayout::Wasm32)
+    let mut ir = lower::lower_program(typed, classes, crate::layout::Target { ptr: 4 })
         .unwrap()
         .into_program();
     let name = format!("lo_method_4_Main_{}_{}", method.len(), method);

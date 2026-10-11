@@ -8,20 +8,18 @@ use crate::type_checker::{
 
 use super::*;
 
-mod layout;
 mod program;
 mod runtime;
 
-pub use layout::TargetLayout;
-#[cfg(test)]
-pub(super) use program::class_layout_for_test;
+use crate::layout::Target;
+use crate::symbols;
 use program::Context;
 
 /// Lower semantic IR; a later pass inserts safepoint roots and physical frames.
 pub fn lower_program(
     program: &crate::type_checker::TypedProgram,
     classes: &crate::type_checker::ClassTable,
-    target: TargetLayout,
+    target: Target,
 ) -> Result<CheckedIr, String> {
     program::lower_program(program, classes, target)
 }
@@ -35,7 +33,7 @@ fn lower_method(
         TypedMethodBody::UserDefined { locals, .. } => locals.as_slice(),
         TypedMethodBody::Io(_) => &[],
     };
-    let symbol = ctx.symbol(&method_symbol(class, &method.method_name))?;
+    let symbol = ctx.symbol(&symbols::method(class, &method.method_name))?;
     let mut builder = Builder::new(ctx, symbol, true, &method.formals, locals, method.line)?;
     match &method.body {
         TypedMethodBody::UserDefined { stmts, .. } => builder.statements(stmts)?,
@@ -58,7 +56,7 @@ fn lower_constructor(
         } => (formals.as_slice(), locals.as_slice(), *line),
         TypedConstructor::Implicit { fields } => (fields.as_slice(), &[][..], 0),
     };
-    let symbol = ctx.symbol(&ctor_symbol(class, formals.len()))?;
+    let symbol = ctx.symbol(&symbols::constructor(class, formals.len()))?;
     let mut builder = Builder::new(ctx, symbol, true, formals, locals, line)?;
     match ctor {
         TypedConstructor::Explicit {
@@ -82,7 +80,7 @@ fn lower_constructor(
                 };
                 let mut args = vec![builder.receiver()];
                 args.extend(builder.actuals(actuals)?);
-                let symbol = builder.ctx.symbol(&ctor_symbol(&target, actuals.len()))?;
+                let symbol = builder.ctx.symbol(&symbols::constructor(&target, actuals.len()))?;
                 builder.call(symbol, args, line);
             }
             builder.statements(stmts)?;
@@ -102,15 +100,16 @@ fn lower_startup(ctx: &mut Context<'_>) -> Result<FunctionIr, String> {
     let symbol = ctx.symbol("lo_entry")?;
     let mut builder = Builder::new(ctx, symbol, false, &[], &[], 0)?;
     builder.runtime("lo_runtime_init", vec![], 0)?;
-    let frame = builder.ctx.symbol("lo_bindings")?;
+    let frame = builder.ctx.symbol(symbols::BINDINGS)?;
     builder.runtime("lo_push_frame", vec![Operand::Symbol(frame)], 0)?;
-    for name in ["in", "out", "err"] {
+    for name in symbols::PREBOUND {
         let class = if name == "in" { "Input" } else { "Output" };
         let object = builder.allocate(class, vec![], 0)?;
         if class == "Output" {
+            let destination = builder.ctx.output_destination()?;
             builder.store_field(
                 object,
-                builder.ctx.target.object_header_bytes() as i32,
+                destination,
                 Operand::Int(i32::from(name == "err")),
                 IrType::Int32,
                 0,
@@ -125,32 +124,12 @@ fn lower_startup(ctx: &mut Context<'_>) -> Result<FunctionIr, String> {
     builder.complete(&Type::Int, 0)
 }
 
-fn class_symbol(class: &str) -> String {
-    format!("lo_class_{}_{}", class.len(), class)
-}
-fn method_symbol(class: &str, method: &str) -> String {
-    format!(
-        "lo_method_{}_{}_{}_{}",
-        class.len(),
-        class,
-        method.len(),
-        method
-    )
-}
-fn ctor_symbol(class: &str, arity: usize) -> String {
-    format!("lo_ctor_{}_{}_{}", class.len(), class, arity)
-}
 fn length(len: usize) -> Result<i32, String> {
     i32::try_from(len).map_err(|_| "IR: length exceeds signed IR range".into())
 }
 
 fn value_type(ty: &Type) -> Result<IrType, String> {
-    match ty {
-        Type::Int => Ok(IrType::Int32),
-        Type::Bool => Ok(IrType::Bool),
-        Type::Class(_) | Type::String => Ok(IrType::Ref),
-        Type::Void => Err("IR: void is not a value type".into()),
-    }
+    declare::ir_type(ty).ok_or_else(|| "IR: void is not a value type".into())
 }
 
 struct Builder<'ctx, 'ast> {
@@ -210,7 +189,7 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
                 Type::Int => Operand::Int(0),
                 Type::Bool => Operand::Bool(false),
                 Type::Class(_) => Operand::Null,
-                Type::String => Operand::Symbol(builder.ctx.symbol("LO_EMPTY_STRING")?),
+                Type::String => Operand::Symbol(builder.ctx.symbol(symbols::EMPTY_STRING)?),
                 Type::Void => return Err("IR: void local".into()),
             };
             builder.emit(InstructionKind::Copy { dst: id, src }, line);
@@ -456,7 +435,7 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
             }
             TypedExpr::Str(string, line) => {
                 if string.is_empty() {
-                    Operand::Symbol(self.ctx.symbol("LO_EMPTY_STRING")?)
+                    Operand::Symbol(self.ctx.symbol(symbols::EMPTY_STRING)?)
                 } else {
                     let bytes = self.ctx.bytes(string.as_bytes())?;
                     self.runtime_value(
@@ -485,7 +464,7 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
                     let Type::Class(class) = target else {
                         return Err("IR: non-class downcast".into());
                     };
-                    let descriptor = self.ctx.symbol(&class_symbol(class))?;
+                    let descriptor = self.ctx.symbol(&symbols::class_descriptor(class))?;
                     self.runtime_value(
                         "lo_cast_check",
                         vec![src, Operand::Symbol(descriptor)],
@@ -501,7 +480,7 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
                 line,
             } => {
                 let src = self.expression(operand)?;
-                let descriptor = self.ctx.symbol(&class_symbol(class))?;
+                let descriptor = self.ctx.symbol(&symbols::class_descriptor(class))?;
                 self.runtime_value(
                     "lo_instanceof",
                     vec![src, Operand::Symbol(descriptor)],

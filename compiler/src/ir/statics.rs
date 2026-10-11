@@ -52,16 +52,23 @@ pub fn define_static_data(
     for class in table.class_names() {
         define_class(program, table, target, class)?;
     }
-    // Prebound bindings.
-    for name in symbols::PREBOUND {
-        let symbol = program.declare_symbol(&symbols::binding(name), SymbolKind::Data)?;
-        program.data.push(DataDef {
-            symbol,
-            section: Section::Writable,
-            align: target.ptr,
-            items: vec![null(target)],
-        });
-    }
+    define_bindings(program, target)
+}
+
+/// The prebound objects live in a static shadow frame, registered at startup,
+/// so the moving collector updates them like any other root.
+fn define_bindings(program: &mut ProgramIr, target: Target) -> Result<(), String> {
+    let frame = target.frame();
+    let roots = symbols::PREBOUND.len() as u32;
+    let mut fields = Placer::new(target, frame.size(roots));
+    fields.put(frame.num_roots, DataItem::U32(roots));
+    let symbol = program.declare_symbol(symbols::BINDINGS, SymbolKind::Data)?;
+    program.data.push(DataDef {
+        symbol,
+        section: Section::Writable,
+        align: target.ptr,
+        items: fields.finish(),
+    });
     Ok(())
 }
 
@@ -276,7 +283,22 @@ mod tests {
         assert_eq!(at(main, d.parent), &DataItem::Zero(8));
         assert_eq!(at(main, d.pointer_offsets), &DataItem::Zero(8));
         assert!(p.find_symbol("lo_class_4_Main_pointers").is_none());
-        assert_eq!(data(&p, "lo_binding_out").section, Section::Writable);
+    }
+
+    #[test]
+    fn bindings_are_a_static_frame_with_one_root_per_prebound_name() {
+        let p = built();
+        let frame = NATIVE.frame();
+        let bindings = data(&p, symbols::BINDINGS);
+        assert_eq!(bindings.section, Section::Writable);
+        assert_eq!(
+            bindings.items,
+            [
+                DataItem::Zero(frame.num_roots),
+                DataItem::U32(3),
+                DataItem::Zero(frame.size(3) - frame.num_roots - U32_SIZE),
+            ]
+        );
     }
 
     #[test]

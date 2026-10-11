@@ -15,7 +15,8 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-use crate::ir::lower::{lower_program, TargetLayout};
+use crate::ir::lower::lower_program;
+use crate::layout::NATIVE;
 use crate::ir::register_allocator::spill_all::spill_everything_program;
 use crate::ir::register_allocator::{allocate_registers, TargetConstraints};
 use crate::ir::{gc_roots, CheckedIr};
@@ -47,7 +48,7 @@ pub fn build_ir(source: &str) -> Result<CheckedIr, String> {
             e.message
         )
     })?;
-    let ir = lower_program(&typed, &classes, TargetLayout::X86_64)?;
+    let ir = lower_program(&typed, &classes, NATIVE)?;
     gc_roots::insert_gc_roots(ir).verify()
 }
 

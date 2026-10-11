@@ -3,7 +3,8 @@ use crate::type_checker::{
     BindingInfo, MethodResolution, TypedExpr, TypedMethodCall, TypedObjName,
 };
 
-use super::{class_symbol, ctor_symbol, length, method_symbol, value_type, Builder};
+use super::{length, value_type, Builder};
+use crate::symbols;
 use crate::ir::*;
 
 impl Builder<'_, '_> {
@@ -77,8 +78,8 @@ impl Builder<'_, '_> {
                 self.load(self.receiver(), offset, ty, line)
             }
             BindingInfo::Prebound(_) => {
-                let frame = self.ctx.symbol("lo_bindings")?;
-                let offset = self.ctx.target.binding_offset(name)?;
+                let frame = self.ctx.symbol(symbols::BINDINGS)?;
+                let offset = self.ctx.binding_offset(name)?;
                 self.load(Operand::Symbol(frame), offset, IrType::Ref, line)
             }
         })
@@ -113,8 +114,8 @@ impl Builder<'_, '_> {
         value: Operand,
         line: u32,
     ) -> Result<(), String> {
-        let frame = self.ctx.symbol("lo_bindings")?;
-        let offset = self.ctx.target.binding_offset(name)?;
+        let frame = self.ctx.symbol(symbols::BINDINGS)?;
+        let offset = self.ctx.binding_offset(name)?;
         self.emit(
             InstructionKind::Store {
                 base: Operand::Symbol(frame),
@@ -168,21 +169,13 @@ impl Builder<'_, '_> {
         actuals: Vec<Operand>,
         line: u32,
     ) -> Result<Operand, String> {
-        let descriptor = self.ctx.symbol(&class_symbol(class))?;
+        let descriptor = self.ctx.symbol(&symbols::class_descriptor(class))?;
         let object = self.runtime_value("lo_alloc", vec![Operand::Symbol(descriptor)], line)?;
-        let fields = self
-            .ctx
-            .classes
-            .get(class)
-            .ok_or("IR: missing allocation class")?
-            .effective_fields
-            .clone();
-        for field in fields.iter().filter(|f| f.ty == crate::ast::Type::String) {
-            let offset = self.ctx.field_offset(class, &field.name)?;
-            let empty = Operand::Symbol(self.ctx.symbol("LO_EMPTY_STRING")?);
+        let empty = Operand::Symbol(self.ctx.symbol(symbols::EMPTY_STRING)?);
+        for offset in self.ctx.string_offsets(class)? {
             self.store_field(object, offset, empty, IrType::Ref, line)?;
         }
-        let ctor = self.ctx.symbol(&ctor_symbol(class, actuals.len()))?;
+        let ctor = self.ctx.symbol(&symbols::constructor(class, actuals.len()))?;
         let mut args = vec![object];
         args.extend(actuals);
         self.call(ctor, args, line);
@@ -240,21 +233,18 @@ impl Builder<'_, '_> {
             .effective_methods
             .get(method)
             .ok_or("IR: missing effective method")?;
-        let symbol = self.ctx.symbol(&method_symbol(&entry.owner, method))?;
+        let symbol = self.ctx.symbol(&symbols::method(&entry.owner, method))?;
         let signature = self.ctx.signature(symbol);
         let descriptor = self.load(receiver, 0, IrType::Ptr, line);
         let table = self.load(
             descriptor,
-            self.ctx.target.descriptor_vtable_offset(),
+            self.ctx.target.descriptor().vtable as i32,
             IrType::Ptr,
             line,
         );
-        let byte_offset = slot
-            .checked_mul(self.ctx.target.pointer_bytes() as usize)
-            .ok_or("IR: vtable offset overflow")?;
         let pointer = self.load(
             table,
-            length(byte_offset)?,
+            self.ctx.target.vtable_entry(slot) as i32,
             IrType::CodePtr(signature),
             line,
         );
@@ -289,7 +279,7 @@ impl Builder<'_, '_> {
                 self.null_guard(receiver, &call.method_name, call.line)?;
                 let symbol = self
                     .ctx
-                    .symbol(&method_symbol(declaring_class, &call.method_name))?;
+                    .symbol(&symbols::method(declaring_class, &call.method_name))?;
                 let mut args = vec![receiver];
                 args.extend(actuals);
                 Ok(self.call(symbol, args, call.line))
@@ -304,7 +294,7 @@ impl Builder<'_, '_> {
                 } else {
                     "Output"
                 };
-                let symbol = self.ctx.symbol(&method_symbol(class, &call.method_name))?;
+                let symbol = self.ctx.symbol(&symbols::method(class, &call.method_name))?;
                 let mut args = vec![receiver];
                 args.extend(actuals);
                 Ok(self.call(symbol, args, call.line))
@@ -332,9 +322,10 @@ impl Builder<'_, '_> {
             .map(Operand::Value)
             .collect();
         if output {
+            let destination = self.ctx.output_destination()?;
             args.push(self.load(
                 self.receiver(),
-                self.ctx.target.object_header_bytes() as i32,
+                destination,
                 IrType::Int32,
                 line,
             ));

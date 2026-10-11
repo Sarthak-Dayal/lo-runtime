@@ -558,7 +558,7 @@ mod tests {
 
     #[test]
     fn every_function_of_a_lowered_program_gets_a_valid_frame() {
-        use crate::ir::lower::{lower_program, TargetLayout};
+        use crate::ir::lower::lower_program;
         use crate::ir::register_allocator::spill_all::spill_everything;
         let source = "class Node (int v; Node next;) [ Node(int x) { v = x; next = null; } ] \
             { int get() { return v; } int pick(int a, int b, int c, int d, int e, int f, int g) { return g; } } \
@@ -566,7 +566,7 @@ mod tests {
         let tokens = crate::lexer::tokenize(source).unwrap();
         let ast = crate::parser::parse_program(&tokens).unwrap();
         let (typed, classes) = crate::type_checker::check_program(ast).unwrap();
-        let ir = lower_program(&typed, &classes, TargetLayout::X86_64).unwrap();
+        let ir = lower_program(&typed, &classes, NATIVE).unwrap();
         let program = crate::ir::gc_roots::insert_gc_roots(ir).verify().unwrap();
         let program = program.program();
         let mut saw_leaf = false;
