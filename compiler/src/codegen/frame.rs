@@ -3,7 +3,6 @@
 //! The selector never computes a stack offset; it asks `Frame`. That keeps the
 //! spill-everything and linear-scan allocators interchangeable, since both hand
 //! `Frame` only a spill-slot count and the callee-saved registers they used.
-//! See planning/p2_docs/p2-codegen-frame-and-shadow-stack.md.
 //!
 //! ```text
 //! [rbp + 16 + 8k]  stack argument k (arguments 7 and up)

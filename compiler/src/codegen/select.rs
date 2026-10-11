@@ -1,6 +1,6 @@
 //! Instruction selection: IR instructions to `x86::Inst`, one emitter per operator.
 //!
-//! The discipline (planning/p2_docs/p2-codegen-instruction-selection.md):
+//! The discipline:
 //! fetch operands into scratch registers, operate, write the result back. Two
 //! helpers carry every memory-operand rule. `src` gives an operand's location
 //! (register, memory or immediate; a symbol address is materialized into the

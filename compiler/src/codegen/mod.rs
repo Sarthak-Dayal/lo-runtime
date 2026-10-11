@@ -1,5 +1,4 @@
 //! Native x86-64 back end: Intel-syntax assembly for the System V AMD64 ABI.
-//! See planning/p2_docs/p2-codegen-overview.md.
 
 pub mod data;
 pub mod driver;
