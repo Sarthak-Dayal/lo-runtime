@@ -1,22 +1,20 @@
-/*
-Poletto-Sarkar Linear Scan Register Allocation
-Target: System V AMD64 ABI (Linux); general-purpose integer/pointer registers.
-Construct constraints with TargetConstraints::system_v().
-Inputs: an IR of the program, a target constraints object (e.g. number of registers,
- which are available, reserved registers, call clobbers, etc.)
-Output: Result<ProgramAllocation, RegisterAllocationError>
-
-1. liveness.rs: Compute liveness across the control-flow graph.
-2. live_intervals.rs: Build live intervals and sort them by start position.
-3. allocation.rs: Scan intervals.
-   - Expire finished intervals and free their registers.
-   - Assign a free register when available.
-   - Otherwise, spill whichever interval ends furthest away.
-4. target.rs: Describe the System V register constraints.
-
-The result describes locations; the future native code generator must emit ABI
-moves, spill loads/stores, callee-save prologs/epilogs, and stack frame layout.
-*/
+//! Poletto-Sarkar linear-scan register allocation for the System V AMD64 ABI.
+//!
+//! Input: the rooted, checked IR and `TargetConstraints::system_v()`. Output: one
+//! location (register or spill slot) per virtual register, per function.
+//!
+//! 1. liveness.rs: liveness across the control-flow graph, and which values are
+//!    live across each call.
+//! 2. live_intervals.rs: one conservative interval per virtual register.
+//! 3. allocation.rs: scan intervals by start. Expire finished ones; give the
+//!    current one the first free register it may use, in pool order; otherwise
+//!    spill whichever of it and the active intervals ends last. The calling
+//!    convention rule: a value live across a call may use only callee-saved
+//!    registers; any other value takes caller-saved ones first.
+//! 4. target.rs: the register pool and the callee-saved set.
+//!
+//! Code generation (`codegen::frame`) turns the result into spill addresses and
+//! saves and restores the callee-saved registers the allocation used.
 
 mod allocation;
 mod live_intervals;

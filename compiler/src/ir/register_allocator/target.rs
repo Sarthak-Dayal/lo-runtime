@@ -22,22 +22,12 @@ pub enum PhysicalRegId {
 // Source: System V Application Binary Interface, AMD64 Architecture Processor
 // Supplement, section 3.2. RSP/RBP are reserved for stack/frame management.
 // RAX/RCX/RDX/R10/R11 are reserved by this backend as scratch for fixed-register
-// instructions (idiv, shifts), address computation and call setup.
-// Floating-point, vector, aggregate and variadic ABI rules are not modeled.
-// Only `allocatable_registers` and `callee_saved_registers` are read by the
-// allocator; the rest documents the ABI the code generator relies on.
+// instructions (idiv), address computation and call setup. The argument
+// registers live with the code that uses them, in `codegen::frame`.
 pub struct TargetConstraints {
     pub allocatable_registers: Vec<PhysicalRegId>,
     pub reserved_registers: Vec<PhysicalRegId>,
-    pub caller_saved_registers: Vec<PhysicalRegId>,
     pub callee_saved_registers: Vec<PhysicalRegId>,
-    // Further arguments are passed on the stack
-    pub argument_registers: [PhysicalRegId; 6],
-    // Scalar integer/pointer return values use RAX
-    pub return_register: PhysicalRegId,
-    pub stack_alignment_bytes: usize,
-    // System V has no caller-allocated shadow space (that is Microsoft x64)
-    pub shadow_space_bytes: usize,
 }
 
 impl TargetConstraints {
@@ -50,14 +40,9 @@ impl TargetConstraints {
             // survive a call may use only the callee-saved second half.
             allocatable_registers: vec![Rsi, Rdi, R8, R9, Rbx, R12, R13, R14, R15],
             reserved_registers: vec![Rsp, Rbp, Rax, Rcx, Rdx, R10, R11],
-            caller_saved_registers: vec![Rax, Rcx, Rdx, Rsi, Rdi, R8, R9, R10, R11],
             // RSP is preserved by restoring the stack pointer, not by allocating it
             // RBP remains callee-saved even though it is reserved from allocation
             callee_saved_registers: vec![Rbx, Rsp, Rbp, R12, R13, R14, R15],
-            argument_registers: [Rdi, Rsi, Rdx, Rcx, R8, R9],
-            return_register: Rax,
-            stack_alignment_bytes: 16,
-            shadow_space_bytes: 0,
         }
     }
 }

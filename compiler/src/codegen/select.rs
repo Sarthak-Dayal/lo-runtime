@@ -1,15 +1,18 @@
 //! Instruction selection: IR instructions to `x86::Inst`, one emitter per operator.
 //!
-//! The discipline:
-//! fetch operands into scratch registers, operate, write the result back. Two
-//! helpers carry every memory-operand rule. `src` gives an operand's location
-//! (register, memory or immediate; a symbol address is materialized into the
-//! scratch register given). `fetch` is `src`, but a memory operand is loaded into
-//! the scratch register, so the result is always a register or an immediate.
+//! The discipline: every arithmetic, compare and load result is computed in `rax`
+//! (`eax` for Int32 and Bool; `idiv` leaves a remainder in `edx`) and then
+//! moved to the destination's location. A
+//! second operand is used where it lives, or is fetched into `r10` when x86
+//! cannot take it there (an address base, a divisor, a symbol address); `r11`
+//! carries memory-to-memory copies and indirect call targets. Calls follow
+//! System V: stack arguments are pushed, then register arguments are written as
+//! one parallel move.
 //!
-//! Scratch registers are rax, rcx, rdx, r10 and r11, which the allocator never
-//! uses. Widths come from IR types: Int32 and Bool are 32-bit, everything else
-//! 64-bit.
+//! `src` gives an operand's location (register, memory or immediate); `fetch` is
+//! `src` but loads memory into the scratch register given. The allocator never
+//! uses the scratch registers rax, rcx, rdx, r10 and r11. Widths come from IR
+//! types: Int32 and Bool are 32-bit, everything else 64-bit.
 
 use crate::ir::register_allocator::{FunctionAllocation, PhysicalLocation};
 use crate::ir::{

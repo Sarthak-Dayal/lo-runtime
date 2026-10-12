@@ -2,7 +2,7 @@
 //!
 //! Output assumes `.intel_syntax noprefix`, which `file` emits as its header.
 
-use super::x86::{Alu, Cond, Inst, Item, Mem, Operand, Reg, Reg8, Shift, ShiftCount, Unary, Width};
+use super::x86::{Alu, Cond, Inst, Item, Mem, Operand, Reg, Reg8, Unary, Width};
 
 /// The assembly file preamble: Intel syntax without register prefixes, then code.
 pub const HEADER: &str = ".intel_syntax noprefix\n.text\n";
@@ -44,24 +44,14 @@ pub fn inst_text(inst: &Inst) -> String {
         }
         Inst::Idiv(src) => format!("idiv {}", operand(src)),
         Inst::Cdq => "cdq".into(),
-        Inst::Cqo => "cqo".into(),
         Inst::Unary(op, dst) => format!("{} {}", unary_name(*op), operand(dst)),
-        Inst::Shift(op, dst, count) => {
-            let count = match count {
-                ShiftCount::Imm(n) => n.to_string(),
-                ShiftCount::Cl => reg8_name(Reg8::Cl).into(),
-            };
-            format!("{} {}, {count}", shift_name(*op), operand(dst))
-        }
         Inst::Jcc(cond, label) => format!("j{} {label}", cond_suffix(*cond)),
         Inst::SetCc(cond, dst) => format!("set{} {}", cond_suffix(*cond), reg8_name(*dst)),
         Inst::Jmp(label) => format!("jmp {label}"),
-        Inst::JmpIndirect(target) => format!("jmp {}", operand(target)),
         Inst::Call(symbol) => format!("call {symbol}"),
         Inst::CallIndirect(target) => format!("call {}", operand(target)),
         Inst::Ret => "ret".into(),
         Inst::Leave => "leave".into(),
-        Inst::Int3 => "int3".into(),
     }
 }
 
@@ -138,7 +128,6 @@ fn reg_name(reg: Reg, width: Width) -> &'static str {
 fn reg8_name(reg: Reg8) -> &'static str {
     match reg {
         Reg8::Al => "al",
-        Reg8::Cl => "cl",
     }
 }
 
@@ -146,28 +135,14 @@ fn alu_name(op: Alu) -> &'static str {
     match op {
         Alu::Add => "add",
         Alu::Sub => "sub",
-        Alu::And => "and",
-        Alu::Or => "or",
         Alu::Xor => "xor",
         Alu::Cmp => "cmp",
-        Alu::Test => "test",
     }
 }
 
 fn unary_name(op: Unary) -> &'static str {
     match op {
         Unary::Neg => "neg",
-        Unary::Not => "not",
-        Unary::Inc => "inc",
-        Unary::Dec => "dec",
-    }
-}
-
-fn shift_name(op: Shift) -> &'static str {
-    match op {
-        Shift::Shl => "shl",
-        Shift::Shr => "shr",
-        Shift::Sar => "sar",
     }
 }
 
@@ -176,8 +151,6 @@ fn cond_suffix(cond: Cond) -> &'static str {
         Cond::E => "e",
         Cond::Ne => "ne",
         Cond::L => "l",
-        Cond::Le => "le",
         Cond::G => "g",
-        Cond::Ge => "ge",
     }
 }

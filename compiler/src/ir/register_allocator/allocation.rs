@@ -15,7 +15,7 @@ struct ActiveInterval<'a> {
 }
 
 // Allocate one permanent location per virtual register, separately per function.
-// Intervals must cover the same checked IR; invalid or incomplete inputs return errors.
+// Intervals must cover the same checked IR; debug builds check that they do.
 pub fn allocate(
     checked_ir: &CheckedIr,
     function_live_intervals: &HashMap<SymbolId, Vec<LiveInterval>>,
@@ -28,7 +28,11 @@ pub fn allocate(
         let live_intervals = function_live_intervals
             .get(&function.symbol)
             .ok_or(RegisterAllocationError::MissingIntervals(function.symbol))?;
-        validate_intervals(function, live_intervals)?;
+        // The intervals come from `allocate_registers` over this same IR, so
+        // re-deriving and comparing them only guards against bugs in this module.
+        if cfg!(debug_assertions) {
+            validate_intervals(function, live_intervals)?;
+        }
 
         let function_allocation = allocate_function(
             live_intervals,

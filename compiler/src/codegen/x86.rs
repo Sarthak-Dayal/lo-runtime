@@ -2,8 +2,8 @@
 //! chapter 8, "LO Architecture Reference").
 //!
 //! The selector emits `Inst` values; `print.rs` is the only code that formats text.
-//! The types rule out most out-of-subset instructions (no SIMD, no unsigned
-//! jumps, 8-bit registers only as `al`/`cl`). `Inst::check` rejects the rest:
+//! Only instructions the selector emits are modeled, and the types rule out most
+//! out-of-subset forms (no SIMD, no unsigned jumps, `al` as the only byte register). `Inst::check` rejects the rest:
 //! operand forms the subset excludes, such as `push` from memory, and
 //! combinations x86 cannot encode, such as memory-to-memory moves.
 
@@ -27,11 +27,10 @@ pub enum Reg {
     R15,
 }
 
-/// The only byte registers the subset allows: `al` for `setcc`, `cl` for shift counts.
+/// The only byte register the selector uses: `al`, written by `setcc`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reg8 {
     Al,
-    Cl,
 }
 
 /// LO `int` and `bool` are 32-bit; references, pointers and code pointers are 64-bit.
@@ -62,41 +61,20 @@ pub enum Cond {
     E,
     Ne,
     L,
-    Le,
     G,
-    Ge,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Alu {
     Add,
     Sub,
-    And,
-    Or,
     Xor,
     Cmp,
-    Test,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unary {
     Neg,
-    Not,
-    Inc,
-    Dec,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Shift {
-    Shl,
-    Shr,
-    Sar,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ShiftCount {
-    Imm(u8),
-    Cl,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,7 +86,7 @@ pub enum Inst {
     Pop(Operand),
     /// `movzx dst, src8`
     Movzx(Reg, Width, Reg8),
-    /// `add`, `sub`, `and`, `or`, `xor`, `cmp`, `test`: `op dst, src`
+    /// `add`, `sub`, `xor`, `cmp`: `op dst, src`
     Alu(Alu, Operand, Operand),
     /// Two-operand `imul dst, src`.
     Imul(Reg, Width, Operand),
@@ -117,18 +95,14 @@ pub enum Inst {
     /// Signed divide of `edx:eax` (or `rdx:rax`) by the operand.
     Idiv(Operand),
     Cdq,
-    Cqo,
     Unary(Unary, Operand),
-    Shift(Shift, Operand, ShiftCount),
     Jcc(Cond, String),
     SetCc(Cond, Reg8),
     Jmp(String),
-    JmpIndirect(Operand),
     Call(String),
     CallIndirect(Operand),
     Ret,
     Leave,
-    Int3,
 }
 
 /// One line of an assembly file.
@@ -141,10 +115,6 @@ pub enum Item {
 }
 
 impl Operand {
-    pub fn reg(reg: Reg, width: Width) -> Operand {
-        Operand::Reg(reg, width)
-    }
-
     pub fn r32(reg: Reg) -> Operand {
         Operand::Reg(reg, Width::W32)
     }
@@ -159,10 +129,6 @@ impl Operand {
 
     pub fn mem(base: Reg, disp: i32, width: Width) -> Operand {
         Operand::Mem(Mem::Base { base, disp }, width)
-    }
-
-    pub fn rip(symbol: impl Into<String>, width: Width) -> Operand {
-        Operand::Mem(Mem::Rip(symbol.into()), width)
     }
 
     fn width(&self) -> Option<Width> {
@@ -234,7 +200,6 @@ impl Inst {
                 Operand::Reg(_, Width::W64) => Ok(()),
                 _ => Err("pop takes a 64-bit register".into()),
             },
-            Inst::SetCc(_, Reg8::Cl) => Err("setcc writes al only".into()),
             Inst::Movzx(_, _, _) => Ok(()),
             Inst::Alu(op, dst, src) => {
                 not_imm(dst, "first operand")?;
@@ -260,20 +225,17 @@ impl Inst {
             }
             Inst::Idiv(src) => not_imm(src, "idiv operand"),
             Inst::Unary(_, dst) => not_imm(dst, "operand"),
-            Inst::Shift(_, dst, _) => not_imm(dst, "shift destination"),
-            Inst::JmpIndirect(target) | Inst::CallIndirect(target) => match target {
+            Inst::CallIndirect(target) => match target {
                 Operand::Reg(_, Width::W64) | Operand::Mem(_, Width::W64) => Ok(()),
-                _ => Err("indirect jump/call target must be a 64-bit register or memory".into()),
+                _ => Err("indirect call target must be a 64-bit register or memory".into()),
             },
             Inst::Cdq
-            | Inst::Cqo
             | Inst::Jcc(..)
-            | Inst::SetCc(_, Reg8::Al)
+            | Inst::SetCc(..)
             | Inst::Jmp(_)
             | Inst::Call(_)
             | Inst::Ret
-            | Inst::Leave
-            | Inst::Int3 => Ok(()),
+            | Inst::Leave => Ok(()),
         }
     }
 }
