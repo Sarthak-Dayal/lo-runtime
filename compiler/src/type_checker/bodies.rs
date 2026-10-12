@@ -118,7 +118,6 @@ fn stmt_returns(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Return(..) => true,
         Stmt::If(_, then_b, else_b, _) => definitely_returns(then_b) && definitely_returns(else_b),
-        Stmt::While(..) => false,
         _ => false,
     }
 }

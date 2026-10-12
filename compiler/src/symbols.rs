@@ -1,6 +1,9 @@
+//! Assembly symbol names for generated code and data. Every LO name is
+//! length-prefixed (`lo_class_6_Circle`), so two different LO names, or an LO
+//! name and a runtime entry point such as `lo_alloc`, never share a symbol.
+
 pub const PREBOUND: [&str; 3] = ["in", "out", "err"];
 pub const EMPTY_STRING: &str = "LO_EMPTY_STRING";
-pub const STRING_CLASS: &str = "LO_STRING_CLASS";
 /// Static shadow frame whose roots hold the prebound `in`, `out` and `err`.
 pub const BINDINGS: &str = "lo_bindings";
 
@@ -32,10 +35,6 @@ pub fn pointer_offsets(class: &str) -> String {
 
 pub fn class_name(class: &str) -> String {
     format!("{}_name", class_descriptor(class))
-}
-
-pub fn method_name(method: &str) -> String {
-    format!("lo_mname_{}_{}", method.len(), method)
 }
 
 #[cfg(test)]
