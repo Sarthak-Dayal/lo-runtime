@@ -170,8 +170,8 @@ fn dump_preserves_external_data_and_function_layout() {
             "extern data @external_data\n",
             "extern ref @empty_ref\n",
             ".rodata @constants align 4 {\n",
-            "  bytes 00 0f ff\n",
-            "  bytes\n",
+            "  bytes \"\\x00\\x0f\\xff\"\n",
+            "  bytes \"\"\n",
             "  addr @example\n",
             "}\n",
             ".data @globals align 8 {\n",
@@ -766,7 +766,7 @@ fn data_definitions_and_relocations_are_checked() {
     p.validate().unwrap();
     let dump = p.dump();
     assert!(dump.contains(".data @globals align 8"));
-    assert!(dump.contains("u32 1\n  bytes 61 00\n  zero 4\n  addr @example"));
+    assert!(dump.contains("u32 1\n  bytes \"a\\x00\"\n  zero 4\n  addr @example"));
     p.data[0].align = 3;
     assert!(p.validate().unwrap_err().contains("alignment"));
     p.data[0].align = 8;

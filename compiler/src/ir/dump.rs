@@ -69,12 +69,10 @@ impl ProgramIr {
                 writeln!(output, "  addr {}", self.symbol_text(*symbol)).unwrap()
             }
             DataItem::Zero(size) => writeln!(output, "  zero {size}").unwrap(),
+            // Printable ASCII as text; quotes, backslashes and every other
+            // byte escaped (`\"`, `\\`, `\n`, `\x00`), so the bytes stay exact.
             DataItem::Bytes(bytes) => {
-                output.push_str("  bytes");
-                for byte in bytes {
-                    write!(output, " {byte:02x}").unwrap();
-                }
-                output.push('\n');
+                writeln!(output, "  bytes \"{}\"", bytes.escape_ascii()).unwrap()
             }
         }
     }
@@ -196,13 +194,13 @@ impl<'a> FunctionDump<'a> {
     fn write_block(&self, output: &mut String, id: BlockId, block: &BasicBlock) {
         writeln!(output, "{}:", block_label_text(id)).unwrap();
         for instruction in &block.instructions {
-            writeln!(
-                output,
-                "  {} ; line {}",
-                self.instruction_text(&instruction.kind),
-                instruction.line
-            )
-            .unwrap();
+            let text = self.instruction_text(&instruction.kind);
+            // Line 0 marks compiler-made code (lo_entry, I/O wrappers,
+            // implicit constructors), which has no source line to show.
+            match instruction.line {
+                0 => writeln!(output, "  {text}").unwrap(),
+                line => writeln!(output, "  {text} ; line {line}").unwrap(),
+            }
         }
         writeln!(output, "  {}", self.terminator_text(&block.terminator)).unwrap();
     }
