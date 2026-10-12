@@ -1,3 +1,6 @@
+//! Lowering driver: declares every symbol and static datum, then lowers each
+//! constructor, method and lo_entry.
+
 use std::collections::HashMap;
 
 use crate::layout::{class_layout, ClassLayout, Target};
@@ -15,8 +18,8 @@ pub(super) struct Context<'a> {
     bytes: HashMap<Vec<u8>, SymbolId>,
 }
 
-/// Produces checked semantic IR. Safepoint rooting and frame construction are
-/// performed by a later pass; CheckedIr alone does not imply moving-GC safety.
+/// Lowers the whole program to verified IR. The IR is not yet GC-safe:
+/// `gc_roots::insert_gc_roots` adds the root saves and reloads around calls.
 pub fn lower_program(
     program: &TypedProgram,
     classes: &ClassTable,
@@ -65,7 +68,10 @@ impl<'a> Context<'a> {
     pub fn signature(&self, symbol: SymbolId) -> SignatureId {
         match self.ir.symbols[symbol.0].kind {
             SymbolKind::Function(sig) => sig,
-            _ => unreachable!("registered callable"),
+            _ => unreachable!(
+                "{} is not a function symbol",
+                self.ir.symbols[symbol.0].name
+            ),
         }
     }
 
@@ -142,7 +148,6 @@ impl<'a> Context<'a> {
         if let Some(id) = self.bytes.get(bytes) {
             return Ok(*id);
         }
-        super::length(bytes.len())?;
         let name = format!("lo_bytes_{}", self.bytes.len());
         let symbol = self.ir.declare_symbol(&name, SymbolKind::Data)?;
         self.ir.data.push(DataDef {

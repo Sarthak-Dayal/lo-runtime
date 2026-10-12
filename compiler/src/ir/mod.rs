@@ -78,6 +78,11 @@ pub enum DataItem {
     Zero(u32),
 }
 
+/// The `line` of compiler-generated code, which has no source line: `lo_entry`,
+/// implicit constructors, and the I/O wrapper methods (whose preamble
+/// declarations also carry line 0).
+pub const GENERATED_LINE: u32 = 0;
+
 pub struct CheckedIr {
     program: ProgramIr,
 }
@@ -87,11 +92,22 @@ pub struct ProgramIr {
     pub signatures: Vec<Signature>,
     pub functions: Vec<FunctionIr>,
     pub data: Vec<DataDef>,
-    // The entry function `main` calls after `lo_runtime_init`.
+    /// The entry function `main` calls after `lo_runtime_init`.
     pub startup: Option<SymbolId>,
 }
 
 impl ProgramIr {
+    /// True if `operand` is the address of a static object outside the heap
+    /// (such as the empty string), which the collector never moves.
+    pub(crate) fn is_static_ref(&self, operand: Operand) -> bool {
+        let Operand::Symbol(id) = operand else {
+            return false;
+        };
+        self.symbols
+            .get(id.0)
+            .is_some_and(|symbol| matches!(symbol.kind, SymbolKind::StaticRef))
+    }
+
     pub fn intern_signature(&mut self, signature: Signature) -> SignatureId {
         let existing_id = self
             .signatures

@@ -120,6 +120,24 @@ impl ProgramIr {
         }
     }
 
+    /// A store straight to a data symbol must target writable data. Reference
+    /// stores into the lo_bindings frame need no barrier: that frame is itself a
+    /// registered root, so the collector already scans and updates it. Returns
+    /// whether `base` is that frame.
+    fn check_static_store(&self, base: Operand) -> Result<bool, String> {
+        let Operand::Symbol(id) = base else {
+            return Ok(false);
+        };
+        let symbol = self.symbol(id)?;
+        let data = self.data.iter().find(|data| data.symbol == id);
+        if data.is_some_and(|data| data.section == Section::ReadOnly) {
+            return Err(format!("store to read-only data {}", symbol.name));
+        }
+        Ok(symbol.name == crate::symbols::BINDINGS
+            && matches!(symbol.kind, SymbolKind::Data)
+            && data.is_some_and(|data| data.section == Section::Writable))
+    }
+
     fn symbol(&self, id: SymbolId) -> Result<&Symbol, String> {
         self.symbols
             .get(id.0)
@@ -333,33 +351,13 @@ impl ProgramIr {
                 ..
             } => {
                 require_address_type(operand_type(*base)?)?;
-                // Static objects cannot move; their direct stores need no barrier (L07, p.18).
-                let static_ref = match value {
-                    Operand::Symbol(id) => matches!(self.symbol(*id)?.kind, SymbolKind::StaticRef),
-                    _ => false,
-                };
-                // Write permission is independent of the GC barrier exemption.
-                // A direct symbolic destination lets us check its declared section;
-                // register-based addresses do not establish static provenance.
-                let static_base = match base {
-                    Operand::Symbol(id) => {
-                        let symbol = self.symbol(*id)?;
-                        let data = self.data.iter().find(|data| data.symbol == *id);
-                        if data.is_some_and(|data| data.section == Section::ReadOnly) {
-                            return Err(format!("store to read-only data {}", symbol.name));
-                        }
-                        // Only the prebound frame is a registered GC root; a pointer
-                        // stored into any other static would be invisible to the GC.
-                        symbol.name == crate::symbols::BINDINGS
-                            && matches!(symbol.kind, SymbolKind::Data)
-                            && data.is_some_and(|data| data.section == Section::Writable)
-                    }
-                    _ => false,
-                };
-                if *expected == IrType::Ref && !static_ref && !static_base {
+                // Checked first so an unknown value symbol is reported as such.
+                let value_type = operand_type(*value)?;
+                let into_bindings = self.check_static_store(*base)?;
+                if *expected == IrType::Ref && !self.is_static_ref(*value) && !into_bindings {
                     return Err("reference stores require a write-barrier call".into());
                 }
-                self.expect_type(operand_type(*value)?, *expected)
+                self.expect_type(value_type, *expected)
             }
             InstructionKind::RootStore { slot, value } => {
                 verify_root_slot(function, *slot)?;

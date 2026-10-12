@@ -195,10 +195,8 @@ impl<'a> FunctionDump<'a> {
         writeln!(output, "{}:", block_label_text(id)).unwrap();
         for instruction in &block.instructions {
             let text = self.instruction_text(&instruction.kind);
-            // Line 0 marks compiler-made code (lo_entry, I/O wrappers,
-            // implicit constructors), which has no source line to show.
             match instruction.line {
-                0 => writeln!(output, "  {text}").unwrap(),
+                GENERATED_LINE => writeln!(output, "  {text}").unwrap(),
                 line => writeln!(output, "  {text} ; line {line}").unwrap(),
             }
         }

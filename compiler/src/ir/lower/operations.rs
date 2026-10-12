@@ -1,9 +1,13 @@
+//! Builder helpers for operations that touch memory or call out: variable reads
+//! and writes, field stores (through the write barrier), allocation, null
+//! checks, virtual dispatch, method calls, I/O wrappers and String operators.
+
 use crate::ast::{Binop, IoOp};
 use crate::type_checker::{
     BindingInfo, MethodResolution, TypedExpr, TypedMethodCall, TypedObjName,
 };
 
-use super::{length, value_type, Builder};
+use super::{binary_op, byte_length, value_type, Builder};
 use crate::ir::*;
 use crate::symbols;
 
@@ -136,10 +140,13 @@ impl Builder<'_, '_> {
         ty: IrType,
         line: u32,
     ) -> Result<(), String> {
-        // Static defaults cannot move; other Ref writes (including null) use
-        // the barrier, which performs the store rather than merely notifying GC.
-        let static_ref = matches!(value, Operand::Symbol(id) if matches!(self.ctx.ir.symbols[id.0].kind, SymbolKind::StaticRef));
-        if ty == IrType::Ref && !static_ref {
+        // Every reference store goes through `lo_gc_write_barrier`, which performs
+        // the store and lets a generational collector record it (runtime-abi
+        // §3.4). The one exception is a pointer to static data (the empty
+        // string), which the collector never moves or frees, so a plain store is
+        // enough.
+        let value_is_static = self.ctx.ir.is_static_ref(value);
+        if ty == IrType::Ref && !value_is_static {
             self.runtime(
                 "lo_gc_write_barrier",
                 vec![object, Operand::Int(offset), value],
@@ -207,7 +214,10 @@ impl Builder<'_, '_> {
         let target = self.ctx.symbol("lo_abort_null_receiver")?;
         self.finish(Terminator::Abort {
             target,
-            args: vec![Operand::Symbol(bytes), Operand::Int(length(method.len())?)],
+            args: vec![
+                Operand::Symbol(bytes),
+                Operand::Int(byte_length(method.len())?),
+            ],
         });
         self.current = Some(next);
         Ok(())
@@ -237,6 +247,7 @@ impl Builder<'_, '_> {
             .ok_or("IR: missing effective method")?;
         let symbol = self.ctx.symbol(&symbols::method(&entry.owner, method))?;
         let signature = self.ctx.signature(symbol);
+        // An object's first word is its class descriptor pointer (runtime-abi §2).
         let descriptor = self.load(args[0], 0, IrType::Ptr, line);
         let table = self.load(
             descriptor,
@@ -301,6 +312,8 @@ impl Builder<'_, '_> {
             IoOp::PrintString => "lo_print_string",
             IoOp::Println => "lo_println",
         };
+        // Skip the receiver; output functions take the Output object's
+        // destination (stdout/stderr) as a last argument.
         let mut args: Vec<_> = self
             .function
             .params
@@ -333,16 +346,13 @@ impl Builder<'_, '_> {
         };
         let result = self.runtime_value(name, vec![lhs, rhs], line)?;
         if matches!(op, Binop::Eq | Binop::Lt | Binop::Gt) {
+            // lo_string_compare returns <0, 0 or >0, so "a op b" becomes
+            // "compare(a, b) op 0".
             let dst = self.value(IrType::Bool);
-            let op = match op {
-                Binop::Eq => BinaryOp::Eq,
-                Binop::Lt => BinaryOp::Lt,
-                _ => BinaryOp::Gt,
-            };
             self.emit(
                 InstructionKind::Binary {
                     dst,
-                    op,
+                    op: binary_op(op),
                     lhs: result,
                     rhs: Operand::Int(0),
                 },
