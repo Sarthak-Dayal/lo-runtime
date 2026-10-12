@@ -8,6 +8,8 @@ use crate::ir::{DataDef, DataItem, ProgramIr, Section};
 
 use super::x86::Item;
 
+const BYTES_PER_LINE: usize = 16;
+
 pub fn emit_data(program: &ProgramIr) -> Result<Vec<Item>, String> {
     let mut out = vec![];
     for def in &program.data {
@@ -23,7 +25,7 @@ fn emit_def(program: &ProgramIr, def: &DataDef) -> Result<Vec<Item>, String> {
         Section::Writable => ".data",
     };
     let mut out = vec![
-        Item::Directive(String::new()),
+        Item::Blank,
         Item::Directive(section.into()),
         Item::Directive(format!(".balign {}", def.align)),
         Item::Label(name.clone()),
@@ -39,7 +41,7 @@ fn emit_def(program: &ProgramIr, def: &DataDef) -> Result<Vec<Item>, String> {
                 out.push(Item::Directive(format!("    .quad {}", target.name)));
             }
             DataItem::Bytes(bytes) => {
-                for chunk in bytes.chunks(16) {
+                for chunk in bytes.chunks(BYTES_PER_LINE) {
                     let list: Vec<String> = chunk.iter().map(|b| format!("0x{b:02x}")).collect();
                     out.push(Item::Directive(format!("    .byte {}", list.join(", "))));
                 }

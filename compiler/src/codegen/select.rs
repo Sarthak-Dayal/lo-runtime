@@ -17,16 +17,20 @@
 use crate::ir::register_allocator::{FunctionAllocation, PhysicalLocation};
 use crate::ir::{
     BinaryOp, BlockId, CallTarget, FunctionIr, InstructionKind, IrType, Operand as IrOperand,
-    ProgramIr, Terminator, UnaryOp, VirtualRegId,
+    ProgramIr, SymbolId, Terminator, UnaryOp, VirtualRegId,
 };
 
-use super::frame::{width_of, Frame, FrameParams, Param, ARGUMENT_REGISTERS};
+use super::frame::{width_of, Frame, Param, ARGUMENT_REGISTERS};
 use super::moves::{parallel_move, Move};
-use super::x86::{Alu, Cond, Inst, Item, Mem, Operand, Reg, Reg8, Unary, Width};
+use super::x86::{
+    check_instructions, Alu, Cond, Inst, Item, Mem, Operand, Reg, Reg8, Unary, Width,
+};
 
 const RAX: Reg = Reg::Rax;
 const R10: Reg = Reg::R10;
 const R11: Reg = Reg::R11;
+/// Bytes one `push` moves `rsp` by.
+const STACK_SLOT: i64 = 8;
 
 /// Emits the assembly for one function: label, prologue, blocks.
 pub fn select_function(
@@ -35,7 +39,7 @@ pub fn select_function(
     allocation: &FunctionAllocation,
 ) -> Result<Vec<Item>, String> {
     let name = program.symbols[function.symbol.0].name.clone();
-    let frame = Frame::new(FrameParams::for_function(function, allocation))?;
+    let frame = Frame::new(function, allocation)?;
     let mut selector = Selector {
         program,
         function,
@@ -48,12 +52,7 @@ pub fn select_function(
     selector
         .function_body()
         .map_err(|error| format!("{name}: {error}"))?;
-    for item in &selector.out {
-        if let Item::Inst(inst) = item {
-            inst.check()
-                .map_err(|error| format!("{name}: {error}: {inst:?}"))?;
-        }
-    }
+    check_instructions(&name, &selector.out)?;
     Ok(selector.out)
 }
 
@@ -77,7 +76,7 @@ impl Selector<'_> {
         format!(".L{}_{}", self.name, block.0)
     }
 
-    fn symbol_name(&self, id: crate::ir::SymbolId) -> String {
+    fn symbol_name(&self, id: SymbolId) -> String {
         self.program.symbols[id.0].name.clone()
     }
 
@@ -97,15 +96,16 @@ impl Selector<'_> {
             .ok_or_else(|| format!("virtual register {} has no location", v.0))
     }
 
-    /// The register a virtual register lives in, as an operand of its own width.
-    fn reg_operand(&self, v: VirtualRegId) -> Result<Operand, String> {
+    /// Where a virtual register lives (a register or a spill slot), as an operand
+    /// of its type's width.
+    fn location_operand(&self, v: VirtualRegId) -> Result<Operand, String> {
         Ok(self
             .frame
             .location(self.location(v)?, width_of(self.register_type(v))))
     }
 
     fn function_body(&mut self) -> Result<(), String> {
-        self.out.push(Item::Directive(String::new()));
+        self.out.push(Item::Blank);
         self.out
             .push(Item::Directive(format!(".globl {}", self.name)));
         self.out.push(Item::Label(self.name.clone()));
@@ -118,13 +118,14 @@ impl Selector<'_> {
                 let ty = self.register_type(p);
                 Ok(Param {
                     ty,
-                    dest: self.reg_operand(p)?,
+                    dest: self.location_operand(p)?,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
         for inst in self.frame.prologue(&params)? {
             self.emit(inst);
         }
+        // The prologue falls through into block 0, so jump if the entry block is elsewhere.
         if self.function.entry != BlockId(0) {
             self.emit(Inst::Jmp(self.label(self.function.entry)));
         }
@@ -148,7 +149,7 @@ impl Selector<'_> {
     /// materialized into `scratch` (a 64-bit register operand).
     fn src(&mut self, operand: IrOperand, scratch: Reg) -> Result<Operand, String> {
         Ok(match operand {
-            IrOperand::Value(v) => self.reg_operand(v)?,
+            IrOperand::Value(v) => self.location_operand(v)?,
             IrOperand::Int(n) => Operand::imm(i64::from(n)),
             IrOperand::Bool(b) => Operand::imm(i64::from(b)),
             IrOperand::Null => Operand::imm(0),
@@ -206,27 +207,18 @@ impl Selector<'_> {
                 value,
                 ty,
             } => self.store(*base, *offset, *value, *ty),
-            InstructionKind::RootStore { slot, value } => {
-                let value = self.fetch(*value, RAX)?;
-                let slot = Operand::Mem(self.frame.root(*slot), Width::W64);
-                self.emit(Inst::Mov(slot, value));
-                Ok(())
+            InstructionKind::RootStore { slot, value } => self.root_store(*slot, *value),
+            InstructionKind::RootLoad { dst, slot } => self.root_load(*dst, *slot),
+            InstructionKind::Call { dst, target, args } => {
+                self.call(*dst, target, args, /* returns_here */ true)
             }
-            InstructionKind::RootLoad { dst, slot } => {
-                let slot = Operand::Mem(self.frame.root(*slot), Width::W64);
-                self.mov(Self::rax(Width::W64), slot);
-                let dst = self.reg_operand(*dst)?;
-                self.mov(dst, Self::rax(Width::W64));
-                Ok(())
-            }
-            InstructionKind::Call { dst, target, args } => self.call(*dst, target, args, true),
         }
     }
 
     /// `dst = src` through r11 when memory-to-memory.
     fn copy(&mut self, dst: VirtualRegId, src: IrOperand) -> Result<(), String> {
         let value = self.fetch(src, R11)?;
-        let dst = self.reg_operand(dst)?;
+        let dst = self.location_operand(dst)?;
         self.mov(dst, value);
         Ok(())
     }
@@ -238,9 +230,8 @@ impl Selector<'_> {
         lhs: IrOperand,
         rhs: IrOperand,
     ) -> Result<(), String> {
-        match op {
-            BinaryOp::Eq | BinaryOp::Lt | BinaryOp::Gt => return self.compare(dst, op, lhs, rhs),
-            _ => {}
+        if matches!(op, BinaryOp::Eq | BinaryOp::Lt | BinaryOp::Gt) {
+            return self.compare(dst, op, lhs, rhs);
         }
         let acc = Self::rax(Width::W32);
         let l = self.src(lhs, R10)?;
@@ -268,14 +259,14 @@ impl Selector<'_> {
                 self.emit(Inst::Cdq);
                 self.emit(Inst::Idiv(divisor));
             }
-            BinaryOp::Eq | BinaryOp::Lt | BinaryOp::Gt => unreachable!("handled above"),
+            BinaryOp::Eq | BinaryOp::Lt | BinaryOp::Gt => unreachable!("compares return above"),
         }
         let result = if matches!(op, BinaryOp::Mod) {
             Operand::r32(Reg::Rdx)
         } else {
             acc
         };
-        let dst = self.reg_operand(dst)?;
+        let dst = self.location_operand(dst)?;
         self.emit(Inst::Mov(dst, result));
         Ok(())
     }
@@ -296,11 +287,12 @@ impl Selector<'_> {
         let cond = match op {
             BinaryOp::Eq => Cond::E,
             BinaryOp::Lt => Cond::L,
-            _ => Cond::G,
+            BinaryOp::Gt => Cond::G,
+            _ => unreachable!("compare called with {op:?}"),
         };
         self.emit(Inst::SetCc(cond, Reg8::Al));
         self.emit(Inst::Movzx(RAX, Width::W32, Reg8::Al));
-        let dst = self.reg_operand(dst)?;
+        let dst = self.location_operand(dst)?;
         self.emit(Inst::Mov(dst, Self::rax(Width::W32)));
         Ok(())
     }
@@ -314,7 +306,7 @@ impl Selector<'_> {
             // Bool is 0 or 1, so logical not is xor 1.
             UnaryOp::Not => self.emit(Inst::Alu(Alu::Xor, acc.clone(), Operand::imm(1))),
         }
-        let dst = self.reg_operand(dst)?;
+        let dst = self.location_operand(dst)?;
         self.emit(Inst::Mov(dst, acc));
         Ok(())
     }
@@ -324,8 +316,25 @@ impl Selector<'_> {
         let base = self.address(base)?;
         let acc = Self::rax(width);
         self.emit(Inst::Mov(acc.clone(), Operand::mem(base, offset, width)));
-        let dst = self.reg_operand(dst)?;
+        let dst = self.location_operand(dst)?;
         self.mov(dst, acc);
+        Ok(())
+    }
+
+    fn root_store(&mut self, slot: u32, value: IrOperand) -> Result<(), String> {
+        let value = self.fetch(value, RAX)?;
+        let slot = Operand::Mem(self.frame.root(slot), Width::W64);
+        self.emit(Inst::Mov(slot, value));
+        Ok(())
+    }
+
+    fn root_load(&mut self, dst: VirtualRegId, slot: u32) -> Result<(), String> {
+        // Through rax: the destination may itself be a spill slot, and x86 has
+        // no memory-to-memory mov.
+        let slot = Operand::Mem(self.frame.root(slot), Width::W64);
+        self.mov(Self::rax(Width::W64), slot);
+        let dst = self.location_operand(dst)?;
+        self.mov(dst, Self::rax(Width::W64));
         Ok(())
     }
 
@@ -345,13 +354,14 @@ impl Selector<'_> {
     // ---- calls ----
 
     /// System V call: first six arguments in registers, the rest pushed right to
-    /// left, `rsp` 16-aligned at the `call`. `returns` is false for `Abort`.
+    /// left, `rsp` 16-aligned at the `call`. `returns_here` is false for `Abort`,
+    /// whose callee never returns, so the stack is not cleaned up after it.
     fn call(
         &mut self,
         dst: Option<VirtualRegId>,
         target: &CallTarget,
         args: &[IrOperand],
-        returns: bool,
+        returns_here: bool,
     ) -> Result<(), String> {
         // The pointer may sit in an argument register, so take it out before
         // argument setup overwrites those.
@@ -362,14 +372,25 @@ impl Selector<'_> {
         let register_count = args.len().min(ARGUMENT_REGISTERS.len());
         let (register_args, stack_args) = args.split_at(register_count);
 
-        // Pushes go through rax and only read, so they come before any argument
-        // register is written. An odd number of pushes would leave rsp
-        // misaligned, so pad first.
-        let padding = if stack_args.len() % 2 == 1 { 8 } else { 0 };
+        // Between instructions rsp is 16-aligned (`Frame` rounds the frame size up
+        // to 16). Each push moves it by 8, so an odd number of stack arguments
+        // needs one 8-byte pad first. Pushes only read registers (through rax), so
+        // they come before any argument register is written.
+        let padding = if stack_args.len() % 2 == 1 {
+            STACK_SLOT
+        } else {
+            0
+        };
         if padding > 0 {
-            self.emit(Inst::Alu(Alu::Sub, Operand::r64(Reg::Rsp), Operand::imm(8)));
+            self.emit(Inst::Alu(
+                Alu::Sub,
+                Operand::r64(Reg::Rsp),
+                Operand::imm(padding),
+            ));
         }
         for &arg in stack_args.iter().rev() {
+            // push takes only 64-bit operands; the callee reads just the low 32
+            // bits of an int or bool argument, so the upper half does not matter.
             let value = match self.fetch(arg, RAX)? {
                 Operand::Reg(register, _) => Operand::r64(register),
                 other => other,
@@ -386,8 +407,8 @@ impl Selector<'_> {
             CallTarget::Indirect(_) => self.emit(Inst::CallIndirect(Operand::r64(R11))),
         }
 
-        if returns {
-            let cleanup = padding + 8 * stack_args.len() as i64;
+        if returns_here {
+            let cleanup = padding + STACK_SLOT * stack_args.len() as i64;
             if cleanup > 0 {
                 self.emit(Inst::Alu(
                     Alu::Add,
@@ -412,7 +433,7 @@ impl Selector<'_> {
         let mut other_args = vec![];
         for (&arg, &destination) in args.iter().zip(&ARGUMENT_REGISTERS) {
             match arg {
-                IrOperand::Value(v) => match self.reg_operand(v)? {
+                IrOperand::Value(v) => match self.location_operand(v)? {
                     Operand::Reg(src, width) => register_moves.push(Move {
                         dst: destination,
                         src,
@@ -443,7 +464,7 @@ impl Selector<'_> {
     /// return undefined, so Bool results are zero-extended from `al`.
     fn take_result(&mut self, dst: VirtualRegId) -> Result<(), String> {
         let ty = self.register_type(dst);
-        let dst = self.reg_operand(dst)?;
+        let dst = self.location_operand(dst)?;
         match ty {
             IrType::Bool => {
                 self.emit(Inst::Movzx(RAX, Width::W32, Reg8::Al));
@@ -468,6 +489,8 @@ impl Selector<'_> {
                 then_block,
                 else_block,
             } => {
+                // cmp cannot take an immediate as its first operand, so a constant
+                // condition goes through eax.
                 let value = match self.src(*condition, RAX)? {
                     Operand::Imm(n) => {
                         let acc = Self::rax(Width::W32);
@@ -499,7 +522,12 @@ impl Selector<'_> {
             }
             Terminator::Abort { target, args } => {
                 // Never returns: no stack cleanup and no code follows.
-                self.call(None, &CallTarget::Direct(*target), args, false)?;
+                self.call(
+                    None,
+                    &CallTarget::Direct(*target),
+                    args,
+                    /* returns_here */ false,
+                )?;
             }
         }
         Ok(())

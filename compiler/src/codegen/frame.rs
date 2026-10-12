@@ -1,8 +1,9 @@
 //! Stack frame layout, prologue and epilogue for one function.
 //!
 //! The selector never computes a stack offset; it asks `Frame`. That keeps the
-//! spill-everything and linear-scan allocators interchangeable, since both hand
-//! `Frame` only a spill-slot count and the callee-saved registers they used.
+//! spill-everything and linear-scan allocators interchangeable: both produce a
+//! `FunctionAllocation`, and `Frame` reads only its spill-slot count and the
+//! callee-saved registers it used.
 //!
 //! ```text
 //! [rbp + 16 + 8k]  stack argument k (arguments 7 and up)
@@ -32,7 +33,9 @@ const STACK_ALIGN: i32 = 16;
 /// `[rbp + 16]` holds the first stack-passed argument (after saved rbp and return address).
 const FIRST_STACK_ARGUMENT: i32 = 16;
 
-pub fn reg(id: PhysicalRegId) -> Reg {
+/// The allocator's register names live in `ir` so it does not depend on the back
+/// end; this maps them to x86 registers.
+pub fn x86_reg(id: PhysicalRegId) -> Reg {
     use PhysicalRegId as P;
     match id {
         P::Rax => Reg::Rax,
@@ -54,36 +57,10 @@ pub fn reg(id: PhysicalRegId) -> Reg {
     }
 }
 
-/// `Int32` and `Bool` are 32-bit; references, pointers and code pointers are 64-bit.
 pub fn width_of(ty: IrType) -> Width {
     match ty {
         IrType::Int32 | IrType::Bool => Width::W32,
         IrType::Ref | IrType::Ptr | IrType::CodePtr(_) => Width::W64,
-    }
-}
-
-/// What the allocation and the function body require of the frame.
-pub struct FrameParams {
-    /// Shadow-stack root slots (`FunctionIr.root_slots`, after `insert_gc_roots`).
-    pub root_slots: u32,
-    /// From `FunctionAllocation.spill_slot_count`.
-    pub spill_slot_count: usize,
-    /// From `FunctionAllocation.used_callee_saved_registers`.
-    pub callee_saved: Vec<PhysicalRegId>,
-    /// True if the function contains a `Call`. Such functions register a shadow
-    /// frame (even with zero roots); leaf functions do not.
-    pub has_calls: bool,
-}
-
-impl FrameParams {
-    /// Frame requirements of a function after `insert_gc_roots` and allocation.
-    pub fn for_function(function: &FunctionIr, allocation: &FunctionAllocation) -> FrameParams {
-        FrameParams {
-            root_slots: function.root_slots,
-            spill_slot_count: allocation.spill_slot_count,
-            callee_saved: allocation.used_callee_saved_registers.clone(),
-            has_calls: function.has_calls(),
-        }
     }
 }
 
@@ -95,11 +72,15 @@ pub struct Param {
 
 pub struct Frame {
     saved: Vec<Reg>,
+    /// Present only in functions that contain a `Call`: they register a shadow
+    /// frame (even with zero roots); leaf functions do not.
     shadow: Option<Shadow>,
     spill_start: i32,
     spill_slots: usize,
     ret_save: Option<i32>,
-    /// Bytes subtracted from `rsp` after `push rbp ; mov rbp, rsp`.
+    /// Bytes subtracted from `rsp` after `push rbp ; mov rbp, rsp`. rsp is
+    /// 16-aligned after `push rbp`, and this is a multiple of 16, so every call in
+    /// the body starts aligned (System V §3.2.2).
     size: i32,
 }
 
@@ -111,30 +92,37 @@ struct Shadow {
 }
 
 impl Frame {
-    pub fn new(params: FrameParams) -> Result<Frame, String> {
-        if !params.has_calls && params.root_slots > 0 {
+    /// The frame of `function` (after `insert_gc_roots`) under `allocation`.
+    pub fn new(function: &FunctionIr, allocation: &FunctionAllocation) -> Result<Frame, String> {
+        let has_calls = function.has_calls();
+        let root_slots = function.root_slots;
+        if !has_calls && root_slots > 0 {
             return Err(format!(
-                "leaf function has {} root slots; only functions with calls have a shadow frame",
-                params.root_slots
+                "leaf function has {root_slots} root slots; only functions with calls have a shadow frame"
             ));
         }
-        let saved: Vec<Reg> = params.callee_saved.iter().copied().map(reg).collect();
+        let saved: Vec<Reg> = allocation
+            .used_callee_saved_registers
+            .iter()
+            .copied()
+            .map(x86_reg)
+            .collect();
         let mut used = SLOT * saved.len() as i32;
 
-        let shadow = params.has_calls.then(|| {
+        let shadow = has_calls.then(|| {
             let layout = NATIVE.frame();
-            used += layout.size(params.root_slots) as i32;
+            used += layout.size(root_slots) as i32;
             Shadow {
                 layout,
                 base: -used,
-                roots: params.root_slots,
+                roots: root_slots,
             }
         });
 
         let spill_start = used;
-        used += SLOT * params.spill_slot_count as i32;
+        used += SLOT * allocation.spill_slot_count as i32;
 
-        let ret_save = params.has_calls.then(|| {
+        let ret_save = has_calls.then(|| {
             used += SLOT;
             -used
         });
@@ -143,15 +131,20 @@ impl Frame {
             saved,
             shadow,
             spill_start,
-            spill_slots: params.spill_slot_count,
+            spill_slots: allocation.spill_slot_count,
             ret_save,
-            size: (used + STACK_ALIGN - 1) / STACK_ALIGN * STACK_ALIGN,
+            size: round_up(used, STACK_ALIGN),
         })
     }
 
     /// Bytes reserved below the saved `rbp` (always a multiple of 16).
     pub fn size(&self) -> i32 {
         self.size
+    }
+
+    /// Where callee-saved register `i` is kept, in the prologue and every epilogue.
+    fn saved_register_slot(i: usize) -> Operand {
+        Operand::Mem(Self::at(-SLOT * (i as i32 + 1)), Width::W64)
     }
 
     fn at(disp: i32) -> Mem {
@@ -180,13 +173,18 @@ impl Frame {
     /// The operand for an allocation result: a register, or a spill slot in memory.
     pub fn location(&self, location: PhysicalLocation, width: Width) -> Operand {
         match location {
-            PhysicalLocation::Register(id) => Operand::Reg(reg(id), width),
+            PhysicalLocation::Register(id) => Operand::Reg(x86_reg(id), width),
             PhysicalLocation::Spill(slot) => Operand::Mem(self.spill(slot), width),
         }
     }
 
-    /// `push rbp ; mov rbp, rsp ; sub rsp, N`, saves callee-saved registers, moves
-    /// parameters to their locations, then builds and registers the shadow frame.
+    /// `push rbp ; mov rbp, rsp ; sub rsp, N`, then saves the callee-saved
+    /// registers, then moves parameters to their locations, then builds and
+    /// registers the shadow frame. Parameters move first because `lo_push_frame`
+    /// is a call and may overwrite the argument registers. The allocator matches
+    /// this by treating every parameter of a function with calls as surviving a
+    /// call. Root slots start null so a collection never reads a stale pointer;
+    /// `parent` is filled in by `lo_push_frame`.
     pub fn prologue(&self, params: &[Param]) -> Result<Vec<Inst>, String> {
         let mut out = vec![
             Inst::Push(Operand::r64(Reg::Rbp)),
@@ -201,7 +199,7 @@ impl Frame {
         }
         for (i, saved) in self.saved.iter().enumerate() {
             out.push(Inst::Mov(
-                Operand::Mem(Self::at(-SLOT * (i as i32 + 1)), Width::W64),
+                Self::saved_register_slot(i),
                 Operand::r64(*saved),
             ));
         }
@@ -286,11 +284,15 @@ impl Frame {
         for (i, saved) in self.saved.iter().enumerate() {
             out.push(Inst::Mov(
                 Operand::r64(*saved),
-                Operand::Mem(Self::at(-SLOT * (i as i32 + 1)), Width::W64),
+                Self::saved_register_slot(i),
             ));
         }
         out.push(Inst::Leave);
         out.push(Inst::Ret);
         out
     }
+}
+
+fn round_up(value: i32, multiple: i32) -> i32 {
+    (value + multiple - 1) / multiple * multiple
 }

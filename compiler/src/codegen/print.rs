@@ -5,7 +5,7 @@
 use super::x86::{Alu, Cond, Inst, Item, Mem, Operand, Reg, Reg8, Unary, Width};
 
 /// The assembly file preamble: Intel syntax without register prefixes, then code.
-pub const HEADER: &str = ".intel_syntax noprefix\n.text\n";
+const HEADER: &str = ".intel_syntax noprefix\n.text\n";
 
 /// Renders a whole file: header, then one line per item.
 pub fn file(items: &[Item]) -> String {
@@ -17,15 +17,16 @@ pub fn file(items: &[Item]) -> String {
     out
 }
 
-pub fn item_text(item: &Item) -> String {
+fn item_text(item: &Item) -> String {
     match item {
         Item::Label(name) => format!("{name}:"),
         Item::Inst(inst) => format!("    {}", inst_text(inst)),
         Item::Directive(text) => text.clone(),
+        Item::Blank => String::new(),
     }
 }
 
-pub fn inst_text(inst: &Inst) -> String {
+fn inst_text(inst: &Inst) -> String {
     match inst {
         Inst::Mov(dst, src) => binary("mov", dst, src),
         // `lea` computes an address and never touches memory, so no size prefix.

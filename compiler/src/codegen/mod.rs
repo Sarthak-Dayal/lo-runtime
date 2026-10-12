@@ -17,7 +17,7 @@ use x86::{Inst, Item, Operand, Reg};
 pub fn emit_program(program: &ProgramIr, allocation: &ProgramAllocation) -> Result<String, String> {
     let mut items = vec![];
     for function in &program.functions {
-        let allocation = allocation
+        let function_allocation = allocation
             .function_allocations
             .get(&function.symbol)
             .ok_or_else(|| {
@@ -26,19 +26,18 @@ pub fn emit_program(program: &ProgramIr, allocation: &ProgramAllocation) -> Resu
                     program.symbols[function.symbol.0].name
                 )
             })?;
-        items.extend(select::select_function(program, function, allocation)?);
+        items.extend(select::select_function(
+            program,
+            function,
+            function_allocation,
+        )?);
     }
     let wrapper = main_wrapper(program)?;
-    for item in &wrapper {
-        if let Item::Inst(inst) = item {
-            inst.check()
-                .map_err(|error| format!("main: {error}: {inst:?}"))?;
-        }
-    }
+    x86::check_instructions("main", &wrapper)?;
     items.extend(wrapper);
     items.extend(data::emit_data(program)?);
     // Without this note the linker assumes an executable stack.
-    items.push(Item::Directive(String::new()));
+    items.push(Item::Blank);
     items.push(Item::Directive(
         ".section .note.GNU-stack,\"\",@progbits".into(),
     ));
@@ -56,7 +55,7 @@ fn main_wrapper(program: &ProgramIr) -> Result<Vec<Item>, String> {
     let entry = program.symbols[startup.0].name.clone();
     // `main` is entered with rsp = 8 (mod 16); push rbp makes it 0 for the calls.
     Ok(vec![
-        Item::Directive(String::new()),
+        Item::Blank,
         Item::Directive(".globl main".into()),
         Item::Label("main".into()),
         Item::Inst(Inst::Push(Operand::r64(Reg::Rbp))),

@@ -3,9 +3,10 @@
 //!
 //! The selector emits `Inst` values; `print.rs` is the only code that formats text.
 //! Only instructions the selector emits are modeled, and the types rule out most
-//! out-of-subset forms (no SIMD, no unsigned jumps, `al` as the only byte register). `Inst::check` rejects the rest:
-//! operand forms the subset excludes, such as `push` from memory, and
-//! combinations x86 cannot encode, such as memory-to-memory moves.
+//! out-of-subset forms (no SIMD, no unsigned jumps, `al` as the only byte
+//! register). `Inst::check` rejects the rest: operand forms the subset excludes,
+//! such as `push` from memory, and combinations x86 cannot encode, such as
+//! memory-to-memory moves.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Reg {
@@ -112,6 +113,8 @@ pub enum Item {
     Inst(Inst),
     /// A verbatim assembler directive such as `.globl main`.
     Directive(String),
+    /// An empty line between sections of the file.
+    Blank,
 }
 
 impl Operand {
@@ -151,7 +154,7 @@ fn fits_i32(value: i64) -> bool {
     i32::try_from(value).is_ok()
 }
 
-fn imm_ok(src: &Operand, dst_width: Width, allow_imm64: bool) -> Result<(), String> {
+fn check_immediate_fits(src: &Operand, dst_width: Width, allow_imm64: bool) -> Result<(), String> {
     match src {
         Operand::Imm(v) if !fits_i32(*v) && !(allow_imm64 && dst_width == Width::W64) => {
             Err(format!("immediate {v} does not fit in 32 bits"))
@@ -188,13 +191,12 @@ impl Inst {
                 same_width(dst, src)?;
                 // `mov reg64, imm64` is the only form taking a 64-bit literal.
                 let allow64 = !dst.is_mem();
-                imm_ok(src, dst.width().unwrap_or(Width::W64), allow64)
+                check_immediate_fits(src, dst.width().unwrap_or(Width::W64), allow64)
             }
-            Inst::Lea(_, Mem::Base { .. } | Mem::Rip(_)) => Ok(()),
             Inst::Push(src) => match src {
                 Operand::Mem(..) => Err("push takes a register or an immediate".into()),
                 Operand::Reg(_, Width::W32) => Err("push takes a 64-bit operand".into()),
-                _ => imm_ok(src, Width::W64, false),
+                _ => check_immediate_fits(src, Width::W64, false),
             },
             Inst::Pop(dst) => match dst {
                 Operand::Reg(_, Width::W64) => Ok(()),
@@ -207,16 +209,9 @@ impl Inst {
                     return Err(format!("{op:?} cannot have two memory operands"));
                 }
                 same_width(dst, src)?;
-                imm_ok(src, dst.width().unwrap_or(Width::W64), false)
+                check_immediate_fits(src, dst.width().unwrap_or(Width::W64), false)
             }
-            Inst::Imul(_, w, src) => {
-                not_imm(src, "imul source")?;
-                match src.width() {
-                    Some(sw) if sw != *w => Err("imul operand widths differ".into()),
-                    _ => Ok(()),
-                }
-            }
-            Inst::ImulImm(_, w, src, _) => {
+            Inst::Imul(_, w, src) | Inst::ImulImm(_, w, src, _) => {
                 not_imm(src, "imul source")?;
                 match src.width() {
                     Some(sw) if sw != *w => Err("imul operand widths differ".into()),
@@ -229,7 +224,8 @@ impl Inst {
                 Operand::Reg(_, Width::W64) | Operand::Mem(_, Width::W64) => Ok(()),
                 _ => Err("indirect call target must be a 64-bit register or memory".into()),
             },
-            Inst::Cdq
+            Inst::Lea(..)
+            | Inst::Cdq
             | Inst::Jcc(..)
             | Inst::SetCc(..)
             | Inst::Jmp(_)
@@ -238,4 +234,15 @@ impl Inst {
             | Inst::Leave => Ok(()),
         }
     }
+}
+
+/// Runs `Inst::check` on every instruction in `items`, naming `function` in the error.
+pub fn check_instructions(function: &str, items: &[Item]) -> Result<(), String> {
+    for item in items {
+        if let Item::Inst(inst) = item {
+            inst.check()
+                .map_err(|error| format!("{function}: {error}: {inst:?}"))?;
+        }
+    }
+    Ok(())
 }
