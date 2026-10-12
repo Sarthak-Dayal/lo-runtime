@@ -5,10 +5,12 @@ use std::collections::{HashMap, HashSet};
 use super::{ClassInfo, ClassKind, ClassTable, ConstructorSig, ErrorCode, MethodSig, TypeError};
 use crate::ast::{ConstructorDelegation, Formal, MethodBody, Program, Type};
 
-/// Runs before preamble injection, while every declaration in `program` is
-/// user-written. Keeping the runtime-prefix rule here means synthetic I/O and
-/// other compiler/runtime declarations never pass through it.
-pub(super) fn validate_user_declared_names(program: &Program) -> Result<(), TypeError> {
+/// Rejects user classes named Input or Output (LO-3 §3.4). Runs before
+/// preamble injection, while every class in `program` is user-written.
+/// No other class or method name is reserved: generated symbols are
+/// length-prefixed (`symbols.rs`), so a user name cannot collide with a
+/// runtime entry point such as `lo_alloc`.
+pub(super) fn reject_reserved_class_names(program: &Program) -> Result<(), TypeError> {
     for class in &program.classes {
         if crate::add_io_classes::CLASS_NAMES.contains(&class.class_name.as_str()) {
             return Err(TypeError::new(
@@ -16,18 +18,6 @@ pub(super) fn validate_user_declared_names(program: &Program) -> Result<(), Type
                 class.line,
                 format!("class name '{}' is reserved", class.class_name),
             ));
-        }
-        for method in &class.methods {
-            if method.method_name.starts_with("lo_") {
-                return Err(TypeError::new(
-                    ErrorCode::EReservedVariableName,
-                    method.line,
-                    format!(
-                        "method name '{}' uses the reserved runtime prefix 'lo_'",
-                        method.method_name
-                    ),
-                ));
-            }
         }
     }
     Ok(())
