@@ -23,3 +23,14 @@ compile_commands.json
 # Platform noise
 .DS_Store
 Thumbs.db
+
+# LaTeX build artifacts (design_doc/)
+design_doc/*.aux
+design_doc/*.fdb_latexmk
+design_doc/*.fls
+design_doc/*.log
+design_doc/*.out
+design_doc/*.synctex.gz
+design_doc/*.toc
+design_doc/*.bbl
+design_doc/*.blg
