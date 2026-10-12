@@ -192,6 +192,28 @@ pub enum TypedExpr {
     },
 }
 
+impl TypedExpr {
+    /// The expression's static type. `None` for `null` and for a ternary whose
+    /// branches are both `null`: those take their type from the context.
+    pub fn ty(&self) -> Option<Type> {
+        match self {
+            TypedExpr::Null(_) | TypedExpr::Ternary { ty: None, .. } => None,
+            TypedExpr::Num(..) => Some(Type::Int),
+            TypedExpr::Bool(..) | TypedExpr::InstanceOf { .. } => Some(Type::Bool),
+            TypedExpr::Str(..) => Some(Type::String),
+            TypedExpr::This(class, _) | TypedExpr::New { class, .. } => {
+                Some(Type::Class(class.clone()))
+            }
+            TypedExpr::Var { binding, .. } => Some(binding.ty().clone()),
+            TypedExpr::Call(call) => Some(call.return_type.clone()),
+            TypedExpr::Ternary { ty: Some(ty), .. }
+            | TypedExpr::Binop { ty, .. }
+            | TypedExpr::Unop { ty, .. } => Some(ty.clone()),
+            TypedExpr::Cast { target, .. } => Some(target.clone()),
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum CastDirection {
     Upcast,

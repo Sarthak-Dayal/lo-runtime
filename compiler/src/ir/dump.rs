@@ -69,12 +69,10 @@ impl ProgramIr {
                 writeln!(output, "  addr {}", self.symbol_text(*symbol)).unwrap()
             }
             DataItem::Zero(size) => writeln!(output, "  zero {size}").unwrap(),
+            // Printable ASCII as text; quotes, backslashes and every other
+            // byte escaped (`\"`, `\\`, `\n`, `\x00`), so the bytes stay exact.
             DataItem::Bytes(bytes) => {
-                output.push_str("  bytes");
-                for byte in bytes {
-                    write!(output, " {byte:02x}").unwrap();
-                }
-                output.push('\n');
+                writeln!(output, "  bytes \"{}\"", bytes.escape_ascii()).unwrap()
             }
         }
     }
@@ -196,13 +194,11 @@ impl<'a> FunctionDump<'a> {
     fn write_block(&self, output: &mut String, id: BlockId, block: &BasicBlock) {
         writeln!(output, "{}:", block_label_text(id)).unwrap();
         for instruction in &block.instructions {
-            writeln!(
-                output,
-                "  {} ; line {}",
-                self.instruction_text(&instruction.kind),
-                instruction.line
-            )
-            .unwrap();
+            let text = self.instruction_text(&instruction.kind);
+            match instruction.line {
+                GENERATED_LINE => writeln!(output, "  {text}").unwrap(),
+                line => writeln!(output, "  {text} ; line {line}").unwrap(),
+            }
         }
         writeln!(output, "  {}", self.terminator_text(&block.terminator)).unwrap();
     }
@@ -291,7 +287,6 @@ impl<'a> FunctionDump<'a> {
                 format!("root_store root{slot}, {}", self.operand_text(*value))
             }
             InstructionKind::RootLoad { slot, .. } => format!("root_load root{slot}"),
-            InstructionKind::RootAddr { slot, .. } => format!("root_addr root{slot}"),
             InstructionKind::Call { target, args, .. } => self.call_text(*target, args),
         }
     }

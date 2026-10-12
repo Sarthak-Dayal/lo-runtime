@@ -170,8 +170,8 @@ fn dump_preserves_external_data_and_function_layout() {
             "extern data @external_data\n",
             "extern ref @empty_ref\n",
             ".rodata @constants align 4 {\n",
-            "  bytes 00 0f ff\n",
-            "  bytes\n",
+            "  bytes \"\\x00\\x0f\\xff\"\n",
+            "  bytes \"\"\n",
             "  addr @example\n",
             "}\n",
             ".data @globals align 8 {\n",
@@ -710,11 +710,10 @@ fn invalid_and_nested_signatures_are_rejected() {
 }
 
 #[test]
-fn root_instructions_check_slots_types_and_startup() {
+fn root_instructions_check_slots_and_types() {
     let mut p = example();
     p.functions[0].root_slots = 1;
-    p.functions[0].new_register(IrType::Ref, Some("object".into()));
-    p.functions[0].new_register(IrType::Ptr, Some("root_address".into()));
+    let object = p.functions[0].new_register(IrType::Ref, Some("object".into()));
     p.functions[0].blocks[0].instructions = vec![
         Instruction {
             kind: InstructionKind::RootStore {
@@ -725,24 +724,14 @@ fn root_instructions_check_slots_types_and_startup() {
         },
         Instruction {
             kind: InstructionKind::RootLoad {
-                dst: VirtualRegId(1),
+                dst: object,
                 slot: 0,
             },
             line: 2,
         },
-        Instruction {
-            kind: InstructionKind::RootAddr {
-                dst: VirtualRegId(2),
-                slot: 0,
-            },
-            line: 3,
-        },
     ];
-    assert!(p.validate().unwrap_err().contains("startup"));
-    p.startup = Some(SymbolId(0));
     p.validate().unwrap();
     assert!(p.dump().contains("object:Ref = root_load root0"));
-    assert!(p.dump().contains("root_address:Ptr = root_addr root0"));
     p.functions[0].root_slots = 0;
     assert!(p.validate().unwrap_err().contains("root slot"));
     p.functions[0].root_slots = 1;
@@ -752,11 +741,8 @@ fn root_instructions_check_slots_types_and_startup() {
     };
     assert!(p.validate().unwrap_err().contains("expected Ref"));
     p.functions[0].blocks[0].instructions.remove(0);
-    p.functions[0].register_types[1] = IrType::Int32;
+    p.functions[0].register_types[object.0] = IrType::Int32;
     assert!(p.validate().unwrap_err().contains("expected Ref"));
-    p.functions[0].register_types[1] = IrType::Ref;
-    p.functions[0].register_types[2] = IrType::Ref;
-    assert!(p.validate().unwrap_err().contains("expected Ptr"));
 }
 
 #[test]
@@ -780,7 +766,7 @@ fn data_definitions_and_relocations_are_checked() {
     p.validate().unwrap();
     let dump = p.dump();
     assert!(dump.contains(".data @globals align 8"));
-    assert!(dump.contains("u32 1\n  bytes 61 00\n  zero 4\n  addr @example"));
+    assert!(dump.contains("u32 1\n  bytes \"a\\x00\"\n  zero 4\n  addr @example"));
     p.data[0].align = 3;
     assert!(p.validate().unwrap_err().contains("alignment"));
     p.data[0].align = 8;
@@ -861,14 +847,6 @@ fn public_use_def_helpers_include_calls_and_terminators() {
     }
     .operands()
     .is_empty());
-    assert_eq!(
-        InstructionKind::RootAddr {
-            dst: VirtualRegId(0),
-            slot: 0
-        }
-        .destination(),
-        Some(VirtualRegId(0))
-    );
 }
 
 #[test]

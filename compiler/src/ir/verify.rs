@@ -120,6 +120,24 @@ impl ProgramIr {
         }
     }
 
+    /// A store straight to a data symbol must target writable data. Reference
+    /// stores into the lo_bindings frame need no barrier: that frame is itself a
+    /// registered root, so the collector already scans and updates it. Returns
+    /// whether `base` is that frame.
+    fn check_static_store(&self, base: Operand) -> Result<bool, String> {
+        let Operand::Symbol(id) = base else {
+            return Ok(false);
+        };
+        let symbol = self.symbol(id)?;
+        let data = self.data.iter().find(|data| data.symbol == id);
+        if data.is_some_and(|data| data.section == Section::ReadOnly) {
+            return Err(format!("store to read-only data {}", symbol.name));
+        }
+        Ok(symbol.name == crate::symbols::BINDINGS
+            && matches!(symbol.kind, SymbolKind::Data)
+            && data.is_some_and(|data| data.section == Section::Writable))
+    }
+
     fn symbol(&self, id: SymbolId) -> Result<&Symbol, String> {
         self.symbols
             .get(id.0)
@@ -139,7 +157,11 @@ impl ProgramIr {
         }
     }
 
-    fn operand_type(&self, function: &FunctionIr, operand: Operand) -> Result<IrType, String> {
+    pub(crate) fn operand_type(
+        &self,
+        function: &FunctionIr,
+        operand: Operand,
+    ) -> Result<IrType, String> {
         match operand {
             Operand::Value(id) => value_type(function, id),
             Operand::Int(_) => Ok(IrType::Int32),
@@ -329,15 +351,13 @@ impl ProgramIr {
                 ..
             } => {
                 require_address_type(operand_type(*base)?)?;
-                // Static objects cannot move; their direct stores need no barrier (L07, p.18).
-                let static_ref = match value {
-                    Operand::Symbol(id) => matches!(self.symbol(*id)?.kind, SymbolKind::StaticRef),
-                    _ => false,
-                };
-                if *expected == IrType::Ref && !static_ref {
+                // Checked first so an unknown value symbol is reported as such.
+                let value_type = operand_type(*value)?;
+                let into_bindings = self.check_static_store(*base)?;
+                if *expected == IrType::Ref && !self.is_static_ref(*value) && !into_bindings {
                     return Err("reference stores require a write-barrier call".into());
                 }
-                self.expect_type(operand_type(*value)?, *expected)
+                self.expect_type(value_type, *expected)
             }
             InstructionKind::RootStore { slot, value } => {
                 verify_root_slot(function, *slot)?;
@@ -346,13 +366,6 @@ impl ProgramIr {
             InstructionKind::RootLoad { dst, slot } => {
                 verify_root_slot(function, *slot)?;
                 self.expect_type(value_type(function, *dst)?, IrType::Ref)
-            }
-            InstructionKind::RootAddr { dst, slot } => {
-                verify_root_slot(function, *slot)?;
-                if self.startup != Some(function.symbol) {
-                    return Err("RootAddr is only permitted in the startup function".into());
-                }
-                self.expect_type(value_type(function, *dst)?, IrType::Ptr)
             }
             InstructionKind::Call { dst, target, args } => {
                 let signature = match target {

@@ -2,6 +2,7 @@
 
 mod add_io_classes;
 mod ast;
+mod codegen;
 mod interpreter;
 mod ir;
 mod layout;
@@ -14,11 +15,23 @@ mod wasm;
 mod wasm_toolchain;
 
 fn main() -> std::process::ExitCode {
-    // `--run FILE.lo` interprets the program. It is handled here, ahead of `run()`,
-    // so the interpreter can own the process exit status (main's return value, or an
-    // abort code) — which `run()`'s String result cannot express — while `run()` and
-    // the P1 grading contract (`--check`/`--compile`/`--emit-wasm`) stay untouched.
     let args: Vec<_> = std::env::args_os().collect();
+    // Native back end modes (`--dump-ir`, `--emit-asm`, `--native`).
+    if let Some(result) = codegen::driver::cli(&args) {
+        return match result {
+            Ok(output) => {
+                print!("{output}");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
+    // `--run FILE.lo` interprets the program. It is handled apart from `run()` so
+    // the interpreter can set the exit status (main's return value or an abort
+    // code), which `run()`'s String result cannot express.
     if let [_, mode, path] = args.as_slice() {
         if mode == "--run" {
             return run_interpreter(path);
@@ -36,23 +49,28 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// Reads `path` and runs lex, parse and type check. Every mode goes through
+/// here, so `--check`, `--run` and the native modes report identical errors.
+pub(crate) fn front_end(
+    path: &std::ffi::OsStr,
+) -> Result<(type_checker::TypedProgram, type_checker::ClassTable), String> {
+    let source = std::fs::read_to_string(path).map_err(|e| format!("read source: {e}"))?;
+    let tokens = lexer::tokenize(&source)
+        .map_err(|e| format!("lex line {} [{}]: {:?}", e.line, e.kind.as_str(), e.kind))?;
+    let program = parser::parse_program(&tokens)
+        .map_err(|e| format!("parse line {} [{}]: {}", e.line, e.code.as_str(), e.message))?;
+    type_checker::check_program(program).map_err(|e| {
+        format!(
+            "type check line {} [{}]: {}",
+            e.line,
+            e.code.as_str(),
+            e.message
+        )
+    })
+}
+
 fn run_interpreter(path: &std::ffi::OsStr) -> std::process::ExitCode {
-    let front_end = || {
-        let source = std::fs::read_to_string(path).map_err(|e| format!("read source: {e}"))?;
-        let tokens = lexer::tokenize(&source)
-            .map_err(|e| format!("lex line {} [{}]: {:?}", e.line, e.kind.as_str(), e.kind))?;
-        let program = parser::parse_program(&tokens)
-            .map_err(|e| format!("parse line {} [{}]: {}", e.line, e.code.as_str(), e.message))?;
-        type_checker::check_program(program).map_err(|e| {
-            format!(
-                "type check line {} [{}]: {}",
-                e.line,
-                e.code.as_str(),
-                e.message
-            )
-        })
-    };
-    let (program, classes) = match front_end() {
+    let (program, classes) = match front_end(path) {
         Ok(checked) => checked,
         Err(error) => {
             eprintln!("{error}");
@@ -83,19 +101,7 @@ fn run() -> Result<String, String> {
         [_, mode, path, output] if mode == "--compile" => (mode, path, Some(output)),
         _ => return Err(usage.into()),
     };
-    let source = std::fs::read_to_string(path).map_err(|e| format!("read source: {e}"))?;
-    let tokens = lexer::tokenize(&source)
-        .map_err(|e| format!("lex line {} [{}]: {:?}", e.line, e.kind.as_str(), e.kind))?;
-    let program = parser::parse_program(&tokens)
-        .map_err(|e| format!("parse line {} [{}]: {}", e.line, e.code.as_str(), e.message))?;
-    let (program, classes) = type_checker::check_program(program).map_err(|e| {
-        format!(
-            "type check line {} [{}]: {}",
-            e.line,
-            e.code.as_str(),
-            e.message
-        )
-    })?;
+    let (program, classes) = front_end(path)?;
     if mode == "--check" {
         return Ok(String::new());
     }

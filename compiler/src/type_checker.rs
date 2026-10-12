@@ -18,12 +18,12 @@ pub use typed_ast::{
 
 use crate::ast::Program;
 use bodies::check_bodies;
-use declarations::{gather_declarations, validate_user_declared_names};
+use declarations::{gather_declarations, reject_reserved_class_names};
 use entry_point::check_entry_point;
 use inheritance::resolve_inheritance;
 
 pub fn check_program(program: Program) -> Result<(TypedProgram, ClassTable), TypeError> {
-    validate_user_declared_names(&program)?;
+    reject_reserved_class_names(&program)?;
     let program = crate::add_io_classes::add_io_classes(program);
     let mut table = gather_declarations(&program)?;
     resolve_inheritance(&mut table)?;

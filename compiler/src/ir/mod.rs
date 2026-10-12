@@ -1,5 +1,9 @@
 mod declare;
 mod dump;
+pub mod gc_roots;
+mod liveness;
+pub mod lower;
+pub mod register_allocator;
 pub mod runtime;
 pub mod statics;
 mod verify;
@@ -74,6 +78,11 @@ pub enum DataItem {
     Zero(u32),
 }
 
+/// The `line` of compiler-generated code, which has no source line: `lo_entry`,
+/// implicit constructors, and the I/O wrapper methods (whose preamble
+/// declarations also carry line 0).
+pub const GENERATED_LINE: u32 = 0;
+
 pub struct CheckedIr {
     program: ProgramIr,
 }
@@ -83,11 +92,22 @@ pub struct ProgramIr {
     pub signatures: Vec<Signature>,
     pub functions: Vec<FunctionIr>,
     pub data: Vec<DataDef>,
-    // Explicitly identifies the function allowed to expose root-slot addresses.
+    /// The entry function `main` calls after `lo_runtime_init`.
     pub startup: Option<SymbolId>,
 }
 
 impl ProgramIr {
+    /// True if `operand` is the address of a static object outside the heap
+    /// (such as the empty string), which the collector never moves.
+    pub(crate) fn is_static_ref(&self, operand: Operand) -> bool {
+        let Operand::Symbol(id) = operand else {
+            return false;
+        };
+        self.symbols
+            .get(id.0)
+            .is_some_and(|symbol| matches!(symbol.kind, SymbolKind::StaticRef))
+    }
+
     pub fn intern_signature(&mut self, signature: Signature) -> SignatureId {
         let existing_id = self
             .signatures
@@ -117,6 +137,15 @@ pub struct FunctionIr {
 }
 
 impl FunctionIr {
+    /// True if the function contains a `Call`. `Abort` does not count: it never
+    /// returns, so nothing it clobbers is observed, and it is not a safepoint.
+    pub fn has_calls(&self) -> bool {
+        self.blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| matches!(instruction.kind, InstructionKind::Call { .. }))
+    }
+
     /// Adds a mutable virtual register, keeping its type and optional name together.
     /// The register is initially unassigned unless it is added to `params`.
     ///
@@ -144,6 +173,7 @@ pub struct Instruction {
     pub line: u32,
 }
 
+#[derive(Debug)]
 pub enum InstructionKind {
     Copy {
         dst: VirtualRegId,
@@ -178,10 +208,6 @@ pub enum InstructionKind {
         value: Operand,
     },
     RootLoad {
-        dst: VirtualRegId,
-        slot: u32,
-    },
-    RootAddr {
         dst: VirtualRegId,
         slot: u32,
     },
@@ -281,8 +307,7 @@ impl InstructionKind {
             | Self::Binary { dst, .. }
             | Self::Unary { dst, .. }
             | Self::Load { dst, .. }
-            | Self::RootLoad { dst, .. }
-            | Self::RootAddr { dst, .. } => Some(*dst),
+            | Self::RootLoad { dst, .. } => Some(*dst),
             Self::Call { dst, .. } => *dst,
             Self::Store { .. } | Self::RootStore { .. } => None,
         }
@@ -302,7 +327,7 @@ impl InstructionKind {
             Self::Load { base, .. } => vec![*base],
             Self::Store { base, value, .. } => vec![*base, *value],
             Self::RootStore { value, .. } => vec![*value],
-            Self::RootLoad { .. } | Self::RootAddr { .. } => vec![],
+            Self::RootLoad { .. } => vec![],
             Self::Call { target, args, .. } => {
                 let mut operands = args.clone();
                 if let CallTarget::Indirect(pointer) = target {

@@ -55,10 +55,6 @@ impl ProgramIr {
     pub fn empty_string(&mut self) -> Result<SymbolId, String> {
         self.declare_symbol(symbols::EMPTY_STRING, SymbolKind::StaticRef)
     }
-
-    pub fn string_class(&mut self) -> Result<SymbolId, String> {
-        self.declare_symbol(symbols::STRING_CLASS, SymbolKind::Data)
-    }
 }
 
 #[cfg(test)]
