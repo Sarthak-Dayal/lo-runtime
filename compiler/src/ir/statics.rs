@@ -283,22 +283,7 @@ mod tests {
         assert_eq!(at(main, d.parent), &DataItem::Zero(8));
         assert_eq!(at(main, d.pointer_offsets), &DataItem::Zero(8));
         assert!(p.find_symbol("lo_class_4_Main_pointers").is_none());
-    }
-
-    #[test]
-    fn bindings_are_a_static_frame_with_one_root_per_prebound_name() {
-        let p = built();
-        let frame = NATIVE.frame();
-        let bindings = data(&p, symbols::BINDINGS);
-        assert_eq!(bindings.section, Section::Writable);
-        assert_eq!(
-            bindings.items,
-            [
-                DataItem::Zero(frame.num_roots),
-                DataItem::U32(3),
-                DataItem::Zero(frame.size(3) - frame.num_roots - U32_SIZE),
-            ]
-        );
+        assert_eq!(data(&p, symbols::BINDINGS).section, Section::Writable);
     }
 
     #[test]

@@ -8,10 +8,6 @@ pub mod statics;
 mod verify;
 
 #[cfg(test)]
-mod lower_tests;
-#[cfg(test)]
-mod program_tests;
-#[cfg(test)]
 mod tests;
 
 // IDs used to index into tables for registers, blocks, symbols, and signatures

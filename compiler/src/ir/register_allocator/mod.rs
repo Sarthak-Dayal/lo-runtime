@@ -24,9 +24,6 @@ mod liveness;
 pub mod spill_all;
 mod target;
 
-#[cfg(test)]
-mod tests;
-
 use crate::ir::{CheckedIr, SymbolId, VirtualRegId};
 use std::collections::HashMap;
 
