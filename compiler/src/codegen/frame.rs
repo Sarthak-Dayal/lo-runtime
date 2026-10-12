@@ -73,27 +73,16 @@ pub struct FrameParams {
     /// True if the function contains a `Call`. Such functions register a shadow
     /// frame (even with zero roots); leaf functions do not.
     pub has_calls: bool,
-    /// True for the startup function: it must call `lo_runtime_init` before any
-    /// frame is registered, so registration is emitted separately by the selector
-    /// via `Frame::register_shadow`.
-    pub defer_registration: bool,
 }
 
 impl FrameParams {
     /// Frame requirements of a function after `insert_gc_roots` and allocation.
-    /// `is_startup` is `function.symbol == ProgramIr.startup`.
-    pub fn for_function(
-        function: &FunctionIr,
-        allocation: &FunctionAllocation,
-        is_startup: bool,
-    ) -> FrameParams {
-        let has_calls = function.has_calls();
+    pub fn for_function(function: &FunctionIr, allocation: &FunctionAllocation) -> FrameParams {
         FrameParams {
             root_slots: function.root_slots,
             spill_slot_count: allocation.spill_slot_count,
             callee_saved: allocation.used_callee_saved_registers.clone(),
-            has_calls,
-            defer_registration: is_startup && has_calls,
+            has_calls: function.has_calls(),
         }
     }
 }
@@ -112,7 +101,6 @@ pub struct Frame {
     ret_save: Option<i32>,
     /// Bytes subtracted from `rsp` after `push rbp ; mov rbp, rsp`.
     size: i32,
-    defer_registration: bool,
 }
 
 struct Shadow {
@@ -158,17 +146,12 @@ impl Frame {
             spill_slots: params.spill_slot_count,
             ret_save,
             size: (used + STACK_ALIGN - 1) / STACK_ALIGN * STACK_ALIGN,
-            defer_registration: params.defer_registration,
         })
     }
 
     /// Bytes reserved below the saved `rbp` (always a multiple of 16).
     pub fn size(&self) -> i32 {
         self.size
-    }
-
-    pub fn has_shadow_frame(&self) -> bool {
-        self.shadow.is_some()
     }
 
     fn at(disp: i32) -> Mem {
@@ -194,10 +177,6 @@ impl Frame {
         Self::at(shadow.base + shadow.layout.root(slot) as i32)
     }
 
-    fn shadow_base(&self) -> Mem {
-        Self::at(self.shadow.as_ref().expect("no shadow frame").base)
-    }
-
     /// The operand for an allocation result: a register, or a spill slot in memory.
     pub fn location(&self, location: PhysicalLocation, width: Width) -> Operand {
         match location {
@@ -207,8 +186,7 @@ impl Frame {
     }
 
     /// `push rbp ; mov rbp, rsp ; sub rsp, N`, saves callee-saved registers, moves
-    /// parameters to their locations, then builds (and, unless deferred, registers)
-    /// the shadow frame.
+    /// parameters to their locations, then builds and registers the shadow frame.
     pub fn prologue(&self, params: &[Param]) -> Result<Vec<Inst>, String> {
         let mut out = vec![
             Inst::Push(Operand::r64(Reg::Rbp)),
@@ -238,20 +216,10 @@ impl Frame {
             for slot in 0..shadow.roots {
                 out.push(Inst::Mov(at(shadow.layout.root(slot)), Operand::imm(0)));
             }
-            if !self.defer_registration {
-                out.extend(self.register_shadow());
-            }
+            out.push(Inst::Lea(Reg::Rdi, Self::at(shadow.base)));
+            out.push(Inst::Call("lo_push_frame".into()));
         }
         Ok(out)
-    }
-
-    /// `lea rdi, [frame] ; call lo_push_frame`. For the startup function the
-    /// selector emits this right after its `call lo_runtime_init`.
-    pub fn register_shadow(&self) -> Vec<Inst> {
-        vec![
-            Inst::Lea(Reg::Rdi, self.shadow_base()),
-            Inst::Call("lo_push_frame".into()),
-        ]
     }
 
     /// Moves incoming parameters to their allocated locations, in three phases so

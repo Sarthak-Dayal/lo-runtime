@@ -29,18 +29,15 @@ pub fn select_function(
     program: &ProgramIr,
     function: &FunctionIr,
     allocation: &FunctionAllocation,
-    is_startup: bool,
 ) -> Result<Vec<Item>, String> {
     let name = program.symbols[function.symbol.0].name.clone();
-    let frame = Frame::new(FrameParams::for_function(function, allocation, is_startup))?;
+    let frame = Frame::new(FrameParams::for_function(function, allocation))?;
     let mut selector = Selector {
         program,
         function,
         allocation,
         frame,
         name: name.clone(),
-        is_startup,
-        registered: false,
         next_block: None,
         out: vec![],
     };
@@ -62,9 +59,6 @@ struct Selector<'a> {
     allocation: &'a FunctionAllocation,
     frame: Frame,
     name: String,
-    is_startup: bool,
-    /// The startup frame is registered right after `lo_runtime_init`.
-    registered: bool,
     /// The block emitted next, so jumps to it can be omitted.
     next_block: Option<BlockId>,
     out: Vec<Item>,
@@ -140,9 +134,6 @@ impl Selector<'_> {
                     .map_err(|e| format!("line {}: {e}", instruction.line))?;
             }
             self.terminator(&block.terminator)?;
-        }
-        if self.is_startup && self.frame.has_shadow_frame() && !self.registered {
-            return Err("startup function never calls lo_runtime_init".into());
         }
         Ok(())
     }
@@ -386,19 +377,17 @@ impl Selector<'_> {
             }
         }
 
-        let callee_name = match target {
+        match target {
             CallTarget::Direct(id) => {
                 let name = self.symbol_name(*id);
-                self.emit(Inst::Call(name.clone()));
-                Some(name)
+                self.emit(Inst::Call(name));
             }
             CallTarget::Indirect(pointer) => {
                 let value = self.fetch(*pointer, R11)?;
                 self.mov(Operand::r64(R11), value);
                 self.emit(Inst::CallIndirect(Operand::r64(R11)));
-                None
             }
-        };
+        }
 
         if returns {
             let cleanup = padding + 8 * stack_args.len() as i64;
@@ -412,15 +401,6 @@ impl Selector<'_> {
         }
         if let Some(dst) = dst {
             self.take_result(dst)?;
-        }
-        if self.is_startup && !self.registered && callee_name.as_deref() == Some("lo_runtime_init")
-        {
-            // The runtime resets its frame chain in init, so the startup frame
-            // may only be linked after it.
-            self.registered = true;
-            for inst in self.frame.register_shadow() {
-                self.emit(inst);
-            }
         }
         Ok(())
     }

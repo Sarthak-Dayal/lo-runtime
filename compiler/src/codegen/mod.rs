@@ -26,10 +26,7 @@ pub fn emit_program(program: &ProgramIr, allocation: &ProgramAllocation) -> Resu
                     program.symbols[function.symbol.0].name
                 )
             })?;
-        let is_startup = program.startup == Some(function.symbol);
-        items.extend(select::select_function(
-            program, function, allocation, is_startup,
-        )?);
+        items.extend(select::select_function(program, function, allocation)?);
     }
     let wrapper = main_wrapper(program)?;
     for item in &wrapper {
@@ -50,18 +47,21 @@ pub fn emit_program(program: &ProgramIr, allocation: &ProgramAllocation) -> Resu
 
 /// The C entry point. `gcc -static` supplies `_start`, which calls `main` and
 /// passes its `eax` to `exit`, so `Main.main`'s result becomes the exit status.
+/// The runtime is initialized here, before `lo_entry` registers its shadow frame
+/// (`runtime-abi.md` §3.6), so `lo_entry` needs no special prologue.
 fn main_wrapper(program: &ProgramIr) -> Result<Vec<Item>, String> {
     let startup = program
         .startup
         .ok_or("program has no startup function (lo_entry)")?;
     let entry = program.symbols[startup.0].name.clone();
-    // `main` is entered with rsp = 8 (mod 16); push rbp makes it 0 for the call.
+    // `main` is entered with rsp = 8 (mod 16); push rbp makes it 0 for the calls.
     Ok(vec![
         Item::Directive(String::new()),
         Item::Directive(".globl main".into()),
         Item::Label("main".into()),
         Item::Inst(Inst::Push(Operand::r64(Reg::Rbp))),
         Item::Inst(Inst::Mov(Operand::r64(Reg::Rbp), Operand::r64(Reg::Rsp))),
+        Item::Inst(Inst::Call("lo_runtime_init".into())),
         Item::Inst(Inst::Call(entry)),
         Item::Inst(Inst::Pop(Operand::r64(Reg::Rbp))),
         Item::Inst(Inst::Ret),

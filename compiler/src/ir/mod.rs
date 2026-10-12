@@ -86,7 +86,7 @@ pub struct ProgramIr {
     pub signatures: Vec<Signature>,
     pub functions: Vec<FunctionIr>,
     pub data: Vec<DataDef>,
-    // Identifies the entry function responsible for runtime initialization.
+    // The entry function `main` calls after `lo_runtime_init`.
     pub startup: Option<SymbolId>,
 }
 

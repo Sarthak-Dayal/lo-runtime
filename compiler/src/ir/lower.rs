@@ -101,7 +101,6 @@ fn lower_constructor(
 fn lower_startup(ctx: &mut Context<'_>) -> Result<FunctionIr, String> {
     let symbol = ctx.symbol("lo_entry")?;
     let mut builder = Builder::new(ctx, symbol, false, &[], &[], 0)?;
-    builder.runtime("lo_runtime_init", vec![], 0)?;
     let frame = builder.ctx.symbol(symbols::BINDINGS)?;
     builder.runtime("lo_push_frame", vec![Operand::Symbol(frame)], 0)?;
     for name in symbols::PREBOUND {
