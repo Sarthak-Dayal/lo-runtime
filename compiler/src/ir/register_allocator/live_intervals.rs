@@ -1,45 +1,36 @@
-use super::liveness::LivenessInfo;
-use crate::ir::{CheckedIr, FunctionIr, SymbolId, VirtualRegId};
+//! One live interval per virtual register. Positions number instructions in
+//! block order, and each terminator gets its own position. A value live into or
+//! out of a block covers that block's first or last position, so an interval
+//! may be longer than strictly needed (for example across a loop) but never
+//! shorter.
+
+use crate::ir::liveness::LivenessInfo;
+use crate::ir::{FunctionIr, VirtualRegId};
 use std::collections::HashMap;
 
-/// One conservative, inclusive interval in instruction/terminator positions.
+/// Positions `start..=end`, both inclusive.
 pub struct LiveInterval {
     pub register: VirtualRegId,
     pub start: usize,
     pub end: usize,
 }
 
-/// Requires liveness computed from the same checked program.
-pub fn build_live_intervals(
-    ir: &CheckedIr,
-    liveness: &HashMap<SymbolId, LivenessInfo>,
-) -> HashMap<SymbolId, Vec<LiveInterval>> {
-    let mut intervals = HashMap::new();
-    for function in &ir.program().functions {
-        let liveness_info = liveness
-            .get(&function.symbol)
-            .expect("liveness must contain every defined function");
-        let function_intervals = build_function_live_intervals(function, liveness_info);
-        intervals.insert(function.symbol, function_intervals);
-    }
-    intervals
-}
-
+/// Sorted by start, then register number.
 pub(super) fn build_function_live_intervals(
     function: &FunctionIr,
     liveness: &LivenessInfo,
 ) -> Vec<LiveInterval> {
     let mut intervals: HashMap<VirtualRegId, LiveInterval> = HashMap::new();
     let mut position = 0;
+    let entry = function.entry.0;
 
     for (block_id, block) in function.blocks.iter().enumerate() {
         for &incoming_register in &liveness.live_in[block_id] {
             include_position(&mut intervals, incoming_register, position);
         }
 
-        let func_entry_block = function.entry.0;
-        if block_id == func_entry_block {
-            // parameters need to be live at the start of the function, so include them in the live intervals
+        if block_id == entry {
+            // Parameters arrive at function entry, so they are live from there.
             for &parameter in &function.params {
                 include_position(&mut intervals, parameter, position);
             }

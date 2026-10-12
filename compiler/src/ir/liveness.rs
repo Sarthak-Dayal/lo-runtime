@@ -1,23 +1,18 @@
-use crate::ir::{BasicBlock, CheckedIr, FunctionIr, InstructionKind, SymbolId, VirtualRegId};
-use std::collections::{BTreeMap, HashMap, HashSet};
+//! Backward dataflow liveness per block, plus the one fact both the GC-root pass
+//! and the register allocator need: which values are live after each call.
+
+use crate::ir::{BasicBlock, FunctionIr, InstructionKind, VirtualRegId};
+use std::collections::{BTreeMap, HashSet};
 
 pub struct LivenessInfo {
-    // For each block, the set of registers that are live at the end of the block.
+    /// For each block, the registers live at its end.
     pub live_out: Vec<HashSet<VirtualRegId>>,
-    // For each block, the set of registers that are live at the start of the block.
+    /// For each block, the registers live at its start.
     pub live_in: Vec<HashSet<VirtualRegId>>,
 }
 
-// Computes liveness for each defined function, keyed by its symbol ID.
-pub fn compute_liveness(ir: &CheckedIr) -> HashMap<SymbolId, LivenessInfo> {
-    let mut functions = HashMap::new();
-    for function in &ir.program().functions {
-        functions.insert(function.symbol, compute_function_liveness(function));
-    }
-    functions
-}
-
-// Computes the liveness information for each block in one function.
+/// Per block: `live_in` is the use set plus whatever is live out and not
+/// defined in the block. Repeats over all blocks until nothing changes.
 pub fn compute_function_liveness(function: &FunctionIr) -> LivenessInfo {
     let mut live_out: Vec<HashSet<VirtualRegId>> = vec![HashSet::new(); function.blocks.len()];
     let mut live_in: Vec<HashSet<VirtualRegId>> = vec![HashSet::new(); function.blocks.len()];
@@ -27,8 +22,8 @@ pub fn compute_function_liveness(function: &FunctionIr) -> LivenessInfo {
 
         for (block_id, block) in function.blocks.iter().enumerate().rev() {
             let mut new_out = HashSet::new();
-            let mut new_in = get_used(block);
-            let def = get_def(block);
+            let mut new_in = use_set(block);
+            let def = def_set(block);
 
             for successor in block.terminator.successors() {
                 new_out.extend(live_in[successor.0].iter().copied());
@@ -82,8 +77,8 @@ pub fn live_across_calls(function: &FunctionIr) -> BTreeMap<(usize, usize), Vec<
     across
 }
 
-// Registers read before their first definition in this block (the use set)
-pub(super) fn get_used(block: &BasicBlock) -> HashSet<VirtualRegId> {
+/// Registers read before their first definition in this block (the use set).
+fn use_set(block: &BasicBlock) -> HashSet<VirtualRegId> {
     let mut used = HashSet::new();
     let mut defined_so_far = HashSet::new();
 
@@ -110,8 +105,8 @@ pub(super) fn get_used(block: &BasicBlock) -> HashSet<VirtualRegId> {
     used
 }
 
-// all registers written by instructions in this block (the def set)
-pub(super) fn get_def(block: &BasicBlock) -> HashSet<VirtualRegId> {
+/// All registers written by instructions in this block (the def set).
+fn def_set(block: &BasicBlock) -> HashSet<VirtualRegId> {
     block
         .instructions
         .iter()

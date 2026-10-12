@@ -1,6 +1,7 @@
 mod declare;
 mod dump;
 pub mod gc_roots;
+mod liveness;
 pub mod lower;
 pub mod register_allocator;
 pub mod runtime;

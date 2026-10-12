@@ -1,10 +1,11 @@
-//! Poletto-Sarkar linear-scan register allocation for the System V AMD64 ABI.
+//! Poletto-Sarkar linear-scan register allocation (one pass over live intervals
+//! sorted by start; Poletto and Sarkar, 1999) for the System V AMD64 ABI.
 //!
 //! Input: the rooted, checked IR and `TargetConstraints::system_v()`. Output: one
 //! location (register or spill slot) per virtual register, per function.
 //!
-//! 1. liveness.rs: liveness across the control-flow graph, and which values are
-//!    live across each call.
+//! 1. `ir::liveness`: liveness across the control-flow graph, and which values
+//!    are live across each call.
 //! 2. live_intervals.rs: one conservative interval per virtual register.
 //! 3. allocation.rs: scan intervals by start. Expire finished ones; give the
 //!    current one the first free register it may use, in pool order; otherwise
@@ -18,14 +19,13 @@
 
 mod allocation;
 mod live_intervals;
-mod liveness;
 pub mod spill_all;
 mod target;
 
+use crate::ir::liveness::compute_function_liveness;
 use crate::ir::{CheckedIr, SymbolId, VirtualRegId};
 use std::collections::HashMap;
 
-pub use liveness::live_across_calls;
 pub use target::{PhysicalRegId, TargetConstraints};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,18 +52,20 @@ pub struct ProgramAllocation {
     pub function_allocations: HashMap<SymbolId, FunctionAllocation>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum RegisterAllocationError {
-    MissingIntervals(SymbolId),
-    InvalidIntervals { function: SymbolId, reason: String },
-}
-
-pub fn allocate_registers(
-    ir: &CheckedIr,
-    target_constraints: &TargetConstraints,
-) -> Result<ProgramAllocation, RegisterAllocationError> {
-    let function_liveness = liveness::compute_liveness(ir);
-    let function_live_intervals = live_intervals::build_live_intervals(ir, &function_liveness);
-
-    allocation::allocate(ir, &function_live_intervals, target_constraints)
+pub fn allocate_registers(ir: &CheckedIr, target: &TargetConstraints) -> ProgramAllocation {
+    target::debug_check(target);
+    let function_allocations = ir
+        .program()
+        .functions
+        .iter()
+        .map(|function| {
+            let liveness = compute_function_liveness(function);
+            let intervals = live_intervals::build_function_live_intervals(function, &liveness);
+            let allocation = allocation::allocate_function(function, &intervals, target);
+            (function.symbol, allocation)
+        })
+        .collect();
+    ProgramAllocation {
+        function_allocations,
+    }
 }

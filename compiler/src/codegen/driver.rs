@@ -28,7 +28,8 @@ use super::emit_program;
 pub enum AllocStrategy {
     /// Every virtual register in its own stack slot. Slow, simple, always correct.
     SpillAll,
-    /// Poletto-Sarkar linear scan over the System V register file.
+    /// Poletto-Sarkar linear scan (one pass over live intervals sorted by start;
+    /// Poletto and Sarkar, 1999) over the System V register file.
     LinearScan,
 }
 
@@ -50,8 +51,7 @@ pub fn compile_to_asm(path: &OsStr, strategy: AllocStrategy) -> Result<String, S
     let ir = build_ir(path)?;
     let allocation = match strategy {
         AllocStrategy::SpillAll => spill_everything_program(&ir),
-        AllocStrategy::LinearScan => allocate_registers(&ir, &TargetConstraints::system_v())
-            .map_err(|e| format!("register allocation: {e:?}"))?,
+        AllocStrategy::LinearScan => allocate_registers(&ir, &TargetConstraints::system_v()),
     };
     emit_program(ir.program(), &allocation)
 }

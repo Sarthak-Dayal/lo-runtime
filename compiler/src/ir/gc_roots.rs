@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use super::register_allocator::live_across_calls;
+use super::liveness::live_across_calls;
 use super::*;
 
 pub fn insert_gc_roots(ir: CheckedIr) -> ProgramIr {
