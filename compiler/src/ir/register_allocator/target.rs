@@ -18,12 +18,13 @@ pub enum PhysicalRegId {
     R15,
 }
 
-// Integer/pointer register constraints for the System V AMD64 ABI (Linux).
-// Source: System V Application Binary Interface, AMD64 Architecture Processor
-// Supplement, section 3.2. RSP/RBP are reserved for stack/frame management.
-// RAX/RCX/RDX/R10/R11 are reserved by this backend as scratch for fixed-register
-// instructions (idiv), address computation and call setup. The argument
-// registers live with the code that uses them, in `codegen::frame`.
+/// The System V AMD64 register file as the allocator sees it (System V ABI,
+/// AMD64 supplement, section 3.2). The argument registers live with the code
+/// that uses them, in `codegen::frame`. Reserved registers, and why:
+/// - rsp and rbp manage the stack frame;
+/// - rax is the selector's accumulator and the return-value register;
+/// - rdx is overwritten by `cdq` and `idiv`;
+/// - r10 and r11 are the selector's scratch registers.
 pub struct TargetConstraints {
     pub allocatable_registers: Vec<PhysicalRegId>,
     pub reserved_registers: Vec<PhysicalRegId>,
@@ -38,8 +39,8 @@ impl TargetConstraints {
             // Caller-saved registers come first: a value that does not survive
             // a call can use them without any save or restore. Values that
             // survive a call may use only the callee-saved second half.
-            allocatable_registers: vec![Rsi, Rdi, R8, R9, Rbx, R12, R13, R14, R15],
-            reserved_registers: vec![Rsp, Rbp, Rax, Rcx, Rdx, R10, R11],
+            allocatable_registers: vec![Rsi, Rdi, R8, R9, Rcx, Rbx, R12, R13, R14, R15],
+            reserved_registers: vec![Rsp, Rbp, Rax, Rdx, R10, R11],
             // RSP is preserved by restoring the stack pointer, not by allocating it
             // RBP remains callee-saved even though it is reserved from allocation
             callee_saved_registers: vec![Rbx, Rsp, Rbp, R12, R13, R14, R15],
