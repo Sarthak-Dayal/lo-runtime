@@ -27,7 +27,7 @@ mod target;
 use crate::ir::{CheckedIr, SymbolId, VirtualRegId};
 use std::collections::HashMap;
 
-pub use liveness::compute_function_liveness;
+pub use liveness::live_across_calls;
 pub use target::{PhysicalRegId, TargetConstraints};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

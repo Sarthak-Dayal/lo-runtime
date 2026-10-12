@@ -1,10 +1,11 @@
 //! Parallel register moves.
 //!
-//! Moving incoming parameters from their argument registers to their allocated
-//! registers is a *parallel* assignment: `rsi <- rdi` and `rdi <- rsi` must both
-//! read the old values. Done naively in sequence the second move reads a clobbered
-//! register. `parallel_move` orders the moves and breaks cycles through `r11`
-//! (a scratch register the allocator never uses).
+//! Moving incoming parameters out of their argument registers, and outgoing
+//! arguments into theirs, is a *parallel* assignment: `rsi <- rdi` and
+//! `rdi <- rsi` must both read the old values. Done naively in sequence the
+//! second move reads a clobbered register. `parallel_move` orders the moves and
+//! breaks cycles through `r10`, a scratch register the allocator never uses and
+//! that holds nothing at either use (an indirect call target waits in `r11`).
 
 use super::x86::{Inst, Operand, Reg, Width};
 
@@ -16,13 +17,13 @@ pub struct Move {
     pub width: Width,
 }
 
-const SCRATCH: Reg = Reg::R11;
+const SCRATCH: Reg = Reg::R10;
 
 pub fn parallel_move(moves: &[Move]) -> Result<Vec<Inst>, String> {
     let mut pending: Vec<Move> = moves.iter().copied().filter(|m| m.dst != m.src).collect();
     for (i, m) in pending.iter().enumerate() {
         if m.dst == SCRATCH || m.src == SCRATCH {
-            return Err("parallel move cannot use the scratch register r11".into());
+            return Err("parallel move cannot use the scratch register r10".into());
         }
         if pending[..i].iter().any(|other| other.dst == m.dst) {
             return Err(format!("parallel move writes {:?} twice", m.dst));

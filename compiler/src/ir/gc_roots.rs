@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use super::register_allocator::compute_function_liveness;
+use super::register_allocator::live_across_calls;
 use super::*;
 
 pub fn insert_gc_roots(ir: CheckedIr) -> ProgramIr {
@@ -64,30 +64,11 @@ fn insert_function_roots(function: &mut FunctionIr) {
     function.root_slots = owned.end;
 }
 
-/// `Ref`s live after each call, excluding its result. Keys sort in program order.
+/// The `Ref`s whose values must survive each call. Keys sort in program order.
 fn refs_live_across_calls(function: &FunctionIr) -> BTreeMap<(usize, usize), Vec<VirtualRegId>> {
-    let liveness = compute_function_liveness(function);
-    let mut saved_at = BTreeMap::new();
-    for (block_index, block) in function.blocks.iter().enumerate() {
-        let mut live = liveness.live_out[block_index].clone();
-        live.extend(block.terminator.used_registers());
-        for (index, instruction) in block.instructions.iter().enumerate().rev() {
-            let destination = instruction.kind.destination();
-            if matches!(instruction.kind, InstructionKind::Call { .. }) {
-                let mut saved: Vec<_> = live
-                    .iter()
-                    .copied()
-                    .filter(|&register| Some(register) != destination)
-                    .filter(|register| function.register_types[register.0] == IrType::Ref)
-                    .collect();
-                saved.sort_by_key(|register| register.0);
-                saved_at.insert((block_index, index), saved);
-            }
-            if let Some(destination) = destination {
-                live.remove(&destination);
-            }
-            live.extend(instruction.kind.used_registers());
-        }
+    let mut across = live_across_calls(function);
+    for values in across.values_mut() {
+        values.retain(|register| function.register_types[register.0] == IrType::Ref);
     }
-    saved_at
+    across
 }

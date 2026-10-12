@@ -45,9 +45,9 @@ impl TargetConstraints {
         use PhysicalRegId::*;
 
         Self {
-            // Caller-saved registers come first: a leaf function can use them
-            // without saving anything. Functions that call use only callee-saved
-            // registers, so those fall through to the second half.
+            // Caller-saved registers come first: a value that does not survive
+            // a call can use them without any save or restore. Values that
+            // survive a call may use only the callee-saved second half.
             allocatable_registers: vec![Rsi, Rdi, R8, R9, Rbx, R12, R13, R14, R15],
             reserved_registers: vec![Rsp, Rbp, Rax, Rcx, Rdx, R10, R11],
             caller_saved_registers: vec![Rax, Rcx, Rdx, Rsi, Rdi, R8, R9, R10, R11],

@@ -1,5 +1,5 @@
-use crate::ir::{BasicBlock, CheckedIr, FunctionIr, SymbolId, VirtualRegId};
-use std::collections::{HashMap, HashSet};
+use crate::ir::{BasicBlock, CheckedIr, FunctionIr, InstructionKind, SymbolId, VirtualRegId};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub struct LivenessInfo {
     // For each block, the set of registers that are live at the end of the block.
@@ -50,6 +50,36 @@ pub fn compute_function_liveness(function: &FunctionIr) -> LivenessInfo {
     }
 
     LivenessInfo { live_out, live_in }
+}
+
+/// For each `Call`, keyed by (block, instruction index), the values whose current
+/// contents are read after the call returns: live after it, minus its result.
+/// Sorted by register number; keys sort in program order. The GC-roots pass roots
+/// the `Ref`s among them; the allocator keeps all of them out of caller-saved registers.
+pub fn live_across_calls(function: &FunctionIr) -> BTreeMap<(usize, usize), Vec<VirtualRegId>> {
+    let liveness = compute_function_liveness(function);
+    let mut across = BTreeMap::new();
+    for (block_index, block) in function.blocks.iter().enumerate() {
+        let mut live = liveness.live_out[block_index].clone();
+        live.extend(block.terminator.used_registers());
+        for (index, instruction) in block.instructions.iter().enumerate().rev() {
+            let destination = instruction.kind.destination();
+            if matches!(instruction.kind, InstructionKind::Call { .. }) {
+                let mut values: Vec<_> = live
+                    .iter()
+                    .copied()
+                    .filter(|&register| Some(register) != destination)
+                    .collect();
+                values.sort_by_key(|register| register.0);
+                across.insert((block_index, index), values);
+            }
+            if let Some(destination) = destination {
+                live.remove(&destination);
+            }
+            live.extend(instruction.kind.used_registers());
+        }
+    }
+    across
 }
 
 // Registers read before their first definition in this block (the use set)

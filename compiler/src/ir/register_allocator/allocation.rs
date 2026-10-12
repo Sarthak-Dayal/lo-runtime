@@ -1,11 +1,12 @@
 use super::live_intervals::LiveInterval;
+use super::liveness::live_across_calls;
 use super::target::debug_check;
 use super::{
     FunctionAllocation, PhysicalLocation, PhysicalRegId, ProgramAllocation,
     RegisterAllocationError, SpillSlotId, TargetConstraints,
 };
-use crate::ir::{CheckedIr, FunctionIr, SymbolId};
-use std::collections::HashMap;
+use crate::ir::{CheckedIr, FunctionIr, SymbolId, VirtualRegId};
+use std::collections::{HashMap, HashSet};
 
 // An interval currently occupying a physical register.
 struct ActiveInterval<'a> {
@@ -29,8 +30,11 @@ pub fn allocate(
             .ok_or(RegisterAllocationError::MissingIntervals(function.symbol))?;
         validate_intervals(function, live_intervals)?;
 
-        let function_allocation =
-            allocate_function(live_intervals, target_constraints, function.has_calls());
+        let function_allocation = allocate_function(
+            live_intervals,
+            target_constraints,
+            &values_surviving_calls(function),
+        );
         function_allocations.insert(function.symbol, function_allocation);
     }
 
@@ -39,10 +43,25 @@ pub fn allocate(
     })
 }
 
+// The calling-convention rule: a value read after some call returns must not sit
+// in a caller-saved register, which the callee may overwrite. A function with
+// calls also calls `lo_push_frame` in its prologue, after the parameters reach
+// their locations, so its parameters must survive a call too.
+fn values_surviving_calls(function: &FunctionIr) -> HashSet<VirtualRegId> {
+    let mut surviving: HashSet<_> = live_across_calls(function)
+        .into_values()
+        .flatten()
+        .collect();
+    if function.has_calls() {
+        surviving.extend(&function.params);
+    }
+    surviving
+}
+
 pub(super) fn allocate_function(
     live_intervals: &[LiveInterval],
     target_constraints: &TargetConstraints,
-    has_calls: bool,
+    surviving_calls: &HashSet<VirtualRegId>,
 ) -> FunctionAllocation {
     let mut function_allocation = FunctionAllocation {
         register_locations: HashMap::new(),
@@ -50,18 +69,7 @@ pub(super) fn allocate_function(
         used_callee_saved_registers: Vec::new(),
     };
     let mut active_intervals = Vec::new();
-
-    // A simple, conservative call policy: no allocated value in this function
-    // uses a caller-saved register. Argument setup cannot clobber allocated values,
-    // and values survive calls without interval splitting or save/restore moves.
-    let mut free_physical_registers: Vec<_> = target_constraints
-        .allocatable_registers
-        .iter()
-        .copied()
-        .filter(|register| {
-            !has_calls || target_constraints.callee_saved_registers.contains(register)
-        })
-        .collect();
+    let mut free_physical_registers = target_constraints.allocatable_registers.clone();
 
     let mut sorted_intervals: Vec<_> = live_intervals.iter().collect();
     sorted_intervals.sort_by_key(|interval| (interval.start, interval.register.0));
@@ -72,29 +80,38 @@ pub(super) fn allocate_function(
             &mut active_intervals,
             &mut free_physical_registers,
         );
-        // Hand out registers in pool order, so caller-saved ones stay preferred
-        // after others are freed.
-        free_physical_registers.sort_by_key(|register| {
-            target_constraints
-                .allocatable_registers
-                .iter()
-                .position(|r| r == register)
-        });
+        let survives_call = surviving_calls.contains(&current_interval.register);
+        let allowed = |register: PhysicalRegId| {
+            !survives_call
+                || target_constraints
+                    .callee_saved_registers
+                    .contains(&register)
+        };
+        // Pool order lists caller-saved registers first, so a value that does not
+        // survive a call takes one of those before a callee-saved one, which would
+        // cost a save and restore.
+        let free_register = target_constraints
+            .allocatable_registers
+            .iter()
+            .copied()
+            .find(|&register| allowed(register) && free_physical_registers.contains(&register));
 
-        if free_physical_registers.is_empty() {
-            spill_at_interval(
+        match free_register {
+            Some(physical_register) => {
+                free_physical_registers.retain(|&register| register != physical_register);
+                assign_register(
+                    current_interval,
+                    physical_register,
+                    &mut active_intervals,
+                    &mut function_allocation,
+                );
+            }
+            None => spill_at_interval(
                 current_interval,
+                allowed,
                 &mut active_intervals,
                 &mut function_allocation,
-            );
-        } else {
-            let physical_register = free_physical_registers.remove(0);
-            assign_register(
-                current_interval,
-                physical_register,
-                &mut active_intervals,
-                &mut function_allocation,
-            );
+            ),
         }
     }
 
@@ -161,24 +178,30 @@ fn assign_spill_slot(live_interval: &LiveInterval, function_allocation: &mut Fun
         .insert(live_interval.register, PhysicalLocation::Spill(spill_slot));
 }
 
+// No allowed register is free: spill whichever of the current interval and the
+// active intervals holding an allowed register ends last.
 fn spill_at_interval<'a>(
     current_interval: &'a LiveInterval,
+    allowed: impl Fn(PhysicalRegId) -> bool,
     active_intervals: &mut Vec<ActiveInterval<'a>>,
     function_allocation: &mut FunctionAllocation,
 ) {
-    let Some(latest_active_interval) = active_intervals.last() else {
-        // No allocatable registers: every interval gets its own spill slot.
+    // `active_intervals` is sorted by end, so the last candidate ends latest.
+    let candidate = active_intervals
+        .iter()
+        .rposition(|active_interval| allowed(active_interval.physical_register));
+    let Some(index) = candidate else {
         assign_spill_slot(current_interval, function_allocation);
         return;
     };
 
-    if latest_active_interval.live_interval.end <= current_interval.end {
+    if active_intervals[index].live_interval.end <= current_interval.end {
         // On equal end positions, keep the existing assignment.
         assign_spill_slot(current_interval, function_allocation);
         return;
     }
 
-    let evicted_interval = active_intervals.pop().expect("active list is nonempty");
+    let evicted_interval = active_intervals.remove(index);
     // This replaces the old register assignment for the WHOLE interval.
     // Code generation consumes the completed map; no machine code exists yet.
     assign_spill_slot(evicted_interval.live_interval, function_allocation);

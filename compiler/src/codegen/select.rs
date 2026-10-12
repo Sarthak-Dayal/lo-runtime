@@ -17,7 +17,8 @@ use crate::ir::{
     ProgramIr, Terminator, UnaryOp, VirtualRegId,
 };
 
-use super::frame::{reg, width_of, Frame, FrameParams, Param, ARGUMENT_REGISTERS};
+use super::frame::{width_of, Frame, FrameParams, Param, ARGUMENT_REGISTERS};
+use super::moves::{parallel_move, Move};
 use super::x86::{Alu, Cond, Inst, Item, Mem, Operand, Reg, Reg8, Unary, Width};
 
 const RAX: Reg = Reg::Rax;
@@ -349,11 +350,18 @@ impl Selector<'_> {
         args: &[IrOperand],
         returns: bool,
     ) -> Result<(), String> {
-        self.reject_argument_register_sources(target, args)?;
-        let register_args = args.len().min(ARGUMENT_REGISTERS.len());
-        let stack_args = &args[register_args..];
+        // The pointer may sit in an argument register, so take it out before
+        // argument setup overwrites those.
+        if let CallTarget::Indirect(pointer) = target {
+            let value = self.fetch(*pointer, R11)?;
+            self.mov(Operand::r64(R11), value);
+        }
+        let register_count = args.len().min(ARGUMENT_REGISTERS.len());
+        let (register_args, stack_args) = args.split_at(register_count);
 
-        // An odd number of pushes would leave rsp misaligned, so pad first.
+        // Pushes go through rax and only read, so they come before any argument
+        // register is written. An odd number of pushes would leave rsp
+        // misaligned, so pad first.
         let padding = if stack_args.len() % 2 == 1 { 8 } else { 0 };
         if padding > 0 {
             self.emit(Inst::Alu(Alu::Sub, Operand::r64(Reg::Rsp), Operand::imm(8)));
@@ -365,28 +373,14 @@ impl Selector<'_> {
             };
             self.emit(Inst::Push(value));
         }
-        for (index, &arg) in args[..register_args].iter().enumerate() {
-            let destination = ARGUMENT_REGISTERS[index];
-            if let IrOperand::Symbol(id) = arg {
-                let name = self.symbol_name(id);
-                self.emit(Inst::Lea(destination, Mem::Rip(name)));
-            } else {
-                let width = self.operand_width(arg)?;
-                let value = self.src(arg, RAX)?;
-                self.emit(Inst::Mov(Operand::Reg(destination, width), value));
-            }
-        }
+        self.move_register_arguments(register_args)?;
 
         match target {
             CallTarget::Direct(id) => {
                 let name = self.symbol_name(*id);
                 self.emit(Inst::Call(name));
             }
-            CallTarget::Indirect(pointer) => {
-                let value = self.fetch(*pointer, R11)?;
-                self.mov(Operand::r64(R11), value);
-                self.emit(Inst::CallIndirect(Operand::r64(R11)));
-            }
+            CallTarget::Indirect(_) => self.emit(Inst::CallIndirect(Operand::r64(R11))),
         }
 
         if returns {
@@ -405,29 +399,38 @@ impl Selector<'_> {
         Ok(())
     }
 
-    /// Sequential argument moves are only correct when no argument lives in an
-    /// argument register. Spill-everything uses no registers, and linear scan
-    /// gives functions that call only callee-saved registers, so this holds.
-    fn reject_argument_register_sources(
-        &self,
-        target: &CallTarget,
-        args: &[IrOperand],
-    ) -> Result<(), String> {
-        let callee = match target {
-            CallTarget::Indirect(pointer) => Some(*pointer),
-            CallTarget::Direct(_) => None,
-        };
-        for operand in args.iter().copied().chain(callee) {
-            if let IrOperand::Value(v) = operand {
-                if let PhysicalLocation::Register(id) = self.location(v)? {
-                    if ARGUMENT_REGISTERS.contains(&reg(id)) {
-                        return Err(format!(
-                            "call operand v{} is in argument register {:?}; a parallel move is required",
-                            v.0,
-                            reg(id)
-                        ));
-                    }
-                }
+    /// Writes the register arguments. A value may already sit in another
+    /// argument register (`f(b, a)` with `a` in rdi and `b` in rsi), so the
+    /// register-to-register copies are one parallel move. Memory, immediate and
+    /// symbol arguments are written after it, since their sources cannot be
+    /// overwritten but their destinations may still be read by the parallel move.
+    fn move_register_arguments(&mut self, args: &[IrOperand]) -> Result<(), String> {
+        let mut register_moves = vec![];
+        let mut other_args = vec![];
+        for (&arg, &destination) in args.iter().zip(&ARGUMENT_REGISTERS) {
+            match arg {
+                IrOperand::Value(v) => match self.reg_operand(v)? {
+                    Operand::Reg(src, width) => register_moves.push(Move {
+                        dst: destination,
+                        src,
+                        width,
+                    }),
+                    _ => other_args.push((arg, destination)),
+                },
+                _ => other_args.push((arg, destination)),
+            }
+        }
+        for inst in parallel_move(&register_moves)? {
+            self.emit(inst);
+        }
+        for (arg, destination) in other_args {
+            if let IrOperand::Symbol(id) = arg {
+                let name = self.symbol_name(id);
+                self.emit(Inst::Lea(destination, Mem::Rip(name)));
+            } else {
+                let width = self.operand_width(arg)?;
+                let value = self.src(arg, RAX)?;
+                self.emit(Inst::Mov(Operand::Reg(destination, width), value));
             }
         }
         Ok(())
