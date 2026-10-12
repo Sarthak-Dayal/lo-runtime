@@ -1,5 +1,10 @@
-//! Roots each `Ref` live across a call: save before, reload after, null the
-//! pass's other slots (`runtime-abi.md` §3.3). Slots below `root_slots` are lowering's.
+//! Makes every call GC-safe. Any call may run the moving collector, which only
+//! sees references stored in shadow-frame root slots, and may move the objects
+//! they point to. So for each `Ref` still needed after a call, this pass stores
+//! it to its own root slot before the call and reloads it from that slot after
+//! the call (the collector updated the slot if the object moved). Every other
+//! slot is set to null, so an object the function no longer needs is not kept
+//! alive (`runtime-abi.md` §3.3). Each `Ref` gets one slot for the whole function.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -15,16 +20,9 @@ pub fn insert_gc_roots(ir: CheckedIr) -> ProgramIr {
 }
 
 fn insert_function_roots(function: &mut FunctionIr) {
-    let saved_at = refs_live_across_calls(function);
-    let first_slot = function.root_slots;
-    let mut slots: HashMap<VirtualRegId, u32> = HashMap::new();
-    for saved in saved_at.values() {
-        for &register in saved {
-            let next = first_slot + slots.len() as u32;
-            slots.entry(register).or_insert(next);
-        }
-    }
-    let owned = first_slot..first_slot + slots.len() as u32;
+    let live_refs_at_call = refs_live_across_calls(function);
+    let slots = assign_root_slots(&live_refs_at_call);
+    let all_slots = 0..slots.len() as u32;
 
     for (block_index, block) in function.blocks.iter_mut().enumerate() {
         let mut instructions = Vec::with_capacity(block.instructions.len());
@@ -32,28 +30,28 @@ fn insert_function_roots(function: &mut FunctionIr) {
             .into_iter()
             .enumerate()
         {
-            let Some(saved) = saved_at.get(&(block_index, index)) else {
+            let Some(saved) = live_refs_at_call.get(&(block_index, index)) else {
                 instructions.push(instruction);
                 continue;
             };
             let line = instruction.line;
-            let root = |kind| Instruction { kind, line };
+            let at_line = |kind| Instruction { kind, line };
             let saved_slots: Vec<u32> = saved.iter().map(|register| slots[register]).collect();
             for (&register, &slot) in saved.iter().zip(&saved_slots) {
-                instructions.push(root(InstructionKind::RootStore {
+                instructions.push(at_line(InstructionKind::RootStore {
                     slot,
                     value: Operand::Value(register),
                 }));
             }
-            for slot in owned.clone().filter(|slot| !saved_slots.contains(slot)) {
-                instructions.push(root(InstructionKind::RootStore {
+            for slot in all_slots.clone().filter(|slot| !saved_slots.contains(slot)) {
+                instructions.push(at_line(InstructionKind::RootStore {
                     slot,
                     value: Operand::Null,
                 }));
             }
             instructions.push(instruction);
             for (&register, &slot) in saved.iter().zip(&saved_slots) {
-                instructions.push(root(InstructionKind::RootLoad {
+                instructions.push(at_line(InstructionKind::RootLoad {
                     dst: register,
                     slot,
                 }));
@@ -61,7 +59,22 @@ fn insert_function_roots(function: &mut FunctionIr) {
         }
         block.instructions = instructions;
     }
-    function.root_slots = owned.end;
+    function.root_slots = all_slots.end;
+}
+
+/// One slot per `Ref` that is live across some call, numbered in the order the
+/// calls appear.
+fn assign_root_slots(
+    live_refs_at_call: &BTreeMap<(usize, usize), Vec<VirtualRegId>>,
+) -> HashMap<VirtualRegId, u32> {
+    let mut slots = HashMap::new();
+    for saved in live_refs_at_call.values() {
+        for &register in saved {
+            let next = slots.len() as u32;
+            slots.entry(register).or_insert(next);
+        }
+    }
+    slots
 }
 
 /// The `Ref`s whose values must survive each call. Keys sort in program order.
