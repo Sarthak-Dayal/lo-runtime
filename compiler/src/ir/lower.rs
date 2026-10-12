@@ -1,9 +1,14 @@
+//! Typed AST -> semantic IR, one function per method and constructor plus
+//! `lo_entry`. Every runtime operation is an explicit call, and null checks,
+//! dispatch and division guards are explicit control flow; GC roots are added
+//! later by `gc_roots`.
+
 use std::collections::HashMap;
 
 use crate::ast::{Binop, Type, Unop};
 use crate::type_checker::{
-    BindingInfo, CastDirection, TypedConstructor, TypedDelegation, TypedExpr, TypedMethodBody,
-    TypedMethodDecl, TypedStmt,
+    CastDirection, TypedConstructor, TypedDelegation, TypedExpr, TypedMethodBody, TypedMethodDecl,
+    TypedStmt,
 };
 
 use super::*;
@@ -11,18 +16,9 @@ use super::*;
 mod program;
 mod runtime;
 
-use crate::layout::Target;
 use crate::symbols;
+pub use program::lower_program;
 use program::Context;
-
-/// Lower semantic IR; a later pass inserts safepoint roots and physical frames.
-pub fn lower_program(
-    program: &crate::type_checker::TypedProgram,
-    classes: &crate::type_checker::ClassTable,
-    target: Target,
-) -> Result<CheckedIr, String> {
-    program::lower_program(program, classes, target)
-}
 
 fn lower_method(
     ctx: &mut Context<'_>,
@@ -118,8 +114,11 @@ fn lower_startup(ctx: &mut Context<'_>) -> Result<FunctionIr, String> {
         }
         builder.store_binding(name, object, 0)?;
     }
+    // A direct call, as in LO-3 §4.6: no class may extend Main, and lo_alloc
+    // aborts rather than return null, so neither dispatch nor a null check is needed.
     let main = builder.allocate("Main", vec![], 0)?;
-    let result = builder.dispatch(main, "Main", "main", vec![], 0)?;
+    let main_method = builder.ctx.symbol(&symbols::method("Main", "main"))?;
+    let result = builder.call(main_method, vec![main], 0);
     builder.runtime("lo_pop_frame", vec![], 0)?;
     builder.finish(Terminator::Return(result));
     builder.complete(&Type::Int, 0)
@@ -242,17 +241,8 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
         self.blocks[block.0].1 = Some(terminator);
     }
 
-    fn binding(
-        &self,
-        name: &str,
-        binding: &BindingInfo,
-        line: u32,
-    ) -> Result<VirtualRegId, String> {
-        if !matches!(binding, BindingInfo::Local(_) | BindingInfo::Formal(_)) {
-            return Err(format!(
-                "IR line {line}: field/prebound lowering is not implemented"
-            ));
-        }
+    /// The register that holds a local or formal for the whole function.
+    fn local(&self, name: &str, line: u32) -> Result<VirtualRegId, String> {
         self.bindings
             .get(name)
             .copied()
@@ -344,7 +334,7 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
             TypedExpr::Num(n, _) => Operand::Int(*n),
             TypedExpr::Bool(b, _) => Operand::Bool(*b),
             TypedExpr::Null(_) => Operand::Null,
-            TypedExpr::This(_, _) => Operand::Value(self.function.params[0]),
+            TypedExpr::This(_, _) => self.receiver(),
             TypedExpr::Var {
                 name,
                 binding,
@@ -395,7 +385,7 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
                 ty,
                 line,
             } => {
-                let string = expr_type(lhs) == Some(&Type::String);
+                let string = lhs.ty() == Some(Type::String);
                 let lhs = self.expression(lhs)?;
                 let rhs = self.expression(rhs)?;
                 if string {
@@ -608,18 +598,5 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
         }
         self.current = Some(join);
         Ok(Operand::Value(dst))
-    }
-}
-
-// Source types select String operations before references erase that distinction.
-fn expr_type(expr: &TypedExpr) -> Option<&Type> {
-    match expr {
-        TypedExpr::Str(..) => Some(&Type::String),
-        TypedExpr::Var { binding, .. } => Some(binding.ty()),
-        TypedExpr::Call(call) => Some(&call.return_type),
-        TypedExpr::Ternary { ty, .. } => ty.as_ref(),
-        TypedExpr::Binop { ty, .. } | TypedExpr::Unop { ty, .. } => Some(ty),
-        TypedExpr::Cast { target, .. } => Some(target),
-        _ => None,
     }
 }

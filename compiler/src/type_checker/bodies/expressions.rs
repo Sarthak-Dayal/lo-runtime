@@ -15,21 +15,7 @@ pub(super) enum ExprType {
 }
 
 pub(super) fn typed_of(e: &TypedExpr) -> ExprType {
-    match e {
-        TypedExpr::Null(_) => ExprType::NullLiteral,
-        TypedExpr::Num(..) => ExprType::Concrete(Type::Int),
-        TypedExpr::Bool(..) => ExprType::Concrete(Type::Bool),
-        TypedExpr::Str(..) => ExprType::Concrete(Type::String),
-        TypedExpr::This(c, _) => ExprType::Concrete(Type::Class(c.clone())),
-        TypedExpr::Var { binding, .. } => ExprType::Concrete(binding.ty().clone()),
-        TypedExpr::New { class, .. } => ExprType::Concrete(Type::Class(class.clone())),
-        TypedExpr::Call(call) => ExprType::Concrete(call.return_type.clone()),
-        TypedExpr::Ternary { ty: Some(t), .. } => ExprType::Concrete(t.clone()),
-        TypedExpr::Ternary { ty: None, .. } => ExprType::NullLiteral,
-        TypedExpr::Binop { ty, .. } | TypedExpr::Unop { ty, .. } => ExprType::Concrete(ty.clone()),
-        TypedExpr::Cast { target, .. } => ExprType::Concrete(target.clone()),
-        TypedExpr::InstanceOf { .. } => ExprType::Concrete(Type::Bool),
-    }
+    e.ty().map_or(ExprType::NullLiteral, ExprType::Concrete)
 }
 
 fn least_common_ancestor(a: &str, b: &str, table: &ClassTable) -> Option<String> {

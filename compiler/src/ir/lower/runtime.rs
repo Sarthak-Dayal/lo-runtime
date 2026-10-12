@@ -66,12 +66,10 @@ impl Builder<'_, '_> {
     ) -> Result<Operand, String> {
         let ty = value_type(binding.ty())?;
         Ok(match binding {
+            // No LO expression assigns, so a local's register cannot change
+            // while the rest of the expression is evaluated; read it in place.
             BindingInfo::Local(_) | BindingInfo::Formal(_) => {
-                // Snapshot the value before evaluating later operands/arguments.
-                let src = Operand::Value(self.binding(name, binding, line)?);
-                let dst = self.value(ty);
-                self.emit(InstructionKind::Copy { dst, src }, line);
-                Operand::Value(dst)
+                Operand::Value(self.local(name, line)?)
             }
             BindingInfo::Field { owner, .. } => {
                 let offset = self.ctx.field_offset(owner, name)?;
@@ -94,7 +92,7 @@ impl Builder<'_, '_> {
     ) -> Result<(), String> {
         match binding {
             BindingInfo::Local(_) | BindingInfo::Formal(_) => {
-                let dst = self.binding(name, binding, line)?;
+                let dst = self.local(name, line)?;
                 self.emit(InstructionKind::Copy { dst, src: value }, line);
             }
             BindingInfo::Field { owner, ty } => {
@@ -215,15 +213,15 @@ impl Builder<'_, '_> {
         Ok(())
     }
 
-    pub(super) fn dispatch(
+    /// Virtual dispatch: `args[0]` is the receiver, whose descriptor's vtable
+    /// holds `method` at the slot the type checker assigned.
+    fn dispatch(
         &mut self,
-        receiver: Operand,
         class: &str,
         method: &str,
-        actuals: Vec<Operand>,
+        args: Vec<Operand>,
         line: u32,
     ) -> Result<Option<Operand>, String> {
-        self.null_guard(receiver, method, line)?;
         let info = self
             .ctx
             .classes
@@ -239,7 +237,7 @@ impl Builder<'_, '_> {
             .ok_or("IR: missing effective method")?;
         let symbol = self.ctx.symbol(&symbols::method(&entry.owner, method))?;
         let signature = self.ctx.signature(symbol);
-        let descriptor = self.load(receiver, 0, IrType::Ptr, line);
+        let descriptor = self.load(args[0], 0, IrType::Ptr, line);
         let table = self.load(
             descriptor,
             self.ctx.target.descriptor().vtable as i32,
@@ -252,11 +250,10 @@ impl Builder<'_, '_> {
             IrType::CodePtr(signature),
             line,
         );
-        let mut args = vec![receiver];
-        args.extend(actuals);
         Ok(self.invoke(CallTarget::Indirect(pointer), signature, args, line))
     }
 
+    /// Receiver, then actuals, then the null check (LO-3 §3.4.3), then the call.
     pub(super) fn method_call(
         &mut self,
         call: &TypedMethodCall,
@@ -270,54 +267,39 @@ impl Builder<'_, '_> {
             } => self.read_binding(name, binding, *line)?,
             TypedObjName::Computed(expr, _) => self.expression(expr)?,
         };
-        let actuals = self.actuals(&call.actuals)?;
-        match &call.resolution {
-            MethodResolution::Virtual { static_class } => self.dispatch(
-                receiver,
-                static_class,
-                &call.method_name,
-                actuals,
-                call.line,
-            ),
-            MethodResolution::Super { declaring_class } => {
-                self.null_guard(receiver, &call.method_name, call.line)?;
-                let symbol = self
-                    .ctx
-                    .symbol(&symbols::method(declaring_class, &call.method_name))?;
-                let mut args = vec![receiver];
-                args.extend(actuals);
-                Ok(self.call(symbol, args, call.line))
-            }
-            MethodResolution::Io { op } => {
-                self.null_guard(receiver, &call.method_name, call.line)?;
-                let class = if matches!(
-                    op,
-                    IoOp::ReadInt | IoOp::ReadBool | IoOp::ReadString | IoOp::Eof
-                ) {
-                    "Input"
-                } else {
-                    "Output"
-                };
-                let symbol = self
-                    .ctx
-                    .symbol(&symbols::method(class, &call.method_name))?;
-                let mut args = vec![receiver];
-                args.extend(actuals);
-                Ok(self.call(symbol, args, call.line))
-            }
+        let mut args = vec![receiver];
+        args.extend(self.actuals(&call.actuals)?);
+        // `this` is never null, and `super.m()` runs on `this` (LO-3 §3.4.3).
+        if !matches!(
+            call.obj_name,
+            TypedObjName::This(..) | TypedObjName::Super(_)
+        ) {
+            self.null_guard(receiver, &call.method_name, call.line)?;
         }
+        let declaring_class = match &call.resolution {
+            MethodResolution::Virtual { static_class } => {
+                return self.dispatch(static_class, &call.method_name, args, call.line);
+            }
+            MethodResolution::Super { declaring_class } => declaring_class.as_str(),
+            MethodResolution::Io { op } if is_input(op) => "Input",
+            MethodResolution::Io { .. } => "Output",
+        };
+        let symbol = self
+            .ctx
+            .symbol(&symbols::method(declaring_class, &call.method_name))?;
+        Ok(self.call(symbol, args, call.line))
     }
 
     pub(super) fn io_wrapper(&mut self, op: &IoOp, line: u32) -> Result<(), String> {
-        let (name, output) = match op {
-            IoOp::ReadInt => ("lo_read_int", false),
-            IoOp::ReadBool => ("lo_read_bool", false),
-            IoOp::ReadString => ("lo_read_string", false),
-            IoOp::Eof => ("lo_eof", false),
-            IoOp::PrintInt => ("lo_print_int", true),
-            IoOp::PrintBool => ("lo_print_bool", true),
-            IoOp::PrintString => ("lo_print_string", true),
-            IoOp::Println => ("lo_println", true),
+        let name = match op {
+            IoOp::ReadInt => "lo_read_int",
+            IoOp::ReadBool => "lo_read_bool",
+            IoOp::ReadString => "lo_read_string",
+            IoOp::Eof => "lo_eof",
+            IoOp::PrintInt => "lo_print_int",
+            IoOp::PrintBool => "lo_print_bool",
+            IoOp::PrintString => "lo_print_string",
+            IoOp::Println => "lo_println",
         };
         let mut args: Vec<_> = self
             .function
@@ -327,7 +309,7 @@ impl Builder<'_, '_> {
             .copied()
             .map(Operand::Value)
             .collect();
-        if output {
+        if !is_input(op) {
             let destination = self.ctx.output_destination()?;
             args.push(self.load(self.receiver(), destination, IrType::Int32, line));
         }
@@ -371,4 +353,11 @@ impl Builder<'_, '_> {
             Ok(result)
         }
     }
+}
+
+fn is_input(op: &IoOp) -> bool {
+    matches!(
+        op,
+        IoOp::ReadInt | IoOp::ReadBool | IoOp::ReadString | IoOp::Eof
+    )
 }
