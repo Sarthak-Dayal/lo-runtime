@@ -5,13 +5,14 @@
 //!
 //! Modes (handled ahead of the P1 contract in `main`):
 //!   --dump-ir  FILE.lo                       readable IR, as the back end sees it
+//!                                            (after GC-root insertion)
 //!   --emit-asm FILE.lo [OUT.s]               Intel-syntax assembly
 //!   --native   FILE.lo OUT [--runtime LIB.a] assemble and link an executable
 //!                                            (LIB.a defaults to $LO_RUNTIME)
 //! Allocation: linear scan by default; `--spill-all` selects the spill-everything
 //! reference (every virtual register in a stack slot), useful for debugging.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::Command;
 
@@ -35,29 +36,18 @@ const USAGE: &str = "usage: lo-compiler (--dump-ir FILE.lo | --emit-asm FILE.lo 
                      --native FILE.lo OUTPUT [--runtime LIB.a]) [--spill-all | --linear-scan]";
 
 /// Lowered, rooted and verified IR: exactly what instruction selection consumes.
-pub fn build_ir(source: &str) -> Result<CheckedIr, String> {
-    let tokens = crate::lexer::tokenize(source)
-        .map_err(|e| format!("lex line {} [{}]: {:?}", e.line, e.kind.as_str(), e.kind))?;
-    let ast = crate::parser::parse_program(&tokens)
-        .map_err(|e| format!("parse line {} [{}]: {}", e.line, e.code.as_str(), e.message))?;
-    let (typed, classes) = crate::type_checker::check_program(ast).map_err(|e| {
-        format!(
-            "type check line {} [{}]: {}",
-            e.line,
-            e.code.as_str(),
-            e.message
-        )
-    })?;
+pub fn build_ir(path: &OsStr) -> Result<CheckedIr, String> {
+    let (typed, classes) = crate::front_end(path)?;
     let ir = lower_program(&typed, &classes, NATIVE)?;
     gc_roots::insert_gc_roots(ir).verify()
 }
 
-pub fn dump_ir(source: &str) -> Result<String, String> {
-    Ok(build_ir(source)?.program().dump())
+pub fn dump_ir(path: &OsStr) -> Result<String, String> {
+    Ok(build_ir(path)?.program().dump())
 }
 
-pub fn compile_to_asm(source: &str, strategy: AllocStrategy) -> Result<String, String> {
-    let ir = build_ir(source)?;
+pub fn compile_to_asm(path: &OsStr, strategy: AllocStrategy) -> Result<String, String> {
+    let ir = build_ir(path)?;
     let allocation = match strategy {
         AllocStrategy::SpillAll => spill_everything_program(&ir),
         AllocStrategy::LinearScan => allocate_registers(&ir, &TargetConstraints::system_v())
@@ -105,18 +95,16 @@ pub fn assemble_and_link(asm: &str, runtime_lib: &Path, output: &Path) -> Result
 }
 
 fn run(command: &mut Command) -> Result<(), String> {
-    let output = command
-        .output()
-        .map_err(|e| format!("{:?}: {e}", command.get_program()))?;
+    let program = command.get_program().to_owned();
+    let output = command.output().map_err(|e| format!("{program:?}: {e}"))?;
     if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "{:?} failed: {}",
-            command.get_program(),
-            String::from_utf8_lossy(&output.stderr)
-        ))
+        return Ok(());
     }
+    Err(format!(
+        "{program:?} failed ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim_end()
+    ))
 }
 
 /// Handles the native modes; `None` means the arguments are not ours.
@@ -155,13 +143,11 @@ fn parse_options(args: &[OsString]) -> Result<Options<'_>, String> {
 fn run_cli(mode: &str, args: &[OsString]) -> Result<String, String> {
     let options = parse_options(args)?;
     let strategy = options.strategy;
-    let source =
-        |path: &OsString| std::fs::read_to_string(path).map_err(|e| format!("read source: {e}"));
     match (mode, options.positional.as_slice()) {
-        ("--dump-ir", [file]) => dump_ir(&source(file)?),
-        ("--emit-asm", [file]) => compile_to_asm(&source(file)?, strategy),
+        ("--dump-ir", [file]) => dump_ir(file),
+        ("--emit-asm", [file]) => compile_to_asm(file, strategy),
         ("--emit-asm", [file, out]) => {
-            let asm = compile_to_asm(&source(file)?, strategy)?;
+            let asm = compile_to_asm(file, strategy)?;
             std::fs::write(out, asm).map_err(|e| format!("write output: {e}"))?;
             Ok(String::new())
         }
@@ -169,7 +155,7 @@ fn run_cli(mode: &str, args: &[OsString]) -> Result<String, String> {
             let runtime = options
                 .runtime
                 .ok_or("--native needs --runtime LIB.a (or $LO_RUNTIME)")?;
-            let asm = compile_to_asm(&source(file)?, strategy)?;
+            let asm = compile_to_asm(file, strategy)?;
             assemble_and_link(&asm, Path::new(&runtime), Path::new(out))?;
             Ok(String::new())
         }
