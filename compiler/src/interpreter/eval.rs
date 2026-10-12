@@ -297,7 +297,10 @@ impl<'p> Interp<'p> {
     fn eval_call(&mut self, call: &TypedMethodCall, frame: &mut Frame) -> Exec<Value> {
         match &call.resolution {
             MethodResolution::Virtual { .. } => {
+                // LO-3 §3.4.3: evaluate the receiver, then the actuals, and only
+                // then abort if the receiver is null.
                 let receiver = self.eval_obj_name(&call.obj_name, frame)?;
+                let args = self.eval_args(&call.actuals, frame)?;
                 let id = match receiver {
                     Value::Obj(Some(id)) => id,
                     Value::Obj(None) => {
@@ -307,7 +310,6 @@ impl<'p> Interp<'p> {
                     }
                     _ => unreachable!("interpreter invariant: virtual receiver is not an object"),
                 };
-                let args = self.eval_args(&call.actuals, frame)?;
                 // Dispatch on the receiver's *runtime* class, then run the
                 // override winner's body.
                 let table = self.table;
@@ -329,6 +331,7 @@ impl<'p> Interp<'p> {
             }
             MethodResolution::Io { op } => {
                 let receiver = self.eval_obj_name(&call.obj_name, frame)?;
+                let args = self.eval_args(&call.actuals, frame)?;
                 // A method dispatch on a null receiver aborts (102) regardless of
                 // whether the method is user-defined or a built-in I/O op — same
                 // check the virtual arm makes. `in`/`out`/`err` are never null, but
@@ -338,7 +341,6 @@ impl<'p> Interp<'p> {
                         method: call.method_name.clone(),
                     }));
                 }
-                let args = self.eval_args(&call.actuals, frame)?;
                 self.run_io(op, receiver, args)
             }
         }
@@ -1262,6 +1264,20 @@ mod tests {
             })
         );
         assert_eq!(out, "");
+    }
+
+    #[test]
+    fn null_receiver_aborts_after_evaluating_the_actuals() {
+        // LO-3 §3.4.3: receiver, then actuals, then the null check.
+        let src = "class A () { int m(int x) { return x; } } class Main () { int arg() { out.print_int(7); return 0; } int main() { A a; return a.m(this.arg()); } }";
+        let (res, out, _err) = run_with_io(src, "");
+        assert_eq!(
+            res,
+            Err(AbortKind::NullReceiver {
+                method: "m".to_string()
+            })
+        );
+        assert_eq!(out, "7");
     }
 
     #[test]
