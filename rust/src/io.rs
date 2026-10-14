@@ -81,11 +81,10 @@ mod sys {
 mod sys {
     #[link(wasm_import_module = "host")]
     extern "C" {
-        pub(super) fn host_print_int(n: i32);
-        pub(super) fn host_print_bool(b: i32);
-        pub(super) fn host_print_bytes(ptr: *const u8, len: i32);
-        pub(super) fn host_println();
-        pub(super) fn host_write_stderr(ptr: *const u8, len: i32);
+        pub(super) fn host_print_int(n: i32, to_stderr: i32);
+        pub(super) fn host_print_bool(b: i32, to_stderr: i32);
+        pub(super) fn host_print_bytes(ptr: *const u8, len: i32, to_stderr: i32);
+        pub(super) fn host_println(to_stderr: i32);
         pub(super) fn host_read_int() -> i32;
         pub(super) fn host_read_bool() -> i32;
         pub(super) fn host_read_line_len() -> i32;
@@ -123,18 +122,14 @@ pub extern "C" fn lo_print_int(n: i32, to_stderr: i32) {
     }
     #[cfg(target_arch = "wasm32")]
     unsafe {
-        if to_stderr == 0 {
-            sys::host_print_int(n);
-        } else {
-            let text = n.to_string();
-            sys::host_write_stderr(text.as_ptr(), text.len() as i32);
-        }
+        sys::host_print_int(n, to_stderr);
     }
 }
 
 /// Print `true` or `false` (no trailing newline).
 #[no_mangle]
 pub extern "C" fn lo_print_bool(b: bool, to_stderr: i32) {
+    #[cfg(not(target_arch = "wasm32"))]
     let text: &[u8] = if b { b"true" } else { b"false" };
     #[cfg(not(target_arch = "wasm32"))]
     if to_stderr == 0 {
@@ -144,11 +139,7 @@ pub extern "C" fn lo_print_bool(b: bool, to_stderr: i32) {
     }
     #[cfg(target_arch = "wasm32")]
     unsafe {
-        if to_stderr == 0 {
-            sys::host_print_bool(b as i32);
-        } else {
-            sys::host_write_stderr(text.as_ptr(), text.len() as i32);
-        }
+        sys::host_print_bool(b as i32, to_stderr);
     }
 }
 
@@ -174,10 +165,8 @@ pub unsafe extern "C" fn lo_print_string(s: *mut Object, to_stderr: i32) {
         sys::write_err(slice);
     }
     #[cfg(target_arch = "wasm32")]
-    if to_stderr == 0 {
-        sys::host_print_bytes(slice.as_ptr(), slice.len() as i32);
-    } else {
-        sys::host_write_stderr(slice.as_ptr(), slice.len() as i32);
+    {
+        sys::host_print_bytes(slice.as_ptr(), slice.len() as i32, to_stderr);
     }
 }
 
@@ -192,11 +181,7 @@ pub extern "C" fn lo_println(to_stderr: i32) {
     }
     #[cfg(target_arch = "wasm32")]
     unsafe {
-        if to_stderr == 0 {
-            sys::host_println();
-        } else {
-            sys::host_write_stderr(b"\n".as_ptr(), 1);
-        }
+        sys::host_println(to_stderr);
     }
 }
 

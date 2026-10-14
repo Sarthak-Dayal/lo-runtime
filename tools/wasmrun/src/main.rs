@@ -196,26 +196,43 @@ fn abort_exit(err: anyhow::Error, emitted: Option<Vec<u8>>) -> i32 {
 
 fn wire_host(linker: &mut Linker<Ctx>) {
     linker
-        .func_wrap("host", "host_print_int", |_c: Caller<'_, Ctx>, n: i32| {
-            print!("{n}");
+        .func_wrap("host", "host_print_int", |_c: Caller<'_, Ctx>, n: i32, to_stderr: i32| {
+            if to_stderr == 0 {
+                print!("{n}");
+            } else {
+                eprint!("{n}");
+            }
         })
         .unwrap();
     linker
-        .func_wrap("host", "host_print_bool", |_c: Caller<'_, Ctx>, b: i32| {
-            print!("{}", if b != 0 { "true" } else { "false" });
+        .func_wrap("host", "host_print_bool", |_c: Caller<'_, Ctx>, b: i32, to_stderr: i32| {
+            let text = if b != 0 { "true" } else { "false" };
+            if to_stderr == 0 {
+                print!("{text}");
+            } else {
+                eprint!("{text}");
+            }
         })
         .unwrap();
     linker
-        .func_wrap("host", "host_print_bytes", |mut c: Caller<'_, Ctx>, ptr: i32, len: i32| {
+        .func_wrap("host", "host_print_bytes", |mut c: Caller<'_, Ctx>, ptr: i32, len: i32, to_stderr: i32| {
             let m = memory(&mut c);
             let mut buf = vec![0u8; len.max(0) as usize];
             m.read(&c, ptr as usize, &mut buf).unwrap_or(());
-            let _ = std::io::stdout().write_all(&buf);
+            if to_stderr == 0 {
+                let _ = std::io::stdout().write_all(&buf);
+            } else {
+                let _ = std::io::stderr().write_all(&buf);
+            }
         })
         .unwrap();
     linker
-        .func_wrap("host", "host_println", |_c: Caller<'_, Ctx>| {
-            println!();
+        .func_wrap("host", "host_println", |_c: Caller<'_, Ctx>, to_stderr: i32| {
+            if to_stderr == 0 {
+                println!();
+            } else {
+                eprintln!();
+            }
         })
         .unwrap();
     // §3.7 stderr-write import: the runtime uses it to emit an abort message
