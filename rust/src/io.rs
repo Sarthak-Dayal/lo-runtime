@@ -14,7 +14,6 @@
 //! identical. (The Zig and C++ skeletons use their native libc / `<cstdio>`
 //! directly, where stdin *is* readily accessible.)
 
-use crate::exit_codes::{EXIT_EOF_BEFORE_INT, EXIT_INVALID_BOOL, EXIT_MALFORMED_INT};
 use crate::object::{string_data_offset, Object, StringObject};
 
 // ---------------------------------------------------------------------------
@@ -32,10 +31,25 @@ mod sys {
         let _ = out.flush();
     }
 
+    /// Write all bytes to stderr and flush — the `to_stderr == 1` half of the
+    /// print family's destination selector (`runtime-abi.md` §3.7). Same
+    /// immediate-flush discipline as [`write_out`]: a program interleaving
+    /// `out` and `err` writes must land each byte on its stream in issue order.
     pub(super) fn write_err(bytes: &[u8]) {
         let mut err = io::stderr();
         let _ = err.write_all(bytes);
         let _ = err.flush();
+    }
+
+    /// Route `bytes` to the stream the print family's selector names: `0`
+    /// stdout, `1` stderr. Other values are reserved (`runtime-abi.md` §3.7);
+    /// codegen never emits them, and they fall back to stdout here.
+    pub(super) fn write_sel(bytes: &[u8], to_stderr: i32) {
+        if to_stderr == 1 {
+            write_err(bytes);
+        } else {
+            write_out(bytes);
+        }
     }
 
     /// Peek the next input byte without consuming it.
@@ -81,11 +95,10 @@ mod sys {
 mod sys {
     #[link(wasm_import_module = "host")]
     extern "C" {
-        pub(super) fn host_print_int(n: i32);
-        pub(super) fn host_print_bool(b: i32);
-        pub(super) fn host_print_bytes(ptr: *const u8, len: i32);
-        pub(super) fn host_println();
-        pub(super) fn host_write_stderr(ptr: *const u8, len: i32);
+        pub(super) fn host_print_int(n: i32, to_stderr: i32);
+        pub(super) fn host_print_bool(b: i32, to_stderr: i32);
+        pub(super) fn host_print_bytes(ptr: *const u8, len: i32, to_stderr: i32);
+        pub(super) fn host_println(to_stderr: i32);
         pub(super) fn host_read_int() -> i32;
         pub(super) fn host_read_bool() -> i32;
         pub(super) fn host_read_line_len() -> i32;
@@ -112,48 +125,33 @@ fn skip_whitespace() {
 // Print set.
 // ---------------------------------------------------------------------------
 
-/// Print an `i32` in decimal (no trailing newline).
+/// Print an `i32` in decimal (no trailing newline) to the stream `to_stderr`
+/// selects: `0` stdout, `1` stderr (`runtime-abi.md` §3.7).
 #[no_mangle]
 pub extern "C" fn lo_print_int(n: i32, to_stderr: i32) {
     #[cfg(not(target_arch = "wasm32"))]
-    if to_stderr == 0 {
-        sys::write_out(n.to_string().as_bytes());
-    } else {
-        sys::write_err(n.to_string().as_bytes());
-    }
+    sys::write_sel(n.to_string().as_bytes(), to_stderr);
     #[cfg(target_arch = "wasm32")]
     unsafe {
-        if to_stderr == 0 {
-            sys::host_print_int(n);
-        } else {
-            let text = n.to_string();
-            sys::host_write_stderr(text.as_ptr(), text.len() as i32);
-        }
+        sys::host_print_int(n, to_stderr);
     }
 }
 
-/// Print `true` or `false` (no trailing newline).
+/// Print `true` or `false` (no trailing newline) to the stream `to_stderr`
+/// selects: `0` stdout, `1` stderr (`runtime-abi.md` §3.7).
 #[no_mangle]
 pub extern "C" fn lo_print_bool(b: bool, to_stderr: i32) {
-    let text: &[u8] = if b { b"true" } else { b"false" };
     #[cfg(not(target_arch = "wasm32"))]
-    if to_stderr == 0 {
-        sys::write_out(text);
-    } else {
-        sys::write_err(text);
-    }
+    sys::write_sel(if b { b"true" } else { b"false" }, to_stderr);
     #[cfg(target_arch = "wasm32")]
     unsafe {
-        if to_stderr == 0 {
-            sys::host_print_bool(b as i32);
-        } else {
-            sys::host_write_stderr(text.as_ptr(), text.len() as i32);
-        }
+        sys::host_print_bool(b as i32, to_stderr);
     }
 }
 
-/// Print a `StringObject`'s UTF-8 bytes (no trailing newline). A null argument
-/// prints nothing.
+/// Print a `StringObject`'s UTF-8 bytes (no trailing newline) to the stream
+/// `to_stderr` selects: `0` stdout, `1` stderr (`runtime-abi.md` §3.7). A null
+/// argument prints nothing.
 ///
 /// # Safety
 /// `s`, if non-null, must point at a valid `StringObject` whose inline data holds
@@ -168,35 +166,21 @@ pub unsafe extern "C" fn lo_print_string(s: *mut Object, to_stderr: i32) {
     let data = (s as *const u8).add(string_data_offset());
     let slice = core::slice::from_raw_parts(data, len);
     #[cfg(not(target_arch = "wasm32"))]
-    if to_stderr == 0 {
-        sys::write_out(slice);
-    } else {
-        sys::write_err(slice);
-    }
+    sys::write_sel(slice, to_stderr);
     #[cfg(target_arch = "wasm32")]
-    if to_stderr == 0 {
-        sys::host_print_bytes(slice.as_ptr(), slice.len() as i32);
-    } else {
-        sys::host_write_stderr(slice.as_ptr(), slice.len() as i32);
-    }
+    sys::host_print_bytes(slice.as_ptr(), slice.len() as i32, to_stderr);
 }
 
-/// Print a single newline.
+/// Print a single newline to the stream `to_stderr` selects: `0` stdout, `1`
+/// stderr (`runtime-abi.md` §3.7). The selector is this entry point's only
+/// argument — it is otherwise nullary.
 #[no_mangle]
 pub extern "C" fn lo_println(to_stderr: i32) {
     #[cfg(not(target_arch = "wasm32"))]
-    if to_stderr == 0 {
-        sys::write_out(b"\n");
-    } else {
-        sys::write_err(b"\n");
-    }
+    sys::write_sel(b"\n", to_stderr);
     #[cfg(target_arch = "wasm32")]
     unsafe {
-        if to_stderr == 0 {
-            sys::host_println();
-        } else {
-            sys::host_write_stderr(b"\n".as_ptr(), 1);
-        }
+        sys::host_println(to_stderr);
     }
 }
 
@@ -216,7 +200,7 @@ pub extern "C" fn lo_read_int() -> i32 {
         // present means input exists; failure to parse it is a malformed token
         // (exit 110), not EOF.
         if sys::peek_byte().is_none() {
-            crate::abort::runtime_abort("lo_read_int: end of input", EXIT_EOF_BEFORE_INT);
+            crate::abort::runtime_abort("lo_read_int: end of input", 111);
         }
         let mut token = String::new();
         if let Some(b) = sys::peek_byte() {
@@ -236,11 +220,11 @@ pub extern "C" fn lo_read_int() -> i32 {
             }
         }
         if !saw_digit {
-            crate::abort::runtime_abort("lo_read_int: malformed token", EXIT_MALFORMED_INT);
+            crate::abort::runtime_abort("lo_read_int: malformed token", 110);
         }
         match token.parse::<i32>() {
             Ok(n) => n,
-            Err(_) => crate::abort::runtime_abort("lo_read_int: malformed token", EXIT_MALFORMED_INT),
+            Err(_) => crate::abort::runtime_abort("lo_read_int: malformed token", 110),
         }
     }
     #[cfg(target_arch = "wasm32")]
@@ -267,7 +251,7 @@ pub extern "C" fn lo_read_bool() -> bool {
         match token.as_str() {
             "true" => true,
             "false" => false,
-            _ => crate::abort::runtime_abort("lo_read_bool: invalid token", EXIT_INVALID_BOOL),
+            _ => crate::abort::runtime_abort("lo_read_bool: invalid token", 112),
         }
     }
     #[cfg(target_arch = "wasm32")]
