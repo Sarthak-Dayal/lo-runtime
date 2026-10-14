@@ -65,9 +65,31 @@ enum StmtArity {
     OneOrMore,
 }
 
-// P1: Program -> (ClassDecl)*
+// LO-2 P2: Program -> (MethodDecl)*; LO-3/4 P1: Program -> (ClassDecl)*
 pub fn parse_program(tokens: &[Token]) -> Result<Program, ParseError> {
-    let mut parser = Parser { tokens, pos: 0 };
+    let procedural = matches!(tokens.first().map(|t| &t.kind),
+        Some(TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString | TokenKind::KwVoid));
+    let mut parser = Parser { tokens, pos: 0, procedural };
+    if procedural {
+        for token in tokens {
+            if matches!(token.kind, TokenKind::KwClass | TokenKind::KwExtends
+                | TokenKind::KwThis | TokenKind::KwSuper | TokenKind::KwNull
+                | TokenKind::KwNew | TokenKind::KwInstanceof | TokenKind::Dot) {
+                return Err(new_parse_error(ErrorCode::EParsePhaseOther, token.line,
+                    "object syntax is not allowed in LO-2"));
+            }
+        }
+        let line = parser.peek1().line;
+        let mut methods = Vec::new();
+        while !parser.check(&TokenKind::Eof) {
+            methods.push(parser.parse_method_decl()?);
+        }
+        // Reuse method checking and execution for LO-2's global functions.
+        return Ok(Program { classes: vec![ClassDecl {
+            class_name: "Main".into(), extends: None, fields: Vec::new(),
+            constructors: Vec::new(), methods, line,
+        }] });
+    }
     let mut classes = Vec::new();
     while !parser.check(&TokenKind::Eof) {
         classes.push(parser.parse_class_decl()?);
@@ -78,6 +100,7 @@ pub fn parse_program(tokens: &[Token]) -> Result<Program, ParseError> {
 struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
+    procedural: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -503,7 +526,18 @@ impl<'a> Parser<'a> {
             TokenKind::KwNew => self.parse_new_expr(),
             TokenKind::Ident(_) => {
                 let identifier = self.parse_var()?; // P50: Var -> Identifier
-                if self.check(&TokenKind::Dot) {
+                if self.procedural && self.check(&TokenKind::LParen) {
+                    self.advance();
+                    let actuals = if self.check(&TokenKind::RParen) {
+                        Vec::new()
+                    } else {
+                        self.parse_actuals()?
+                    };
+                    self.expect(TokenKind::RParen, ErrorCode::EParsePhaseOther)?;
+                    Ok(Expr::Call(MethodCall {
+                        obj_name: ObjName::This(line), method_name: identifier, actuals, line,
+                    }))
+                } else if self.check(&TokenKind::Dot) {
                     // P23: Expr -> ObjName . MethodName ( (Actuals)? ), via P46: ObjName -> Var
                     let obj_name = ObjName::Var(identifier, line);
                     Ok(Expr::Call(self.parse_method_call_suffix(obj_name, line)?))
@@ -578,6 +612,10 @@ impl<'a> Parser<'a> {
         }
 
         if let Some(ty) = self.peek_primitive_type() {
+            if self.procedural {
+                return Err(new_parse_error(ErrorCode::EParsePhaseOther, line,
+                    "casts are not allowed in LO-2"));
+            }
             // P29: Expr -> ( ( Type ) Expr ), Type -> int | bool | String | void
             self.advance(); // second "("
             self.advance(); // primitive-type keyword
@@ -712,6 +750,11 @@ impl<'a> Parser<'a> {
 
     // P35-P39: Type -> ...
     fn parse_type(&mut self) -> Result<Type, ParseError> {
+        if self.procedural && !matches!(self.peek1().kind,
+            TokenKind::KwInt | TokenKind::KwBool | TokenKind::KwString) {
+            return Err(new_parse_error(ErrorCode::EParsePhaseOther, self.peek1().line,
+                "LO-2 types must be int, bool, or String"));
+        }
         if let Some(ty) = self.try_parse_primitive_type() {
             return Ok(ty);
         }
@@ -944,7 +987,7 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 impl<'a> Parser<'a> {
     fn for_test(tokens: &'a [Token]) -> Self {
-        Parser { tokens, pos: 0 }
+        Parser { tokens, pos: 0, procedural: false }
     }
 }
 
@@ -1538,4 +1581,42 @@ mod tests {
             Expr::InstanceOf(Box::new(Expr::Var("a".into(), 1)), "Cat".into(), 1)
         );
     }
+    #[test]
+    fn procedural_functions_support_forward_calls_and_recursion() {
+        let p = program("int main() { return fact(5); }
+            int fact(int n) {
+                if ((n = 0)) { return 1; }
+                else { return (n * fact((n - 1))); }
+            }");
+        assert_eq!(p.classes[0].class_name, "Main");
+        assert_eq!(p.classes[0].methods.len(), 2);
+        assert!(crate::type_checker::check_program(p).is_ok());
+    }
+
+    #[test]
+    fn procedural_calls_still_require_valid_signatures() {
+        for source in [
+            "int main() { return missing(); }",
+            "int main() { return f(true); } int f(int n) { return n; }",
+            "int main() { return f(); } int f(int n) { return n; }",
+            "bool main() { return true; }",
+            "int main() { return 1; } int main() { return 2; }",
+        ] {
+            assert!(crate::type_checker::check_program(program(source)).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn procedural_and_object_syntax_do_not_mix() {
+        for source in [
+            "void main() { return 1; }",
+            "int main() { return this; }",
+            "int main() { f(); return 0; }",
+            "int main() { return 0; } class Other () { }",
+            "class Main () { int main() { return f(); } int f() { return 1; } }",
+        ] {
+            assert!(parse_program(&toks(source)).is_err(), "{source}");
+        }
+    }
+
 }
