@@ -289,6 +289,8 @@ fn accepts_initialized_loop() {
         then_block: BlockId(1),
         else_block: BlockId(3),
     };
+    liveness::remove_dead_copies(&mut p.functions[0]);
+    assert_eq!(p.functions[0].blocks[0].instructions.len(), 1);
     p.validate().unwrap();
 }
 
@@ -997,4 +999,37 @@ fn root_stores_read_initialized_values() {
         },
     );
     p.validate().unwrap();
+}
+
+#[test]
+fn dead_defaults_are_removed_but_defaults_read_on_a_branch_survive() {
+    let mut program = example();
+    let function = &mut program.functions[0];
+    function.blocks[0].instructions.push(copy(0));
+    liveness::remove_dead_copies(function);
+    assert!(function.blocks[0].instructions.is_empty());
+    assert_eq!(function.blocks[1].instructions.len(), 1);
+    assert_eq!(function.blocks[2].instructions.len(), 1);
+    function.blocks[0].instructions.push(copy(0));
+    function.blocks[2].instructions.clear();
+    liveness::remove_dead_copies(function);
+    assert_eq!(function.blocks[0].instructions.len(), 1);
+    program.validate().unwrap();
+}
+
+#[test]
+fn dead_copy_removal_preserves_calls_with_unused_results() {
+    let mut program = example();
+    let function = &mut program.functions[0];
+    function.blocks[0].instructions.push(Instruction {
+        kind: InstructionKind::Call {
+            dst: Some(VirtualRegId(0)),
+            target: CallTarget::Direct(SymbolId(0)),
+            args: vec![],
+        },
+        line: 1,
+    });
+    liveness::remove_dead_copies(function);
+    assert!(matches!(function.blocks[0].instructions[0].kind,
+        InstructionKind::Call { .. }));
 }

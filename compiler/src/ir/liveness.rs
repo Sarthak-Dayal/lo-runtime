@@ -113,3 +113,35 @@ fn def_set(block: &BasicBlock) -> HashSet<VirtualRegId> {
         .filter_map(|instruction| instruction.kind.destination())
         .collect()
 }
+
+/// Drop unread copies so dead local defaults do not extend live intervals.
+pub(crate) fn remove_dead_copies(function: &mut FunctionIr) {
+    loop {
+        let liveness = compute_function_liveness(function);
+        let mut changed = false;
+        for (index, block) in function.blocks.iter_mut().enumerate() {
+            let mut live = liveness.live_out[index].clone();
+            live.extend(block.terminator.used_registers());
+            let mut kept = Vec::with_capacity(block.instructions.len());
+            for instruction in block.instructions.drain(..).rev() {
+                let destination = instruction.kind.destination();
+                if matches!(instruction.kind, InstructionKind::Copy { .. })
+                    && destination.is_some_and(|dst| !live.contains(&dst))
+                {
+                    changed = true;
+                    continue;
+                }
+                if let Some(dst) = destination {
+                    live.remove(&dst);
+                }
+                live.extend(instruction.kind.used_registers());
+                kept.push(instruction);
+            }
+            kept.reverse();
+            block.instructions = kept;
+        }
+        if !changed {
+            break;
+        }
+    }
+}

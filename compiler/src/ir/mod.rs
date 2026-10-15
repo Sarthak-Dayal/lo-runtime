@@ -2,6 +2,7 @@ mod declare;
 mod dump;
 pub mod gc_roots;
 mod liveness;
+pub(crate) use liveness::remove_dead_copies;
 pub mod lower;
 pub mod register_allocator;
 pub mod runtime;

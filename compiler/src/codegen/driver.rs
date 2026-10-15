@@ -40,7 +40,11 @@ const USAGE: &str = "usage: lo-compiler (--dump-ir FILE.lo | --emit-asm FILE.lo 
 pub fn build_ir(path: &OsStr) -> Result<CheckedIr, String> {
     let (typed, classes) = crate::front_end(path)?;
     let ir = lower_program(&typed, &classes, NATIVE)?;
-    gc_roots::insert_gc_roots(ir).verify()
+    let mut ir = gc_roots::insert_gc_roots(ir);
+    for function in &mut ir.functions {
+        crate::ir::remove_dead_copies(function);
+    }
+    ir.verify()
 }
 
 pub fn dump_ir(path: &OsStr) -> Result<String, String> {
