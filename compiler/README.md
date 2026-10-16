@@ -1,57 +1,91 @@
 # LO compiler
 
-The compiler lowers the LO-3/LO-4 typed AST to LLVM WASM assembly, assembles it
-with `llvm-mc`, and links it with the Rust runtime using `wasm-ld`. It constructs
-Main and the I/O preamble, emits methods and constructors, and publishes GC roots
-around calls. See the [production index](../planning/wasm-production-index.md)
-for the functions implementing each grammar rule.
+**Team:** Group 6 — Neha Reddy, Sarthak Dayal, Jay Shim, Rahik Sikder
+**Toolchain language:** Rust
 
-This WIP is stacked on [type-checker PR #5](https://github.com/Sarthak-Dayal/lo-runtime/pull/5).
-The [test report](../planning/wasm-test-results.md) records **97/102 course cases
-passing** with the complete local test runtime (**98/102** after accounting for
-one stale test that still treats the newly reserved `lo_` prefix as valid). It
-identifies the four remaining parser diagnostic mismatches.
+One binary, `lo-compiler`, with four back ends over a shared front end (lexer,
+parser, type checker, I/O-preamble injection):
 
-From the repository root, with Rust/cargo, the `wasm32-unknown-unknown` target,
-`llvm-mc`, `wasm-ld`, and the course `wasmrun` on PATH:
+| Mode | Back end | Output |
+|---|---|---|
+| `--check` | front end only | nothing; exit 0 or 1 |
+| `--run` | tree-walking interpreter | program's stdout; exit status is `main`'s return value or the abort code |
+| `--emit-wasm` / `--compile` | P1 WASM emitter | LLVM WASM assembly / linked `.wasm` |
+| `--dump-ir` / `--emit-asm` / `--native` | P2 native pipeline | verified IR / x86-64 assembly / linked executable |
 
-```sh
-source p1-grading-contract.sh
-lo-build
-lo-check ../lo-testing/LO-3/ValidPrograms/test_15.lo
-lo-compile ../lo-testing/LO-3/ValidPrograms/test_15.lo /tmp/test_15.wasm
-lo-wasmrun /tmp/test_15.wasm
-```
+The native pipeline lowers the typed AST to a TAC-style IR (with explicit GC roots in
+shadow-stack frame slots), verifies it, selects x86-64 instructions, allocates
+registers (linear scan by default, spill-everything as a fallback), and emits
+GNU assembler text. See [`../design_doc/p2-design.pdf`](../design_doc/p2-design.pdf)
+for the design note and [`../planning/wasm-production-index.md`](../planning/wasm-production-index.md)
+for the P1 WASM emitter.
 
-The last command exits with 10. The grading functions preserve rejection status 1
-and program exit codes. `lo-check` runs only the frontend and writes no files.
-`lo-compile` writes the module to its second argument; on failure it reports the
-stage and retains intermediate artifacts. `LLVM_MC`, `WASM_LD`, and
-`LO_RUNTIME_ARCHIVE` can override tool/archive paths. The compiler itself exposes:
+## Building
+
+From the repository root, inside the course container (x86-64 Linux; on ARM Macs
+that is the Rosetta-accelerated amd64 image). Required: Rust/cargo with the
+`wasm32-unknown-unknown` target, `as` and `gcc` (native linking), `llvm-mc`,
+`wasm-ld`, and the course `wasmrun` (WASM mode only).
 
 ```sh
-compiler/target/release/lo-compiler --check program.lo
-compiler/target/release/lo-compiler --emit-wasm program.lo > program.s
-compiler/target/release/lo-compiler --compile program.lo program.wasm
+source p2-grading-contract.sh
+lo-build        # builds compiler/ and the Rust runtime (native .a and wasm32 .a)
 ```
 
-`check_program` owns preamble injection and supplies both `TypedProgram` and
-`ClassTable`. The emitter uses the table's field order, resolved method owners,
-and stable vtable slots. Source bodies are visited once; buffering their output
-lets scratch-local declarations and frame sizes precede the instructions.
+`lo-build` leaves the compiler at `compiler/target/release/lo-compiler` and the
+native runtime at `rust/target/release/liblo_runtime.a`.
 
-Run the external LO-3/LO-4 corpus, including `contributed-tests`, from a checkout
-next to this repository:
+## Running
+
+### Native (Project 2)
 
 ```sh
-python3 scripts/test-conformance.py --suite ../lo-testing/
+lo-emit-asm prog.lo                       # assembly on stdout
+lo-dump-ir  prog.lo                       # verified IR for every function on stdout
 ```
 
-The runner checks frontend acceptance,
-assembly, linking, and execution through the unchanged course host. It matches expected process status,
-stdout bytes, and abort-message substrings. Each run keeps `report.json` and
-per-stage artifacts under its artifact directory. Failure-layer labels are
-initial localization hints; inspect the saved diagnostics before assigning a fix.
-LO-2's procedural grammar is outside this emitter's scope and is not counted.
+or, directly:
 
-The 89 Rust tests cover the lexer, parser, and preamble.
+```sh
+lo-compiler --dump-ir  FILE.lo
+lo-compiler --emit-asm FILE.lo [OUT.s]    # stdout if OUT.s is omitted
+lo-compiler --native   FILE.lo OUTPUT [--runtime LIB.a]
+./OUTPUT                                  # stdin/stdout/exit status are the program's
+```
+
+- `--native` assembles with `as` and links statically with `gcc` against the
+  runtime archive given by `--runtime` or `$LO_RUNTIME` (the `lo-*` shell
+  functions default `LO_RUNTIME` to `rust/target/release/liblo_runtime.a`).
+- `--spill-all` or `--linear-scan` (default) may be appended to any native mode
+  to choose the register allocator. Spill-all is kept as a differential-testing
+  oracle for the allocator.
+
+### WASM and interpreter (Project 1, still supported)
+
+```sh
+lo-check   prog.lo                        # exit 0 silently, or 1 with a diagnostic
+lo-compile prog.lo /tmp/prog.wasm
+lo-wasmrun /tmp/prog.wasm                 # stdin and exit status pass through
+lo-compiler --run prog.lo                 # interpreter
+```
+
+`lo-compiler --emit-wasm prog.lo` prints the LLVM WASM assembly. `LLVM_MC`,
+`WASM_LD`, and `LO_RUNTIME_ARCHIVE` override tool and archive paths for WASM mode.
+
+## Testing
+
+```sh
+cargo test --release --manifest-path compiler/Cargo.toml   # 183 unit tests
+python3 scripts/test-conformance.py --suite ../lo-testing/ # WASM conformance
+```
+
+The conformance runner checks frontend acceptance, assembly, linking, and
+execution through the course host, matching expected exit status, stdout bytes,
+and abort-message substrings. Each run keeps `report.json` and per-stage
+artifacts. LO-2's procedural grammar is outside this compiler's scope and is
+not counted.
+
+## Known failures
+
+**Interpreter (`--run`) only:** very deep recursion (between 5,000 and 20,000
+frames) overflows the interpreter's own stack. Native and WASM are unaffected.
