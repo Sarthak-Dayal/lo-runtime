@@ -85,25 +85,7 @@ and abort-message substrings. Each run keeps `report.json` and per-stage
 artifacts. LO-2's procedural grammar is outside this compiler's scope and is
 not counted.
 
-Differential check (interpreter vs. WASM vs. native on the same program):
-TODO(team): name the script/command used, if one is checked in.
-
 ## Known failures
 
-The numbers below are what each report last measured; re-run before submitting.
-
-**WASM back end** (from [`../planning/wasm-test-results.md`](../planning/wasm-test-results.md)):
-97/102 course cases pass as the suite was written, 98/102 once the stale test
-below is accounted for.
-
-- `LO-3/ValidPrograms/contributed-tests-19.lo`: declares a method named
-  `lo_alloc` and expects acceptance, but the instructor has since reserved the
-  `lo_` prefix, so the compiler correctly rejects it with
-  `E_RESERVED_VARIABLE_NAME`. The test is stale, not the compiler.
-- Four `InvalidPrograms` cases (including `test_0` and `test_13`) are rejected
-  at compile time but with a different parser diagnostic code than the header
-  requests; `test_0` and `test_13` swap `E_RESERVED_KEYWORD_AS_IDENTIFIER` and
-  `E_PARSE_PHASE_OTHER`. The report lists all four.
-- Against the committed Rust runtime with its assignment stubs left in place,
-  13 further runtime-dependent cases fail. The grading environment links the
-  instructor's complete runtime.
+**Interpreter (`--run`) only:** very deep recursion (between 5,000 and 20,000
+frames) overflows the interpreter's own stack. Native and WASM are unaffected.
