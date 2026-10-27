@@ -1,196 +1,169 @@
-//! GC operations (`runtime-abi.md` §3.4) — the WS-2 reference **Cheney
-//! two-space copying collector**.
-//!
-//! `lo_gc_write_barrier` is **provided** as a bare store — the correct
-//! non-generational barrier (Cheney's semispace, mark-compact) out of the box,
-//! and left untouched here (runbook WS-2 §2.6). `lo_gc_collect` performs a flip,
-//! a root scan, and a Cheney scan over the to-space (runbook WS-2 §2.4); the
-//! allocator's OOM path (`crate::alloc`) drives it.
-//!
-//! ## Forwarding-flag bit (decision (C))
-//!
-//! Bit 0 of `gc_bits` (`GC_FORWARDED_BIT == 0b1`) is the **forwarding flag**: set
-//! on a from-space object once it has been evacuated, at which point its
-//! `class_descriptor` slot holds the new to-space address instead of a descriptor
-//! pointer (the tombstone). The bit is collector-private — no two menu collectors
-//! run on one heap — so it needs no ABI pin. All three skeletons (Rust / Zig /
-//! C++) use this same bit so cross-skeleton header encoding stays byte-identical.
+//! Lisp-2 mark-compact: mark, compute destinations, fix references, then slide.
+//! Descriptors stay intact; forwarding addresses live in preallocated side data.
+use crate::compaction::{Relocation, Scratch};
+use crate::object::{shadow_frame_roots_offset, Object};
 
-use crate::descriptors::LO_STRING_CLASS;
-use crate::object::{
-    shadow_frame_roots_offset, ClassDescriptor, Object, StringObject,
-};
+const MARKED: u32 = 1;
+static mut IN_COLLECTION: bool = false;
+static mut POISON: bool = false;
 
-/// Forwarding-flag bit in `gc_bits` (decision (C)). See module docs.
-pub(crate) const GC_FORWARDED_BIT: u32 = 0b1;
+/// Read debug configuration before collection, when host allocation is allowed.
+pub(crate) fn init() {
+    let poison = std::env::var("LO_GC_POISON")
+        .map(|s| !s.is_empty() && s != "0")
+        .unwrap_or(false);
+    unsafe {
+        IN_COLLECTION = false;
+        POISON = poison;
+    }
+}
 
-/// Pointer-store write barrier. Non-generational implementation: a bare store of
-/// `value` into the pointer field at `obj + field_offset` (`runtime-abi.md` §3.4).
-/// Codegen emits a call to this at *every* pointer store, which makes the choice
-/// of collector a runtime-only decision. Correct as-is for Cheney; left untouched
-/// (runbook WS-2 §2.6).
+/// Non-generational barrier: the helper performs the store itself.
 ///
 /// # Safety
-/// `obj` must point at a valid object with a pointer-typed field at
-/// `field_offset`; `value` must be a valid object pointer or null.
+/// Object and reference field must be valid; value is an object or null.
 #[no_mangle]
 pub unsafe extern "C" fn lo_gc_write_barrier(
     obj: *mut Object,
     field_offset: u32,
     value: *mut Object,
 ) {
-    let slot = (obj as *mut u8).add(field_offset as usize) as *mut *mut Object;
-    *slot = value;
+    *((obj as *mut u8).add(field_offset as usize) as *mut *mut Object) = value;
 }
 
-/// Force a collection (`runtime-abi.md` §3.4): a Cheney flip-and-scan cycle.
-/// Reachable objects are copied to the inactive semispace with their interior
-/// pointers and the shadow-stack roots rewritten to the new addresses;
-/// unreachable objects are reclaimed when the old space is abandoned.
+/// Force collection. The runtime is single-threaded; no allocation occurs here.
 #[no_mangle]
 pub extern "C" fn lo_gc_collect() {
-    // SAFETY: single-threaded runtime; the heap is initialized (a collect before
-    // `heap_init` walks an empty root set and flips empty semispaces — a no-op).
-    unsafe { collect() }
-}
-
-/// True byte size of a heap object — the count `forward` copies and the stride
-/// `scan` advances by (runbook WS-2 §2.2). Strings are variable-size: their inline
-/// UTF-8 tail starts at `offset_of(StringObject, data)` (= 20 on 64-bit), **not**
-/// `size_of` — the offset-of-not-size-of rule (`runtime-abi.md` §2.2).
-///
-/// # Safety
-/// `p` must point at a valid object whose `class_descriptor` is intact (a live
-/// from-space object before its tombstone is installed, or a to-space copy).
-unsafe fn object_size(p: *mut Object) -> usize {
-    let class = (*p).class_descriptor;
-    if core::ptr::eq(class, &LO_STRING_CLASS) {
-        let so = p as *const StringObject;
-        crate::heap_layout::string_size((*so).length as usize).unwrap_or_else(|| crate::heap_layout::oom())
-    } else {
-        crate::heap_layout::aligned_size((*class).instance_size as usize).unwrap_or_else(|| crate::heap_layout::oom())
+    unsafe {
+        assert!(!IN_COLLECTION, "recursive garbage collection");
+        let (base, end, limit) = crate::alloc::heap_bounds();
+        if base.is_null() {
+            return;
+        }
+        IN_COLLECTION = true;
+        let scratch = crate::compaction::scratch();
+        scratch.clear();
+        mark(base, end, scratch);
+        let live_bytes = compute_forwarding(base, end, scratch);
+        fix_references(base, end, scratch);
+        slide(base, scratch);
+        let new_end = base.add(live_bytes);
+        crate::alloc::set_free(new_end);
+        if POISON {
+            core::ptr::write_bytes(new_end, 0xEF, limit as usize - new_end as usize);
+        }
+        scratch.clear();
+        IN_COLLECTION = false;
     }
 }
 
-/// Evacuate `p` from the from-space `[from_base, from_limit)` into the to-space,
-/// bumping `free` (runbook WS-2 §2.3). Returns `p`'s new address. Null and
-/// non-from-space (immortal / `.rodata`, e.g. `LO_EMPTY_STRING`) pointers are
-/// returned untouched — the range-check is what keeps immortal objects safe with
-/// no special case. An already-evacuated object (forwarding bit set) returns the
-/// new address stored in its clobbered `class_descriptor` slot.
-///
-/// Order matters: the size is read and the bytes copied **before** the original's
-/// `class_descriptor` is overwritten, because both reads need the intact
-/// descriptor. The copy carries the intact descriptor into to-space with the
-/// forwarding flag still clear; only the original becomes a tombstone.
-///
-/// # Safety
-/// `p` is null or a valid object pointer. `free` points at enough room in to-space
-/// for the largest live object. Single-threaded.
-unsafe fn forward(
-    p: *mut Object,
-    from_base: *mut u8,
-    from_limit: *mut u8,
-    free: &mut *mut u8,
-) -> *mut Object {
-    if p.is_null() {
-        return p;
-    }
-    let addr = p as *mut u8;
-    if addr < from_base || addr >= from_limit {
-        return p; // immortal / non-heap: leave untouched
-    }
-    if (*p).gc_bits & GC_FORWARDED_BIT != 0 {
-        // Already moved; the class_descriptor slot holds the new address.
-        return (*p).class_descriptor as *mut Object;
-    }
-    let n = object_size(p);
-    let dst = *free;
-    core::ptr::copy_nonoverlapping(addr, dst, n);
-    // Install the tombstone in the *original* — after the copy, so the to-space
-    // copy keeps the intact descriptor and a clear forwarding flag.
-    (*p).class_descriptor = dst as *const ClassDescriptor;
-    (*p).gc_bits |= GC_FORWARDED_BIT;
-    *free = dst.add(n);
-    dst as *mut Object
+// The ABI supplies object-start references, never interior pointers.
+// Null and immortal objects outside the allocated heap are left unchanged.
+fn managed(object: *mut Object, base: *mut u8, end: *mut u8) -> bool {
+    !object.is_null() && object as usize >= base as usize && (object as usize) < end as usize
 }
 
-/// One Cheney collection cycle (runbook WS-2 §2.4).
-///
-/// # Safety
-/// Single-threaded; the allocator statics describe a valid two-semispace heap (or
-/// a null/uninitialized heap, in which case both spaces are empty and this is a
-/// no-op).
-unsafe fn collect() {
-    let (from_base, from_limit) = crate::alloc::from_space();
-    let to_base = crate::alloc::to_space_base();
-    let mut free = to_base;
-    let mut scan = to_base;
-
-    // 1–2. Scan the root set: every slot of every shadow-stack frame, walking
-    // `current_frame` -> `parent` to null (ABI §3.3). The shadow stack is the
-    // complete root set.
+unsafe fn roots(mut visit: impl FnMut(*mut *mut Object)) {
     let mut frame = crate::shadow_stack::current_frame();
     while !frame.is_null() {
-        let num = (*frame).num_roots as usize;
-        let roots_base = (frame as *mut u8).add(shadow_frame_roots_offset());
-        for i in 0..num {
-            let slot = roots_base.add(i * core::mem::size_of::<*mut Object>()) as *mut *mut Object;
-            *slot = forward(*slot, from_base, from_limit, &mut free);
+        let slots = (frame as *mut u8).add(shadow_frame_roots_offset()) as *mut *mut Object;
+        for i in 0..(*frame).num_roots as usize {
+            visit(slots.add(i));
         }
         frame = (*frame).parent;
     }
+}
 
-    // 3. Cheney loop: scan copied objects in to-space, forwarding each pointer
-    // field, until `scan` catches `free`. Strings have `pointer_count == 0`, so
-    // they only advance `scan` — but `object_size` still uses the variable-size
-    // branch to advance correctly.
-    while scan < free {
-        let obj = scan as *mut Object;
-        let class = (*obj).class_descriptor;
-        let count = (*class).pointer_count as usize;
-        let offsets = (*class).pointer_offsets;
-        for i in 0..count {
-            let off = *offsets.add(i) as usize;
-            let slot = (obj as *mut u8).add(off) as *mut *mut Object;
-            *slot = forward(*slot, from_base, from_limit, &mut free);
-        }
-        scan = scan.add(object_size(obj));
-    }
-
-    // 4. Commit: swap the semispace roles; the old from-space is now free.
-    crate::alloc::flip(free);
-
-    // Debug instrumentation (off unless `LO_GC_POISON` is set): scribble the
-    // just-abandoned from-space with a poison byte. Survivors were already copied
-    // out to the new from-space, so this only clobbers garbage and tombstones —
-    // but it turns any *stale* pointer (one the collector did not relocate because
-    // it was not a registered root) into a deterministic read of `0xEFEFEFEF…`
-    // instead of its possibly-still-intact old bytes. That makes a missing
-    // GC root a hard failure rather than a flaky one (see the WS-11 GC-rooting
-    // stress test). Not part of the ABI; zero cost when disabled.
-    if poison_enabled() {
-        let len = (from_limit as usize) - (from_base as usize);
-        core::ptr::write_bytes(from_base, 0xEF, len);
+unsafe fn fields(object: *mut Object, mut visit: impl FnMut(*mut *mut Object)) {
+    let descriptor = (*object).class_descriptor;
+    for i in 0..(*descriptor).pointer_count as usize {
+        let offset = *(*descriptor).pointer_offsets.add(i) as usize;
+        visit((object as *mut u8).add(offset) as *mut *mut Object);
     }
 }
 
-/// Whether `LO_GC_POISON` requests poisoning the abandoned from-space after each
-/// collection (debug aid; see `collect`). Read once and cached. Always false on
-/// freestanding WASM (no environment).
-fn poison_enabled() -> bool {
-    use std::sync::OnceLock;
-    static POISON: OnceLock<bool> = OnceLock::new();
-    *POISON.get_or_init(|| {
-        std::env::var("LO_GC_POISON")
-            .map(|v| !v.is_empty() && v != "0")
-            .unwrap_or(false)
-    })
+unsafe fn enqueue(object: *mut Object, base: *mut u8, end: *mut u8, scratch: &mut Scratch) {
+    if managed(object, base, end) && (*object).gc_bits & MARKED == 0 {
+        // Mark before enqueueing so cycles and aliases enter the worklist once.
+        (*object).gc_bits |= MARKED;
+        scratch.push_work(object as usize - base as usize);
+    }
+}
+
+unsafe fn mark(base: *mut u8, end: *mut u8, scratch: &mut Scratch) {
+    roots(|slot| enqueue(*slot, base, end, scratch));
+    while let Some(offset) = scratch.worklist.pop() {
+        fields(base.add(offset) as *mut Object, |slot| {
+            enqueue(*slot, base, end, scratch)
+        });
+    }
+}
+
+unsafe fn compute_forwarding(base: *mut u8, end: *mut u8, scratch: &mut Scratch) -> usize {
+    let allocated = end as usize - base as usize;
+    let mut offset = 0;
+    let mut destination = 0;
+    while offset < allocated {
+        let object = base.add(offset) as *mut Object;
+        let size = crate::heap_layout::object_size(object).expect("invalid object size");
+        assert!(
+            size >= core::mem::size_of::<Object>() && size <= allocated - offset,
+            "invalid heap object boundary"
+        );
+        if (*object).gc_bits & MARKED != 0 {
+            scratch.push_relocation(Relocation {
+                old_offset: offset,
+                new_offset: destination,
+                size,
+            });
+            destination += size;
+        }
+        offset += size;
+    }
+    destination
+}
+
+unsafe fn relocated(
+    object: *mut Object,
+    base: *mut u8,
+    end: *mut u8,
+    scratch: &Scratch,
+) -> *mut Object {
+    if !managed(object, base, end) {
+        return object;
+    }
+    let destination = scratch
+        .destination(object as usize - base as usize)
+        .expect("live reference has no forwarding address");
+    base.add(destination) as *mut Object
+}
+
+unsafe fn fix_references(base: *mut u8, end: *mut u8, scratch: &Scratch) {
+    // Fix all old locations before any move can overwrite a header or field.
+    roots(|slot| *slot = relocated(*slot, base, end, scratch));
+    for relocation in &scratch.relocations {
+        fields(base.add(relocation.old_offset) as *mut Object, |slot| {
+            *slot = relocated(*slot, base, end, scratch);
+        });
+    }
+}
+
+unsafe fn slide(base: *mut u8, scratch: &Scratch) {
+    // Ascending order preserves unread objects. ptr::copy permits overlap.
+    for relocation in &scratch.relocations {
+        let destination = base.add(relocation.new_offset);
+        core::ptr::copy(
+            base.add(relocation.old_offset),
+            destination,
+            relocation.size,
+        );
+        (*(destination as *mut Object)).gc_bits &= !MARKED;
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    //! Cheney collector tests (runbook WS-2 §3, step A.4). Run in-crate so they
+    //! Collector tests. Run in-crate so they
     //! can reach the internal string allocator and heap-occupancy hook.
     //!
     //! The runtime is process-global single-threaded state, so these tests
@@ -208,14 +181,18 @@ mod tests {
 
     static LOCK: Mutex<()> = Mutex::new(());
 
-    // A test class with a single pointer field at offset 16 (right after the
-    // 16-byte header): a linked-list "Node". instance_size 24, one pointer field.
-    static NODE_PTR_OFFSETS: [u32; 1] = [16];
+    #[repr(C)]
+    struct Node {
+        header: Object,
+        next: *mut Object,
+    }
+    const NEXT: usize = core::mem::offset_of!(Node, next);
+    static NODE_PTR_OFFSETS: [u32; 1] = [NEXT as u32];
     static NODE_CLASS: ClassDescriptor = ClassDescriptor {
         name: c"Node".as_ptr() as *const u8,
         name_len: 4,
         parent: core::ptr::null(),
-        instance_size: 24,
+        instance_size: core::mem::size_of::<Node>() as u32,
         pointer_offsets: &NODE_PTR_OFFSETS as *const u32,
         pointer_count: 1,
         vtable_size: 0,
@@ -275,9 +252,10 @@ mod tests {
             let mut frame = TestFrame::<1>::new();
             lo_push_frame(frame.as_frame());
 
+            lo_alloc(&NODE_CLASS); // dead prefix forces actual relocation
             let a = lo_alloc(&NODE_CLASS);
             let b = lo_alloc(&NODE_CLASS);
-            set_field(a, 16, b); // a.next = b
+            set_field(a, NEXT, b); // a.next = b
             frame.roots[0] = a; // root = a
 
             lo_gc_collect();
@@ -286,11 +264,11 @@ mod tests {
             assert_ne!(a2, a, "root must be rewritten to the moved object");
             assert_eq!((*a2).class_descriptor, &NODE_CLASS as *const _);
 
-            let b2 = get_field(a2, 16);
+            let b2 = get_field(a2, NEXT);
             assert!(!b2.is_null(), "interior pointer must survive");
             assert_ne!(b2, b, "interior pointer must be rewritten to b's new addr");
             assert_eq!((*b2).class_descriptor, &NODE_CLASS as *const _);
-            assert!(get_field(b2, 16).is_null(), "b.next was null");
+            assert!(get_field(b2, NEXT).is_null(), "b.next was null");
 
             lo_pop_frame();
         });
@@ -308,12 +286,12 @@ mod tests {
             let _dead = lo_alloc(&NODE_CLASS); // not rooted -> unreachable
 
             let before = heap_used();
-            assert_eq!(before, 48, "two 24-byte nodes occupy 48 bytes");
+            assert_eq!(before, 2 * core::mem::size_of::<Node>());
 
             lo_gc_collect();
 
             let after = heap_used();
-            assert_eq!(after, 24, "only the live node survives");
+            assert_eq!(after, core::mem::size_of::<Node>());
             assert!(after < before);
 
             // The survivor's root was rewritten to its moved location and is
@@ -334,7 +312,8 @@ mod tests {
             let mut frame = TestFrame::<1>::new();
             lo_push_frame(frame.as_frame());
 
-            let bytes: &[u8] = b"hello, Cheney";
+            lo_alloc(&NODE_CLASS);
+            let bytes: &[u8] = b"hello, Lisp-2";
             let s = bump_alloc_string(bytes.len() as u32);
             let data = (s as *mut u8).add(string_data_offset());
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), data, bytes.len());
@@ -343,7 +322,7 @@ mod tests {
             lo_gc_collect();
 
             let s2 = frame.roots[0];
-            assert_ne!(s2, s, "string must move to to-space");
+            assert_ne!(s2, s, "string must slide into the dead prefix");
             assert_eq!((*s2).class_descriptor, &LO_STRING_CLASS as *const _);
             let so = s2 as *const StringObject;
             assert_eq!((*so).length, bytes.len() as u32);
@@ -367,16 +346,17 @@ mod tests {
             let mut frame = TestFrame::<1>::new();
             lo_push_frame(frame.as_frame());
 
+            lo_alloc(&NODE_CLASS);
             let holder = lo_alloc(&NODE_CLASS);
             let empty = &LO_EMPTY_STRING as *const StringObject as *mut Object;
-            set_field(holder, 16, empty); // holder.next = &LO_EMPTY_STRING
+            set_field(holder, NEXT, empty);
             frame.roots[0] = holder;
 
             lo_gc_collect();
 
             let holder2 = frame.roots[0];
             assert_ne!(holder2, holder, "holder itself moves");
-            let field = get_field(holder2, 16);
+            let field = get_field(holder2, NEXT);
             assert_eq!(
                 field, empty,
                 "immortal LO_EMPTY_STRING must not be relocated"
@@ -386,12 +366,11 @@ mod tests {
         });
     }
 
-    // (v) Allocation pressure past one semispace triggers GC through lo_alloc's
+    // (v) Allocation pressure triggers GC through lo_alloc's
     // OOM path and continues; only a genuine live-set overflow would abort.
     #[test]
     fn allocation_pressure_triggers_gc() {
-        // Total 4 KiB -> 2 KiB per semispace (~85 nodes). 600 allocations of dead
-        // nodes force many collections; the single rooted node survives them all.
+        // Dead nodes force several collections; the rooted node survives them all.
         with_runtime(Some("4096"), || unsafe {
             let mut frame = TestFrame::<1>::new();
             lo_push_frame(frame.as_frame());

@@ -2,7 +2,10 @@ use lo_runtime::*;
 
 unsafe fn text(p: *mut Object) -> String {
     let len = (*(p as *const StringObject)).length as usize;
-    String::from_utf8(std::slice::from_raw_parts((p as *const u8).add(string_data_offset()), len).to_vec()).unwrap()
+    String::from_utf8(
+        std::slice::from_raw_parts((p as *const u8).add(string_data_offset()), len).to_vec(),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -10,6 +13,8 @@ fn unicode_and_type_operations() {
     // This integration binary has one test: runtime globals cannot race.
     unsafe {
         lo_runtime_init();
+        // Leave a dead object before the String to force a downward slide.
+        lo_alloc(&LO_INT_BOX_CLASS);
         let input = "aé🙂";
         let s = lo_string_new(input.as_ptr(), input.len() as u32);
         assert_eq!(text(lo_string_reverse(s)), "🙂éa");
@@ -23,8 +28,16 @@ fn unicode_and_type_operations() {
         assert!(!lo_instanceof(std::ptr::null_mut(), &LO_STRING_CLASS));
         assert!(lo_cast_check(std::ptr::null_mut(), &LO_STRING_CLASS).is_null());
         #[repr(C)]
-        struct Frame { parent: *mut ShadowFrame, count: u32, roots: [*mut Object; 1] }
-        let mut frame = Frame { parent: std::ptr::null_mut(), count: 1, roots: [s] };
+        struct Frame {
+            parent: *mut ShadowFrame,
+            count: u32,
+            roots: [*mut Object; 1],
+        }
+        let mut frame = Frame {
+            parent: std::ptr::null_mut(),
+            count: 1,
+            roots: [s],
+        };
         lo_push_frame(&mut frame as *mut Frame as *mut ShadowFrame);
         lo_gc_collect();
         let moved = frame.roots[0];

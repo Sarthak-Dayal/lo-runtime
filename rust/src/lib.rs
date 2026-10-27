@@ -1,13 +1,11 @@
 //! LO runtime skeleton (Rust) — CS 378H Compilers, Fall 2026.
 //!
-//! This crate implements the shared LO runtime ABI (`runtime-abi.md`). The
-//! Cheney remains active while Lisp-2 is developed. String and type operations
-//! are implemented for both targets.
+//! Implements the shared runtime ABI with Lisp-2 mark-compact collection.
+//! String and type operations share the native and WASM implementation.
 
 mod abort;
 mod alloc;
 mod cast;
-#[allow(dead_code)] // The subsequent Lisp-2 phases consume this foundation.
 mod compaction;
 mod descriptors;
 mod exit_codes;
