@@ -1,5 +1,4 @@
-//! Type operations (`runtime-abi.md` §3.5). Both **stubbed** — the team
-//! implements these in P3.
+//! Type operations (`runtime-abi.md` §3.5). Descriptor-chain checks shared by both targets.
 //!
 //! Implementation hints from the ABI: `lo_cast_check` returns `obj` if its class
 //! is `target` or a descendant, else aborts (exit 101) after writing

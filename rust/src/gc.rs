@@ -18,7 +18,7 @@
 
 use crate::descriptors::LO_STRING_CLASS;
 use crate::object::{
-    shadow_frame_roots_offset, string_data_offset, ClassDescriptor, Object, StringObject,
+    shadow_frame_roots_offset, ClassDescriptor, Object, StringObject,
 };
 
 /// Forwarding-flag bit in `gc_bits` (decision (C)). See module docs.
@@ -54,11 +54,6 @@ pub extern "C" fn lo_gc_collect() {
     unsafe { collect() }
 }
 
-#[inline]
-const fn align8(n: usize) -> usize {
-    (n + 7) & !7
-}
-
 /// True byte size of a heap object — the count `forward` copies and the stride
 /// `scan` advances by (runbook WS-2 §2.2). Strings are variable-size: their inline
 /// UTF-8 tail starts at `offset_of(StringObject, data)` (= 20 on 64-bit), **not**
@@ -71,9 +66,9 @@ unsafe fn object_size(p: *mut Object) -> usize {
     let class = (*p).class_descriptor;
     if core::ptr::eq(class, &LO_STRING_CLASS) {
         let so = p as *const StringObject;
-        align8(string_data_offset() + (*so).length as usize)
+        crate::heap_layout::string_size((*so).length as usize).unwrap_or_else(|| crate::heap_layout::oom())
     } else {
-        align8((*class).instance_size as usize)
+        crate::heap_layout::aligned_size((*class).instance_size as usize).unwrap_or_else(|| crate::heap_layout::oom())
     }
 }
 
