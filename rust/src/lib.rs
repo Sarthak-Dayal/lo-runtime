@@ -1,31 +1,18 @@
 //! LO runtime skeleton (Rust) — CS 378H Compilers, Fall 2026.
 //!
 //! This crate implements the shared LO runtime ABI (`runtime-abi.md`). The
-//! *provided* entry points (allocation, shadow stack, I/O, write barrier,
-//! lifecycle, descriptors) work out of the box; the *stubbed* ones (GC, string
-//! ops, casts) carry the correct C-ABI signature and panic with a recognizable
-//! message until a team implements them in P3.
-//!
-//! Module layout mirrors the other two skeletons:
-//! - [`object`] — ABI-visible type definitions.
-//! - [`descriptors`] — built-in class descriptors + the `LO_EMPTY_STRING` singleton.
-//! - [`alloc`] — bump allocator behind `lo_alloc`.
-//! - [`shadow_stack`] — root-tracking frame list.
-//! - [`init`] — runtime lifecycle.
-//! - [`io`] — print / read / EOF.
-//! - [`gc`] — write barrier (provided) + collect (stub).
-//! - [`string_ops`], [`cast`] — stubs.
-//! - [`abort`] — runtime abort paths + `lo_abort_null_receiver`.
-//!
-//! `unsafe` is contained to the FFI boundary and the allocator / shadow-stack
-//! modules, each access commented with the invariant it relies on.
+//! Cheney remains active while Lisp-2 is developed. String and type operations
+//! are implemented for both targets.
 
 mod abort;
 mod alloc;
 mod cast;
+#[allow(dead_code)] // The subsequent Lisp-2 phases consume this foundation.
+mod compaction;
 mod descriptors;
 mod exit_codes;
 mod gc;
+mod heap_layout;
 mod init;
 mod io;
 mod object;
