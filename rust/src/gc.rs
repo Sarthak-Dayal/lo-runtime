@@ -338,8 +338,7 @@ mod tests {
     }
 
     // (iv) LO_EMPTY_STRING is immortal: a moved object's field that references it
-    // still points at the same `.rodata` address after collection (forward's
-    // range-check leaves non-from-space pointers untouched — no special case).
+    // still points at the same `.rodata` address after collection.
     #[test]
     fn empty_string_not_moved() {
         with_runtime(None, || unsafe {
@@ -389,6 +388,29 @@ mod tests {
             let live2 = frame.roots[0];
             assert_eq!((*live2).class_descriptor, &NODE_CLASS as *const _);
 
+            lo_pop_frame();
+        });
+    }
+
+    #[test]
+    fn live_set_can_use_more_than_half_the_heap() {
+        with_runtime(Some("4096"), || unsafe {
+            let mut frame = TestFrame::<1>::new();
+            lo_push_frame(frame.as_frame());
+            let count = 3072 / core::mem::size_of::<Node>();
+            for _ in 0..count {
+                let node = lo_alloc(&NODE_CLASS);
+                set_field(node, NEXT, frame.roots[0]);
+                frame.roots[0] = node;
+            }
+            lo_gc_collect();
+            assert!(heap_used() > 2048);
+            let mut node = frame.roots[0];
+            for _ in 0..count {
+                assert!(!node.is_null());
+                node = get_field(node, NEXT);
+            }
+            assert!(node.is_null());
             lo_pop_frame();
         });
     }
