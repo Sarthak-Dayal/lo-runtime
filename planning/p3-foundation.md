@@ -2,7 +2,8 @@
 
 Lisp-2 is now active. The ABI and compiler pipeline are unchanged. Rust is the
 shared native/WASM implementation. `rust/reference/` preserves Cheney and its
-semispace allocator as uncompiled reference code.
+semispace allocator. The optional `reference-cheney` feature compiles that pair
+for comparison tests instead of Lisp-2; it does not initialize compaction scratch.
 
 ## Phase contracts
 

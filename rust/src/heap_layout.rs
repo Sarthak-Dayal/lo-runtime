@@ -1,6 +1,9 @@
 //! Shared allocation and heap-walk sizes. No collector may invent its own stride.
+#[cfg(not(feature = "reference-cheney"))]
 use crate::descriptors::LO_STRING_CLASS;
-use crate::object::{string_data_offset, Object, StringObject};
+use crate::object::{string_data_offset, Object};
+#[cfg(not(feature = "reference-cheney"))]
+use crate::object::StringObject;
 
 pub(crate) const OBJECT_ALIGN: usize = core::mem::align_of::<Object>();
 
@@ -19,6 +22,7 @@ pub(crate) fn string_size(length: usize) -> Option<usize> {
 ///
 /// # Safety
 /// `object` must address a valid managed object with an intact descriptor.
+#[cfg(not(feature = "reference-cheney"))]
 pub(crate) unsafe fn object_size(object: *const Object) -> Option<usize> {
     let class = (*object).class_descriptor;
     if core::ptr::eq(class, &LO_STRING_CLASS) {

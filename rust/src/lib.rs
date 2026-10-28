@@ -1,14 +1,18 @@
 //! LO runtime skeleton (Rust) — CS 378H Compilers, Fall 2026.
 //!
 //! Implements the shared runtime ABI with Lisp-2 mark-compact collection.
+//! The optional `reference-cheney` feature selects the reference collector for tests.
 //! String and type operations share the native and WASM implementation.
 
 mod abort;
+#[cfg_attr(feature = "reference-cheney", path = "../reference/semispace_alloc.rs")]
 mod alloc;
 mod cast;
+#[cfg(not(feature = "reference-cheney"))]
 mod compaction;
 mod descriptors;
 mod exit_codes;
+#[cfg_attr(feature = "reference-cheney", path = "../reference/cheney.rs")]
 mod gc;
 mod heap_layout;
 mod init;

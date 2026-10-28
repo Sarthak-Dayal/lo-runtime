@@ -17,6 +17,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # std::io (see src/io.rs for why libc is not used here). No runtime deps.
 [dependencies]
 
+[features]
+reference-cheney = []
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

@@ -11,6 +11,7 @@
 pub extern "C" fn lo_runtime_init() {
     crate::alloc::heap_init();
     crate::shadow_stack::reset();
+    #[cfg(not(feature = "reference-cheney"))]
     crate::gc::init();
 }
 
