@@ -43,6 +43,9 @@ language-native unit-test suite (under `rust/tests/`, `zig`'s `zig build test`,
 and `cpp/tests/`), which drives the provided entry points directly through the C
 ABI.
 
+Our P3 GC stress tests live in [`tests/gc-stress/`](tests/gc-stress/); its
+README says what each one checks and how to run them on each target.
+
 ## Repository layout
 
 ```
@@ -54,7 +57,8 @@ lo-runtime/
 │   └── install-hooks.sh # installs the pre-commit hook (fmt + lint + secrets)
 ├── tests/
 │   ├── lo_programs/     # LO programs that exercise the runtime
-│   └── expected/        # expected outputs (language-agnostic)
+│   ├── expected/        # expected outputs (language-agnostic)
+│   └── gc-stress/       # our P3 GC stress tests and their runner
 ├── rust/                # Rust skeleton (Cargo)
 ├── zig/                 # Zig skeleton (build.zig)
 ├── cpp/                 # C++ skeleton (CMake)

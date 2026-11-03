@@ -1,0 +1,48 @@
+// good test case
+// GC stress: eight long strings are allocated first, each just after one small dead object, so when garbage forces a collection a compacting collector slides each string down by much less than its own length; the copy must be safe for overlapping source and destination, so every string must still equal a freshly built copy
+// main method return value: 0
+// gc stress heap: 65536
+
+class Node ( String s; Node next; ) [
+    Node(String x, Node n) { s = x; next = n; }
+] {
+    String get_s() { return s; }
+    Node get_next() { return next; }
+}
+
+class Box ( int v; ) [
+    Box(int x) { v = x; }
+] {
+    int get() { return v; }
+}
+
+class Main ( ) {
+    int main() {
+        Node list;
+        Box garbage;
+        bool ok;
+        int i;
+        list = null;
+        i = 0;
+        while ( (i < 8) ) {
+            garbage = new Box(i);
+            list = new Node(("abcdefghijklmnopqrstuvwxyz01234" * 40), list);
+            i = (i + 1);
+        }
+        i = 0;
+        while ( (i < 3000000) ) {
+            garbage = new Box(i);
+            i = (i + 1);
+        }
+        ok = true;
+        i = 0;
+        while ( (i < 8) ) {
+            ok = (ok & (list.get_s() = ("abcdefghijklmnopqrstuvwxyz01234" * 40)));
+            list = list.get_next();
+            i = (i + 1);
+        }
+        out.print_bool(ok);
+        out.println();
+        return 0;
+    }
+}

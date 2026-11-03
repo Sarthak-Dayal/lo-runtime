@@ -1,0 +1,43 @@
+// good test case
+// GC stress: a linked list 170,000 nodes long stays live while garbage forces collections; marking it means following one pointer chain 170,000 links deep, so a collector that marks by recursion instead of with an explicit worklist overflows the native stack
+// main method return value: 0
+// gc stress heap: 16777216
+
+class Node ( Node next; ) [
+    Node(Node n) { next = n; }
+] {
+    Node get_next() { return next; }
+}
+
+class Box ( int v; ) [
+    Box(int x) { v = x; }
+] {
+    int get() { return v; }
+}
+
+class Main ( ) {
+    int main() {
+        Node list;
+        Box garbage;
+        int i;
+        list = null;
+        i = 0;
+        while ( (i < 170000) ) {
+            list = new Node(list);
+            i = (i + 1);
+        }
+        i = 0;
+        while ( (i < 3000000) ) {
+            garbage = new Box(i);
+            i = (i + 1);
+        }
+        i = 0;
+        while ( (! (list = null)) ) {
+            list = list.get_next();
+            i = (i + 1);
+        }
+        out.print_int(i);
+        out.println();
+        return 0;
+    }
+}
