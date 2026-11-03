@@ -33,8 +33,6 @@
 }
 \lstset{style=code}
 \newcommand{\code}[1]{\texttt{\small #1}}
-% Draft marker: delete each one once the text is confirmed.
-\newcommand{\todo}[1]{\textcolor{red!70!black}{\textbf{[TODO: #1]}}}
 
 \title{\vspace{-1.2em}\textbf{P3 GC Design Note: Lisp-2 Sliding Mark-Compact (Rust Runtime)}\vspace{-0.4em}}
 \author{Neha Reddy \quad Sarthak Dayal \quad Jay Shim \quad Rahik Sikder\\[0.2em] CS 378H, Fall 2026}
@@ -141,6 +139,6 @@ If these cover every location, nothing holds a stale address after \code{slide}.
   \item WASM always runs at the default 16~MiB heap, so small heaps are tested natively only.
   \item Out-of-memory inside \code{lo\_string\_repeat} still exits 120 on WASM, since \code{wasmrun} matches that name first.
 \end{itemize}
-\textbf{Exit-code hardening.} While reviewing the collector, we ran programs that exhaust the heap inside a string operation on both targets: \code{lo\_string\_concat} exited 137 natively but 134 on WASM. The course's \code{wasmrun} chooses a trap's exit code by searching its backtrace for function names and reports 137 only when a frame named \code{lo\_alloc*} is present. A string's size depends on its length, so string operations allocate through the runtime's variable-size allocator rather than \code{lo\_alloc}, and no frame on that path matched. Every out-of-memory abort now goes through one function, \code{lo\_alloc\_oom}, marked \code{\#[inline(never)]} so that the compiler cannot merge it into its caller and it always appears in the backtrace.
+\textbf{Exit-code hardening.} We ran programs that exhaust the heap inside a string operation on both targets: \code{lo\_string\_concat} exited 137 natively but 134 on WASM. The course's \code{wasmrun} chooses a trap's exit code by searching its backtrace for function names and reports 137 only when a frame named \code{lo\_alloc*} is present. String operations allocate through the variable-size allocator rather than \code{lo\_alloc}, so no frame on that path matched. Every out-of-memory abort now goes through one function, \code{lo\_alloc\_oom}, marked \code{\#[inline(never)]} so it always appears in the backtrace.
 
 \end{document}
