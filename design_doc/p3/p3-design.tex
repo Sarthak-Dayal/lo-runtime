@@ -106,6 +106,8 @@ Afterward \code{FREE} is set to the end of the live prefix. With \code{LO\_GC\_P
 \end{enumerate}
 If these cover every location, nothing holds a stale address after \code{slide}. Dead objects are never visited, so their stale fields are never read.
 
+\textbf{String and type operations.} The five \code{lo\_string\_*} operations are UTF-8 aware (codepoint-aware reversal, byte-wise comparison, exit 120 on a negative repeat count) and follow the root discipline above. \code{lo\_cast\_check} and \code{lo\_instanceof} walk the descriptor \code{parent} chain, with null short-circuits and exit 101 naming both classes.
+
 \section{Testing on Both Targets}
 \textbf{LO stress tests} (suite header-contract format) are in \code{tests/gc-stress/}. There are five, and each allocates about 3 million objects, keeps live data under a quarter of its heap, and was confirmed to fail on a copy of our runtime with the named bug planted.
 \begin{center}\small
@@ -125,11 +127,20 @@ If these cover every location, nothing holds a stale address after \code{slide}.
 
 \textbf{Forced collections.} LO source has no way to call \code{lo\_gc\_collect}, which the ABI reserves for tests, so these programs force collections by exhausting the heap instead. Each allocates about 3 million short-lived objects against its declared heap, so collections recur throughout the run while the program's live data is in a known shape. Direct \code{lo\_gc\_collect} calls are exercised by Rust tests, run natively and compiled to WASM, which \code{tests/gc-stress/README.md} maps to each stress-test category.
 
-\section{Worst Bug}
-\todo{Confirm this is the bug the team wants to name, since it is the only one the git history records.} The worst bug was at the collector's edge and differed by target. A heap-exhaustion abort inside a \emph{string} operation (\code{lo\_string\_concat}, \code{lo\_string\_new}, \code{lo\_string\_reverse}) printed the right message on both targets but exited 137 on native and \textbf{134} on WASM. \code{wasmrun} derives the exit code from the trap backtrace and maps a trap to 137 only if a \code{lo\_alloc*} frame is on it, and our string operations aborted from their own out-of-memory paths. We found it by running tiny-heap tests on WASM. The fix routes \emph{every} out-of-memory abort through one \code{\#[cold] \#[inline(never)] lo\_alloc\_oom}. One case remains, since OOM inside \code{lo\_string\_repeat} still exits 120 on WASM because \code{wasmrun} matches that name first.
-
-\textbf{String and type operations.} The five \code{lo\_string\_*} operations are UTF-8 aware (codepoint-aware reversal, byte-wise comparison, exit 120 on a negative repeat count) and follow the root discipline above. \code{lo\_cast\_check} and \code{lo\_instanceof} walk the descriptor \code{parent} chain, with null short-circuits and exit 101 naming both classes.
-
-\textbf{Limitations.} There is no heap-checker walk or GC log, only poisoning. Fixup costs a binary search per pointer rather than $O(1)$ forwarding, and the side tables reserve about twice the heap in address space.
+\section{Challenges and Limitations}
+\textbf{Tradeoffs.}
+\begin{itemize}
+  \item \textbf{Lisp-2 over Cheney.} We use the whole heap instead of half, but make three passes per collection instead of one copy.
+  \item \textbf{Side tables over header forwarding.} Descriptors stay intact for the heap walk, but fixup needs a binary search per pointer rather than a direct read.
+  \item \textbf{Scratch reserved at init.} A collection never allocates, but the tables reserve about twice the heap in address space.
+  \item \textbf{Non-generational.} The barrier stays a bare store and nothing can be missed, but every collection scans all live data.
+\end{itemize}
+\textbf{Limitations.}
+\begin{itemize}
+  \item There is no heap-checker walk and no per-collection GC log, only poisoning.
+  \item WASM always runs at the default 16~MiB heap, so small heaps are tested natively only.
+  \item Out-of-memory inside \code{lo\_string\_repeat} still exits 120 on WASM, since \code{wasmrun} matches that name first.
+\end{itemize}
+\textbf{Bug found.} Heap exhaustion inside a string operation (\code{lo\_string\_concat}, \code{lo\_string\_new}, \code{lo\_string\_reverse}) exited 134 on WASM instead of the required 137 (native was correct). \code{wasmrun} picks a trap's exit code from its backtrace and reports 137 only if a \code{lo\_alloc*} frame is on it, but our string operations aborted from their own out-of-memory paths. Every out-of-memory abort now goes through one \code{\#[cold] \#[inline(never)] lo\_alloc\_oom}, which stays a real frame. \todo{Confirm this bug and add how it was found.}
 
 \end{document}
