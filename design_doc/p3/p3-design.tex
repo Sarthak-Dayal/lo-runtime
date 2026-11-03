@@ -64,9 +64,9 @@ The only roots are the shadow-stack slots. The collector walks the \code{ShadowF
 \toprule
 \textbf{Phase} & \textbf{What it does} \\
 \midrule
-\code{mark} & Marks from the roots with an \emph{explicit worklist} of heap offsets, so a 170{,}000-link chain cannot overflow the stack. The bit is set \emph{before} pushing, so cycles and aliases enter once. Fields come from the descriptor's \code{pointer\_offsets}, which need not be contiguous. \\
+\code{mark} & Marks from the roots with a worklist of heap offsets, so the traversal depth lives in the worklist rather than on the call stack and long link chains cannot overflow the stack. The mark bit is set before pushing, so cycles and aliases enter once. Fields come from the descriptor's \code{pointer\_offsets}, which need not be contiguous. \\
 \code{compute\_forwarding} & Walks the heap with \code{object\_size}. Each marked object gets \code{new\_offset} equal to the live bytes before it. Entries are appended in address order, so the table is sorted by construction. \\
-\code{fix\_references} & Rewrites every root slot and every pointer field of every live object, looking the pointee up by binary search. All fixups run while every object is still at its old address. \\
+\code{fix\_references} & Rewrites every root slot and every pointer field of every live object, looking the target object up by binary search. All fixups run while every object is still at its old address. \\
 \code{slide} & Copies objects down in ascending order with the overlap-safe \code{ptr::copy}, clearing mark bits. Since $\mathrm{new}\le\mathrm{old}$ for every object, no unmoved object is overwritten. \\
 \bottomrule
 \end{tabularx}
@@ -96,11 +96,17 @@ Afterward \code{FREE} is set to the end of the live prefix. With \code{LO\_GC\_P
 \end{tikzpicture}
 \end{center}
 
-\textbf{Fixup argument.} Every managed pointer lives in one of these places. (1) Shadow-stack slots are rewritten. (2) Pointer fields of live objects are rewritten, including objects that do not move, because their pointees may. (3) Non-heap targets are left alone by the range guard. (4) No interior runtime state exists, because string operations copy their inputs into a Rust \code{Vec} \emph{before} allocating, \code{lo\_cast\_check} and \code{lo\_instanceof} allocate nothing, and the worklist and relocation table hold offsets, not pointers. (5) \code{FREE} is reset. Dead objects are never visited, so their stale fields are never dereferenced.
+\textbf{Fixup argument.} After a collection no pointer may hold an old address, so we list every place a managed pointer can live and how each is handled.
+\begin{enumerate}
+  \item \textbf{Shadow-stack slots.} These are the roots, and \code{fix\_references} rewrites each to its object's new address.
+  \item \textbf{Pointer fields of live objects.} Rewritten for \emph{every} live object, including ones that do not move, because an unmoved object can point at one that does.
+  \item \textbf{Pointers outside the heap.} Descriptors, literals, and \code{LO\_EMPTY\_STRING} fail the \code{managed()} range check and are left alone. They never move, so their addresses are already correct.
+  \item \textbf{Pointers held by the runtime itself.} There are none. String operations copy their inputs into a Rust \code{Vec} \emph{before} allocating, so no managed pointer is held across a possible collection. \code{lo\_cast\_check} and \code{lo\_instanceof} allocate nothing. The worklist and relocation table hold offsets, not pointers.
+  \item \textbf{The bump pointer.} \code{FREE} is reset to the end of the live prefix.
+\end{enumerate}
+If these cover every location, nothing holds a stale address after \code{slide}. Dead objects are never visited, so their stale fields are never read.
 
 \section{Testing on Both Targets}
-\code{LO\_HEAP\_SIZE} shrinks the heap so programs collect early, \code{lo\_gc\_collect} forces collections, and \code{LO\_GC\_POISON=1} poisons freed space. \textbf{Rust tests} call the entry points directly. Unit tests in \code{gc.rs} run at 4~KiB, and \code{collector\_probe} runs at 1~KiB with poisoning, on native and compiled to \code{wasm32} under \code{wasmrun}. The probe holds a two-node cycle from two frames across repeated collections, forces an overlapping slide of a 257-byte string, and allocates 1.1 million objects past the heap. \code{tests/run-collector.sh} runs all of it plus both release builds.
-
 \textbf{LO stress tests} (suite header-contract format) are in \code{tests/gc-stress/}. There are five, and each allocates about 3 million objects, keeps live data under a quarter of its heap, and was confirmed to fail on a copy of our runtime with the named bug planted.
 \begin{center}\small
 \begin{tabularx}{\linewidth}{@{}l X@{}}
@@ -110,17 +116,19 @@ Afterward \code{FREE} is set to the end of the live prefix. With \code{LO\_GC\_P
 \code{gc\_01\_unmoved\_anchor\_fixup} & Fixup rewrites fields of unmoved live objects (fixup skips objects whose address is unchanged) \\
 \code{gc\_02\_overlapping\_slide} & A slide shorter than the object is overlap-safe (copying high to low, or the tail block first) \\
 \code{gc\_03\_survivors\_then\_die} & Survivors are reclaimed once dead (mark bits left set) \\
-\code{gc\_04\_deep\_list\_marking} & Marking uses a worklist (recursive marking on a 170{,}000-link chain) \\
+\code{gc\_04\_deep\_list\_marking} & Marking uses a worklist (recursive marking overflows the stack on a very long link chain) \\
 \code{gc\_05\_every\_pointer\_field} & Scan visits exactly the descriptor's offsets (first field only, last field skipped, contiguity assumed) \\
 \bottomrule
 \end{tabularx}
 \end{center}
-\code{run.sh} runs each program on WASM and native at the default heap, and on native at its declared heap. All five pass on both targets, and natively at their declared heaps. A WASM module has no environment, so \code{LO\_HEAP\_SIZE} cannot reach it and WASM always runs at 16~MiB. There, collections come from allocating past the heap and from direct \code{lo\_gc\_collect} calls.
+\code{run.sh} runs each program on WASM and native at the default heap, and on native at its declared heap. All five pass on both targets, and natively at their declared heaps. A WASM module has no environment, so \code{LO\_HEAP\_SIZE} cannot reach it and WASM always runs at 16~MiB. There, collections come from allocating past that heap.
+
+\textbf{Forced collections.} LO source has no way to call \code{lo\_gc\_collect}, which the ABI reserves for tests, so these programs force collections by exhausting the heap instead. Each allocates about 3 million short-lived objects against its declared heap, so collections recur throughout the run while the program's live data is in a known shape. Direct \code{lo\_gc\_collect} calls are exercised by Rust tests, run natively and compiled to WASM, which \code{tests/gc-stress/README.md} maps to each stress-test category.
 
 \section{Worst Bug}
 \todo{Confirm this is the bug the team wants to name, since it is the only one the git history records.} The worst bug was at the collector's edge and differed by target. A heap-exhaustion abort inside a \emph{string} operation (\code{lo\_string\_concat}, \code{lo\_string\_new}, \code{lo\_string\_reverse}) printed the right message on both targets but exited 137 on native and \textbf{134} on WASM. \code{wasmrun} derives the exit code from the trap backtrace and maps a trap to 137 only if a \code{lo\_alloc*} frame is on it, and our string operations aborted from their own out-of-memory paths. We found it by running tiny-heap tests on WASM. The fix routes \emph{every} out-of-memory abort through one \code{\#[cold] \#[inline(never)] lo\_alloc\_oom}. One case remains, since OOM inside \code{lo\_string\_repeat} still exits 120 on WASM because \code{wasmrun} matches that name first.
 
-\textbf{String and type operations.} The five \code{lo\_string\_*} operations are UTF-8 aware (codepoint-aware reversal, byte-wise comparison, exit 120 on a negative repeat count) and follow the root discipline above. \code{lo\_cast\_check} and \code{lo\_instanceof} walk the descriptor \code{parent} chain, with null short-circuits and exit 101 naming both classes. \code{string\_type\_regression} tests both, including non-ASCII input.
+\textbf{String and type operations.} The five \code{lo\_string\_*} operations are UTF-8 aware (codepoint-aware reversal, byte-wise comparison, exit 120 on a negative repeat count) and follow the root discipline above. \code{lo\_cast\_check} and \code{lo\_instanceof} walk the descriptor \code{parent} chain, with null short-circuits and exit 101 naming both classes.
 
 \textbf{Limitations.} There is no heap-checker walk or GC log, only poisoning. Fixup costs a binary search per pointer rather than $O(1)$ forwarding, and the side tables reserve about twice the heap in address space.
 
