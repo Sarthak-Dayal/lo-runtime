@@ -1,0 +1,43 @@
+// good test case
+// GC stress: an object allocated first, which a compacting collector never needs to move, has its two fields pointed at fresh objects every round; garbage allocated after them forces collections that move only the fresh objects, so the collector must rewrite the fields of the object that stayed put
+// main method return value: 0
+// gc stress heap: 65536
+
+class Box ( int v; ) [
+    Box(int x) { v = x; }
+] {
+    int get() { return v; }
+}
+
+class Anchor ( Box a; Box b; ) [
+    Anchor() { ; }
+] {
+    void set(Box x, Box y) { a = x; b = y; }
+    int sum() { return (a.get() + b.get()); }
+}
+
+class Main ( ) {
+    int main() {
+        Anchor anchor;
+        Box garbage;
+        int round;
+        int j;
+        int total;
+        anchor = new Anchor();
+        total = 0;
+        round = 0;
+        while ( (round < 1000) ) {
+            anchor.set(new Box(round), new Box((round + 1)));
+            j = 0;
+            while ( (j < 3000) ) {
+                garbage = new Box(j);
+                j = (j + 1);
+            }
+            total = (total + anchor.sum());
+            round = (round + 1);
+        }
+        out.print_int(total);
+        out.println();
+        return 0;
+    }
+}

@@ -1,0 +1,52 @@
+// good test case
+// GC stress: each round builds a 400-node list that survives several collections and is then dropped; objects that were live in one collection and dead in the next must be reclaimed, so a collector that leaves them marked or never collects survivors again runs out of memory within a few rounds
+// main method return value: 0
+// gc stress heap: 65536
+
+class Node ( int v; Node next; ) [
+    Node(int x, Node n) { v = x; next = n; }
+] {
+    int get_v() { return v; }
+    Node get_next() { return next; }
+}
+
+class Box ( int v; ) [
+    Box(int x) { v = x; }
+] {
+    int get() { return v; }
+}
+
+class Main ( ) {
+    int main() {
+        Node list;
+        Box garbage;
+        int round;
+        int i;
+        int total;
+        total = 0;
+        round = 0;
+        while ( (round < 200) ) {
+            list = null;
+            i = 0;
+            while ( (i < 400) ) {
+                list = new Node(i, list);
+                i = (i + 1);
+            }
+            i = 0;
+            while ( (i < 15000) ) {
+                garbage = new Box(i);
+                i = (i + 1);
+            }
+            i = 0;
+            while ( (i < 400) ) {
+                total = (total + list.get_v());
+                list = list.get_next();
+                i = (i + 1);
+            }
+            round = (round + 1);
+        }
+        out.print_int(total);
+        out.println();
+        return 0;
+    }
+}

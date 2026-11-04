@@ -1,0 +1,52 @@
+// good test case
+// GC stress: 300 objects each hold three pointer fields separated by int fields plus a final link field, and each field is the only path to its target, while garbage forces collections; the collector must scan and update every pointer field at the offset its class descriptor lists, including the last one, and must leave the int fields between them untouched
+// main method return value: 0
+// gc stress heap: 262144
+
+class Box ( int v; ) [
+    Box(int x) { v = x; }
+] {
+    int get() { return v; }
+}
+
+class Holder ( Box a; int x; Box b; int y; Box c; Holder next; ) [
+    Holder(Box p, int i, Box q, int j, Box r, Holder n) { a = p; x = i; b = q; y = j; c = r; next = n; }
+] {
+    int sum() { return ((((a.get() + x) + b.get()) + y) + c.get()); }
+    Holder get_next() { return next; }
+}
+
+class Main ( ) {
+    int main() {
+        Holder list;
+        Box p;
+        Box q;
+        Box r;
+        Box garbage;
+        int k;
+        int total;
+        list = null;
+        k = 0;
+        while ( (k < 300) ) {
+            garbage = new Box(k);
+            p = new Box(k);
+            q = new Box(k);
+            r = new Box(k);
+            list = new Holder(p, 1, q, 1, r, list);
+            k = (k + 1);
+        }
+        k = 0;
+        while ( (k < 3000000) ) {
+            garbage = new Box(k);
+            k = (k + 1);
+        }
+        total = 0;
+        while ( (! (list = null)) ) {
+            total = (total + list.sum());
+            list = list.get_next();
+        }
+        out.print_int(total);
+        out.println();
+        return 0;
+    }
+}
