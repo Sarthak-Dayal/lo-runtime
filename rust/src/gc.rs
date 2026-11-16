@@ -1,11 +1,21 @@
 //! Lisp-2 mark-compact: mark, compute destinations, fix references, then slide.
 //! Descriptors stay intact; forwarding addresses live in preallocated side data.
+//!
+//! Safety: collection requires exclusive runtime access, valid object layouts and
+//! descriptors, and writable root/reference slots containing object starts or null.
 use crate::compaction::{Relocation, Scratch};
-use crate::object::{shadow_frame_roots_offset, Object};
+use crate::object::{shadow_frame_roots_offset, Object, ShadowFrame};
 
 const MARKED: u32 = 1;
-static mut IN_COLLECTION: bool = false;
-static mut POISON: bool = false;
+struct CollectorState {
+    in_collection: bool,
+    poison: bool,
+}
+
+static mut STATE: CollectorState = CollectorState {
+    in_collection: false,
+    poison: false,
+};
 
 /// Read debug configuration before collection, when host allocation is allowed.
 pub(crate) fn init() {
@@ -13,8 +23,8 @@ pub(crate) fn init() {
         .map(|s| !s.is_empty() && s != "0")
         .unwrap_or(false);
     unsafe {
-        IN_COLLECTION = false;
-        POISON = poison;
+        STATE.in_collection = false;
+        STATE.poison = poison;
     }
 }
 
@@ -28,19 +38,19 @@ pub unsafe extern "C" fn lo_gc_write_barrier(
     field_offset: u32,
     value: *mut Object,
 ) {
-    *((obj as *mut u8).add(field_offset as usize) as *mut *mut Object) = value;
+    *reference_slot_at(obj, field_offset as usize) = value;
 }
 
 /// Force collection. The runtime is single-threaded; no allocation occurs here.
 #[no_mangle]
 pub extern "C" fn lo_gc_collect() {
     unsafe {
-        assert!(!IN_COLLECTION, "recursive garbage collection");
+        assert!(!STATE.in_collection, "recursive garbage collection");
         let (base, end, limit) = crate::alloc::heap_bounds();
         if base.is_null() {
             return;
         }
-        IN_COLLECTION = true;
+        STATE.in_collection = true;
         let scratch = crate::compaction::scratch();
         scratch.clear();
         mark(base, end, scratch);
@@ -49,53 +59,128 @@ pub extern "C" fn lo_gc_collect() {
         slide(base, scratch);
         let new_end = base.add(live_bytes);
         crate::alloc::set_free(new_end);
-        if POISON {
+        if STATE.poison {
             core::ptr::write_bytes(new_end, 0xEF, limit as usize - new_end as usize);
         }
         scratch.clear();
-        IN_COLLECTION = false;
+        STATE.in_collection = false;
     }
 }
 
-// The ABI supplies object-start references, never interior pointers.
-// Null and immortal objects outside the allocated heap are left unchanged.
-fn managed(object: *mut Object, base: *mut u8, end: *mut u8) -> bool {
+// Requires a writable, aligned reference field at this byte offset.
+unsafe fn reference_slot_at(object: *mut Object, offset: usize) -> *mut *mut Object {
+    object.cast::<u8>().add(offset).cast()
+}
+
+struct RootSlots {
+    frame: *mut ShadowFrame,
+    index: usize,
+}
+
+impl RootSlots {
+    // Registered frames and their inline root arrays must remain valid.
+    unsafe fn new() -> Self {
+        Self {
+            frame: crate::shadow_stack::current_frame(),
+            index: 0,
+        }
+    }
+}
+
+impl Iterator for RootSlots {
+    type Item = *mut *mut Object;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // SAFETY: construction requires valid frames; iteration only reads their headers.
+        unsafe {
+            while !self.frame.is_null() {
+                if self.index < (*self.frame).num_roots as usize {
+                    let slots = self
+                        .frame
+                        .cast::<u8>()
+                        .add(shadow_frame_roots_offset())
+                        .cast::<*mut Object>();
+                    let slot = slots.add(self.index);
+                    self.index += 1;
+                    return Some(slot);
+                }
+                self.frame = (*self.frame).parent;
+                self.index = 0;
+            }
+            None
+        }
+    }
+}
+
+struct ReferenceFields {
+    object: *mut Object,
+    offsets: *const u32,
+    count: usize,
+    index: usize,
+}
+
+impl ReferenceFields {
+    // Object and descriptor must remain valid, with writable reference fields.
+    unsafe fn new(object: *mut Object) -> Self {
+        let descriptor = (*object).class_descriptor;
+        Self {
+            object,
+            offsets: (*descriptor).pointer_offsets,
+            count: (*descriptor).pointer_count as usize,
+            index: 0,
+        }
+    }
+}
+
+impl Iterator for ReferenceFields {
+    type Item = *mut *mut Object;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index == self.count {
+            return None;
+        }
+        // SAFETY: construction requires valid offsets and reference fields.
+        unsafe {
+            let offset = *self.offsets.add(self.index) as usize;
+            self.index += 1;
+            Some(reference_slot_at(self.object, offset))
+        }
+    }
+}
+
+fn is_in_allocated_heap(object: *mut Object, base: *mut u8, end: *mut u8) -> bool {
     !object.is_null() && object as usize >= base as usize && (object as usize) < end as usize
 }
 
-unsafe fn roots(mut visit: impl FnMut(*mut *mut Object)) {
-    let mut frame = crate::shadow_stack::current_frame();
-    while !frame.is_null() {
-        let slots = (frame as *mut u8).add(shadow_frame_roots_offset()) as *mut *mut Object;
-        for i in 0..(*frame).num_roots as usize {
-            visit(slots.add(i));
-        }
-        frame = (*frame).parent;
-    }
+fn offset_of_object(object: *mut Object, base: *mut u8) -> usize {
+    object as usize - base as usize
 }
 
-unsafe fn fields(object: *mut Object, mut visit: impl FnMut(*mut *mut Object)) {
-    let descriptor = (*object).class_descriptor;
-    for i in 0..(*descriptor).pointer_count as usize {
-        let offset = *(*descriptor).pointer_offsets.add(i) as usize;
-        visit((object as *mut u8).add(offset) as *mut *mut Object);
-    }
+unsafe fn object_at_offset(base: *mut u8, offset: usize) -> *mut Object {
+    base.add(offset).cast()
 }
 
-unsafe fn enqueue(object: *mut Object, base: *mut u8, end: *mut u8, scratch: &mut Scratch) {
-    if managed(object, base, end) && (*object).gc_bits & MARKED == 0 {
+unsafe fn mark_and_enqueue(
+    object: *mut Object,
+    base: *mut u8,
+    end: *mut u8,
+    scratch: &mut Scratch,
+) {
+    if is_in_allocated_heap(object, base, end) && (*object).gc_bits & MARKED == 0 {
         // Mark before enqueueing so cycles and aliases enter the worklist once.
         (*object).gc_bits |= MARKED;
-        scratch.push_work(object as usize - base as usize);
+        scratch.push_work(offset_of_object(object, base));
     }
 }
 
 unsafe fn mark(base: *mut u8, end: *mut u8, scratch: &mut Scratch) {
-    roots(|slot| enqueue(*slot, base, end, scratch));
+    for slot in RootSlots::new() {
+        mark_and_enqueue(*slot, base, end, scratch);
+    }
     while let Some(offset) = scratch.worklist.pop() {
-        fields(base.add(offset) as *mut Object, |slot| {
-            enqueue(*slot, base, end, scratch)
-        });
+        for slot in ReferenceFields::new(object_at_offset(base, offset)) {
+            mark_and_enqueue(*slot, base, end, scratch);
+        }
     }
 }
 
@@ -104,7 +189,7 @@ unsafe fn compute_forwarding(base: *mut u8, end: *mut u8, scratch: &mut Scratch)
     let mut offset = 0;
     let mut destination = 0;
     while offset < allocated {
-        let object = base.add(offset) as *mut Object;
+        let object = object_at_offset(base, offset);
         let size = crate::heap_layout::object_size(object).expect("invalid object size");
         assert!(
             size >= core::mem::size_of::<Object>() && size <= allocated - offset,
@@ -123,41 +208,46 @@ unsafe fn compute_forwarding(base: *mut u8, end: *mut u8, scratch: &mut Scratch)
     destination
 }
 
-unsafe fn relocated(
+unsafe fn forwarded_address(
     object: *mut Object,
     base: *mut u8,
     end: *mut u8,
     scratch: &Scratch,
 ) -> *mut Object {
-    if !managed(object, base, end) {
+    // Null and immortal objects outside the allocated heap are left unchanged.
+    if !is_in_allocated_heap(object, base, end) {
         return object;
     }
     let destination = scratch
-        .destination(object as usize - base as usize)
+        .destination(offset_of_object(object, base))
         .expect("live reference has no forwarding address");
-    base.add(destination) as *mut Object
+    object_at_offset(base, destination)
 }
 
 unsafe fn fix_references(base: *mut u8, end: *mut u8, scratch: &Scratch) {
     // Fix all old locations before any move can overwrite a header or field.
-    roots(|slot| *slot = relocated(*slot, base, end, scratch));
+    for slot in RootSlots::new() {
+        *slot = forwarded_address(*slot, base, end, scratch);
+    }
     for relocation in &scratch.relocations {
-        fields(base.add(relocation.old_offset) as *mut Object, |slot| {
-            *slot = relocated(*slot, base, end, scratch);
-        });
+        let object = object_at_offset(base, relocation.old_offset);
+        for slot in ReferenceFields::new(object) {
+            *slot = forwarded_address(*slot, base, end, scratch);
+        }
     }
 }
 
 unsafe fn slide(base: *mut u8, scratch: &Scratch) {
     // Ascending order preserves unread objects. ptr::copy permits overlap.
     for relocation in &scratch.relocations {
-        let destination = base.add(relocation.new_offset);
+        let source = object_at_offset(base, relocation.old_offset);
+        let destination = object_at_offset(base, relocation.new_offset);
         core::ptr::copy(
-            base.add(relocation.old_offset),
-            destination,
+            source.cast::<u8>(),
+            destination.cast::<u8>(),
             relocation.size,
         );
-        (*(destination as *mut Object)).gc_bits &= !MARKED;
+        (*destination).gc_bits &= !MARKED;
     }
 }
 
@@ -236,11 +326,23 @@ mod tests {
         result
     }
 
-    unsafe fn set_field(obj: *mut Object, off: usize, val: *mut Object) {
-        *((obj as *mut u8).add(off) as *mut *mut Object) = val;
+    unsafe fn set_next(object: *mut Object, next: *mut Object) {
+        (*object.cast::<Node>()).next = next;
     }
-    unsafe fn get_field(obj: *mut Object, off: usize) -> *mut Object {
-        *((obj as *mut u8).add(off) as *mut *mut Object)
+
+    unsafe fn next(object: *mut Object) -> *mut Object {
+        (*object.cast::<Node>()).next
+    }
+
+    unsafe fn string_data(object: *mut Object) -> *mut u8 {
+        object.cast::<u8>().add(string_data_offset())
+    }
+
+    unsafe fn string_bytes(string: &StringObject) -> &[u8] {
+        let data = (string as *const StringObject)
+            .cast::<u8>()
+            .add(string_data_offset());
+        core::slice::from_raw_parts(data, string.length as usize)
     }
 
     // (i) A known live graph survives: reachable objects are preserved with
@@ -255,7 +357,7 @@ mod tests {
             lo_alloc(&NODE_CLASS); // dead prefix forces actual relocation
             let a = lo_alloc(&NODE_CLASS);
             let b = lo_alloc(&NODE_CLASS);
-            set_field(a, NEXT, b); // a.next = b
+            set_next(a, b); // a.next = b
             frame.roots[0] = a; // root = a
 
             lo_gc_collect();
@@ -264,11 +366,11 @@ mod tests {
             assert_ne!(a2, a, "root must be rewritten to the moved object");
             assert_eq!((*a2).class_descriptor, &NODE_CLASS as *const _);
 
-            let b2 = get_field(a2, NEXT);
+            let b2 = next(a2);
             assert!(!b2.is_null(), "interior pointer must survive");
             assert_ne!(b2, b, "interior pointer must be rewritten to b's new addr");
             assert_eq!((*b2).class_descriptor, &NODE_CLASS as *const _);
-            assert!(get_field(b2, NEXT).is_null(), "b.next was null");
+            assert!(next(b2).is_null(), "b.next was null");
 
             lo_pop_frame();
         });
@@ -315,7 +417,7 @@ mod tests {
             lo_alloc(&NODE_CLASS);
             let bytes: &[u8] = b"hello, Lisp-2";
             let s = bump_alloc_string(bytes.len() as u32);
-            let data = (s as *mut u8).add(string_data_offset());
+            let data = string_data(s);
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), data, bytes.len());
             frame.roots[0] = s;
 
@@ -326,8 +428,7 @@ mod tests {
             assert_eq!((*s2).class_descriptor, &LO_STRING_CLASS as *const _);
             let so = s2 as *const StringObject;
             assert_eq!((*so).length, bytes.len() as u32);
-            let data2 = (s2 as *const u8).add(string_data_offset());
-            let round = core::slice::from_raw_parts(data2, bytes.len());
+            let round = string_bytes(&*so);
             assert_eq!(
                 round, bytes,
                 "string bytes must round-trip through the copy"
@@ -348,14 +449,14 @@ mod tests {
             lo_alloc(&NODE_CLASS);
             let holder = lo_alloc(&NODE_CLASS);
             let empty = &LO_EMPTY_STRING as *const StringObject as *mut Object;
-            set_field(holder, NEXT, empty);
+            set_next(holder, empty);
             frame.roots[0] = holder;
 
             lo_gc_collect();
 
             let holder2 = frame.roots[0];
             assert_ne!(holder2, holder, "holder itself moves");
-            let field = get_field(holder2, NEXT);
+            let field = next(holder2);
             assert_eq!(
                 field, empty,
                 "immortal LO_EMPTY_STRING must not be relocated"
@@ -400,7 +501,7 @@ mod tests {
             let count = 3072 / core::mem::size_of::<Node>();
             for _ in 0..count {
                 let node = lo_alloc(&NODE_CLASS);
-                set_field(node, NEXT, frame.roots[0]);
+                set_next(node, frame.roots[0]);
                 frame.roots[0] = node;
             }
             lo_gc_collect();
@@ -408,7 +509,7 @@ mod tests {
             let mut node = frame.roots[0];
             for _ in 0..count {
                 assert!(!node.is_null());
-                node = get_field(node, NEXT);
+                node = next(node);
             }
             assert!(node.is_null());
             lo_pop_frame();
