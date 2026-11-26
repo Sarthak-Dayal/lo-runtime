@@ -1,0 +1,20 @@
+%==========================================================================
+\section{Scope-cut plan}
+If development falls behind, we cut features in this order while keeping
+every runtime check:
+\begin{itemize}
+  \item[--] \textbf{Cut Stage 1:} Defer dynamic object construction
+    (new\_instance), keeping ordinary construction with new. allocate is not
+    cut, since the serializer depends on it.
+  \item[--] \textbf{Cut Stage 2:} Restrict invoke to zero-argument methods.
+  \item[--] \textbf{Cut Stage 3:} Defer dynamic field mutation (setfield),
+    keeping read-only field access (getfield); this also gives up the
+    serializer's deserialization.
+  \item[--] \textbf{Cut Stage 4:} Defer per-parameter method type queries
+    (method\_param\_type), keeping basic metadata queries (class\_name,
+    field\_count, method\_name, method\_arity).
+\end{itemize}
+\textbf{Minimum demonstrable version:} reflect with the metadata queries, plus
+type-checked getfield and allocate, on the native target, with the specified runtime aborts
+and GC safety (Introspection).
+

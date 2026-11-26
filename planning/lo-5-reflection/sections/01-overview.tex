@@ -1,0 +1,32 @@
+%==========================================================================
+\section{Feature overview}
+In LO-4, every field access and method call must name its member in the source
+code. LO-5 reflection lets a program find an object's runtime class, list its
+fields and method signatures, read or write a field, call a method, or
+construct a new instance of an object, all by a name computed at runtime. Each
+reflective access states the type it expects, and the runtime checks it
+against the class's metadata before touching the object, aborting on a
+mismatch instead of misreading memory. Structural changes, such as defining
+classes, adding members or altering dispatch at runtime, are out of scope.
+\textbf{Motivating example:} a serializer for any subclass of a common root
+class \code{Serial}. It writes out an object's int, bool and String fields by
+name, writes \code{Serial}-typed reference fields as object IDs, and rebuilds
+each object from its class name with \code{allocate}, so no constructor
+convention is needed. Without reflection, every class would need its own save
+and load methods and a branch in a factory keyed on class names; with
+reflection, a class becomes serializable just by extending \code{Serial}.
+
+\textbf{Code Example:}
+\begin{lstlisting}
+class Counter (int count;) { int add(int k) { return (count + k); } }
+class Main () {
+  int main() {
+    Counter c; ReflectInfo info;
+    c = new Counter(3); info = reflect(c);
+    out.print_string(info.class_name());   // "Counter"
+    setfield(int, c, "count", 7);
+    return invoke(int, c, "add", 5);       // 12
+  }
+}
+\end{lstlisting}
+

@@ -1,0 +1,82 @@
+%==========================================================================
+\section{Test plan}
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}>{\raggedright}p{3.4cm} >{\raggedright}X X@{}}
+\toprule
+\textbf{Test Case Name} & \textbf{Description} & \textbf{Expected Outcome} \\
+\midrule
+1. Subclass \& Parent Introspection &
+  Stores a subclass instance in a parent-typed variable, calls
+  \code{reflect()} on it, and prints \code{class\_name()} and
+  \code{parent\_name()}. &
+  Prints the subclass name, then the parent name. Exit code 0. \\
+\midrule
+2. Inherited Field \& Overridden Method Enumeration &
+  Queries ReflectInfo field and method counts on a class with inherited
+  members and overridden methods. &
+  Fields are listed parent-first; each override appears once; arities and
+  signatures print as expected. Exit code 0. \\
+\midrule
+3. Scalar Field Read/Write Round-trip &
+  Performs setfield and getfield on int and bool fields using dynamic string
+  names. &
+  Values mutate correctly without corrupting adjacent memory offsets. Exit
+  code 0. \\
+\midrule
+4. Reference Field Mutation \& GC Aliasing &
+  Uses setfield to set a class-typed field to a subclass instance and then to
+  null, triggering GC in between. &
+  Reference identity preserved; object kept alive during GC cycle; null
+  stored safely. Exit code 0. \\
+\midrule
+5. Multi-Argument Method Invocation &
+  Calls methods by name with several arguments (including a subclass value
+  passed to a parent-typed parameter), in both the value and void forms. &
+  The overriding method runs, arguments arrive correctly, and the expected
+  result is returned. Exit code 0. \\
+\midrule
+6. Reflective Construction via new\_instance &
+  Constructs a subclass by name with \code{new\_instance(Parent, "Child", \ldots)}
+  using constructor arguments. &
+  The object is allocated and initialized (including String fields defaulting
+  to \code{""}), and \code{class\_name()} reports Child. Exit code 0. \\
+\midrule
+7. Static Semantics Negatives &
+  Section 4 ill-formed program: \code{setfield(int, b, "count", true)}. &
+  Rejected at compile time with \code{E\_REFLECT\_VALUE\_TYPE}. \\
+\midrule
+8. Dynamic Validation Failure Sequence &
+  Separate runs with a missing member name, a wrong requested type, a wrong
+  argument count, a new\_instance or allocate of a class that is not a
+  subclass of T, and a setfield of a plain Serial into a Node-typed field. &
+  Each aborts with exit code 140 and the matching \code{lo\_reflect: <reason>};
+  no field is written and no body runs. \\
+\midrule
+9. Null Receiver Side-effects &
+  Calls invoke on a null receiver, with arguments that have visible side
+  effects (e.g.\ printing); a separate run calls \code{reflect(null)}. &
+  The argument side effects occur left to right, then the program aborts with
+  exit code 140 (null receiver); \code{reflect(null)} aborts the same way. \\
+\midrule
+10. Supertype Field Access &
+  With field next declared Node (Node extends Serial), prints
+  \code{getfield(Serial, o, "next") = n} and calls
+  \code{setfield(Serial, o, "next", m)} with a Node m. &
+  Prints true; the setfield succeeds. Exit code 0. \\
+\midrule
+11. Reflective Allocation via allocate &
+  In a loop that forces collections, calls \code{allocate(Parent, "Child")},
+  where Child's constructor prints a line, and prints \code{class\_name()}
+  and each field. &
+  Prints Child, then 0, false, \code{""}, and true for \code{(field = null)};
+  the constructor's line never appears. Exit code 0. \\
+\midrule
+12. Serializer Round-trip &
+  Serializes a small Serial graph with a shared node and a cycle,
+  deserializes it, and prints the rebuilt graph's fields. &
+  Output matches the original's printout; the shared node appears once. Exit
+  code 0. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+

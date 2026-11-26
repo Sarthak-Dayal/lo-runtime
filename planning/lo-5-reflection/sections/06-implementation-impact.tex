@@ -1,0 +1,83 @@
+%==========================================================================
+\section{Implementation impact, per component}
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{2.7cm} l X@{}}
+\toprule
+\textbf{Component} & \textbf{Scale} & \textbf{Subsystem Architectural Impact} \\
+\midrule
+Lexer & Minor &
+  Add the reserved keywords \code{reflect}, \code{getfield}, \code{setfield},
+  \code{invoke}, \code{new\_instance}. \\
+\midrule
+Parser & Minor &
+  Add the six keyword-led productions from \S3; argument lists reuse
+  \nt{Actuals}. \\
+\midrule
+Type Checker & Minor &
+  Add the Section 4 rules for the new nodes (including T-Allocate) and the
+  synthetic ReflectInfo
+  class (reusing the Input/Output preamble mechanism), and emit the
+  \code{E\_REFLECT\_*} diagnostics.
+  Record each argument's static type on the node for codegen. Member lookup,
+  arity and argument types are checked at runtime, not here. \\
+\midrule
+WASM Codegen & None &
+  LO-5 reflection targets native x86-64 only. The WASM back end is P1's
+  one-pass emitter, and supporting reflection there would duplicate the
+  metadata tables and indirect calls for a different object layout (12-byte
+  header, 32-bit pointers) without adding new design content. The WASM
+  compiler rejects programs that use reflection with an ``unsupported on WASM
+  target'' diagnostic; LO-4 WASM code generation is unchanged. \\
+\midrule
+Native Codegen & Substantial &
+  Emit read-only metadata tables into \code{.rodata} (field names, types and
+  offsets; method names, signatures and vtable slots; constructors; a
+  class-name table), leaving ClassDescriptor unchanged. Each reflective
+  operation lowers to a runtime-helper call that passes the arguments' static
+  types, with live pointers rooted as for any runtime call. For invoke and
+  new\_instance, the helper returns a validated function pointer, and codegen
+  makes an indirect call whose signature is known from T and the argument
+  types. For new\_instance only, each constructor gets a small
+  construct function (the code new emits), so new\_instance is
+  an indirect call like invoke. allocate lowers to a single runtime-helper
+  call with no indirect call. \\
+\midrule
+Shared Runtime: Metadata \& ReflectInfo & Moderate &
+  Add \code{lo\_reflect\_*} entry points alongside the core ABI (ABI \S5).
+  Metadata lookup from an object, reached through its ClassDescriptor
+  (see Metadata Layout, \S5), and from a class name. ReflectInfo allocation and its
+  indexed queries (\S4); an out-of-range index aborts. \\
+\midrule
+Shared Runtime: Checked Access & Moderate &
+  Typed field helpers for getfield and setfield. The requested type must
+  match the field's declared type: equality for int, bool and String, and
+  for a class-typed field, a walk up the descriptor parent chain (as
+  \code{lo\_instanceof} does) to confirm the field is declared T or a
+  subclass of T. setfield also checks that the value is null or that its
+  runtime class is the field's declared type or a subclass of it. Reference
+  writes go through \code{lo\_gc\_write\_barrier} after validation. \\
+\midrule
+Shared Runtime: Invocation \& Construction & Moderate &
+  Method lookup that validates arity and argument types and returns a
+  function pointer for codegen's indirect call. allocate looks up the class
+  by name, checks it is T or a subclass of T, allocates through
+  \code{lo\_alloc} and sets String fields to the empty string, running no
+  constructor. new\_instance additionally looks up a constructor by arity;
+  constructor metadata is needed only by new\_instance (Cut Stage 1). \\
+\midrule
+Shared Runtime: Aborts \& GC & Minor &
+  A dedicated abort helper prints \code{lo\_reflect: <reason>} and exits
+  with 140 for every reflective failure, including a null receiver for
+  invoke, getfield, setfield and reflect; it is registered in
+  \code{error-codes.md}. Helpers that allocate root their own pointers. No
+  core entry point, object header or collector changes. \\
+\midrule
+DWARF Emission & None &
+  No new debug attribute modifications required for LO-5. \\
+\midrule
+Debugger Frontend & None &
+  Debugger interface remains unchanged for reflection operations. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+

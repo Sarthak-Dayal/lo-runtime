@@ -1,0 +1,59 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.65in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,array,tabularx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+\usepackage{titlesec}
+
+\setlist{nosep,leftmargin=1.4em}
+\titlespacing*{\section}{0pt}{1.1ex}{0.5ex}
+\titlespacing*{\subsection}{0pt}{0.9ex}{0.3ex}
+\setlength{\parskip}{0.3em}
+\setlength{\parindent}{0pt}
+
+\lstdefinestyle{code}{
+  basicstyle=\ttfamily\footnotesize,
+  columns=fullflexible,
+  keepspaces=true,
+  frame=single,
+  rulecolor=\color{black!30},
+  backgroundcolor=\color{black!3},
+  xleftmargin=0.3em, xrightmargin=0.3em,
+  aboveskip=0.4em, belowskip=0.2em,
+  breaklines=true
+}
+\lstset{style=code}
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\nt}[1]{$\langle$#1$\rangle$}          % grammar nonterminal
+\newcommand{\tm}[1]{\mathtt{#1}}                   % monospace inside math
+% Inference rule: premises separated by \\ (stacked) or \quad (inline).
+\newcommand{\infrule}[2]{\dfrac{\begin{array}{c}#1\end{array}}{#2}}
+
+\title{\vspace{-1.2em}\textbf{LO-5 Functional Specification Document: Reflections}\vspace{-0.4em}}
+\author{Group 6, CS 378H, Fall 2026\\[0.2em]
+  \textbf{Team:} Neha, Jay, Rahik, Sarthak}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-2em}
+
+\input{sections/01-overview}
+\input{sections/02-reference-design}
+\input{sections/03-grammar}
+\input{sections/04-static-semantics}
+\input{sections/05a-dynamic-semantics}
+\input{sections/05b-big-step-rules}
+\input{sections/06-implementation-impact}
+\input{sections/07-test-plan}
+\input{sections/08-scope-cut}
+\input{sections/09-roles}
+\input{sections/10-risk-register}
+
+\end{document}

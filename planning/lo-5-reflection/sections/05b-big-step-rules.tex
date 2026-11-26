@@ -1,0 +1,164 @@
+\subsection*{Formal Operational Inference Rules (Big-Step Semantics)}
+We extend LO's big-step relation
+$\langle e, \rho, H\rangle \Downarrow \langle v, H'\rangle$. A configuration
+carries:
+\begin{itemize}
+  \item[--] the environment $\rho$, which maps variables to values;
+  \item[--] the heap $H$, which maps objects to their class and fields;
+  \item[--] fixed metadata $M$: each class's fields, methods and constructors,
+    plus a table from class names to classes.
+\end{itemize}
+
+\textbf{Reflect Evaluation}
+\[
+\infrule{
+  \langle \tm{expr}, \rho, H\rangle \Downarrow \langle \tm{object}, H_1\rangle \\
+  \tm{object} \neq \tm{null} \\
+  C = \tm{class}_{H_1}(\tm{object}) \\
+  \tm{allocate\_info}(C, H_1) \Downarrow \langle \tm{info}, H_2\rangle
+}{
+  \langle \tm{reflect}(\tm{object}), \rho, H\rangle \Downarrow \langle \tm{info}, H_2\rangle
+}
+\]
+{\small *\textbf{\code{allocate\_info(C, H)}} returns a fresh object q and the
+heap H extended with $q \mapsto \tm{ReflectInfo}(C)$.}
+
+\textbf{Field Read (\code{getfield})}
+\[
+\infrule{
+  \langle \tm{expr}, \rho, H\rangle \Downarrow \langle \tm{object}, H_1\rangle \\
+  \langle \tm{name\_expr}, \rho, H_1\rangle \Downarrow \langle \tm{name\_str}, H_2\rangle \\
+  \tm{object} \neq \tm{null} \\
+  M[\tm{class}_{H_2}(\tm{object})].\tm{field}(\tm{name\_str}) = (\tm{loc}, \tm{declared\_type}) \\
+  \tm{declared\_type} \le T
+}{
+  \langle \tm{getfield}(T, \tm{expr}, \tm{name\_expr}), \rho, H\rangle \Downarrow
+  \langle H_2[\tm{object}].\tm{fields}[\tm{loc}], H_2\rangle
+}
+\]
+
+\textbf{Field Write (\code{setfield})}
+\[
+\infrule{
+  \langle \tm{expr}, \rho, H\rangle \Downarrow \langle \tm{object}, H_1\rangle \\
+  \langle \tm{name\_expr}, \rho, H_1\rangle \Downarrow \langle \tm{name\_str}, H_2\rangle \\
+  \langle \tm{value\_expr}, \rho, H_2\rangle \Downarrow \langle \tm{new\_value}, H_3\rangle \\[1ex]
+  \tm{object} \neq \tm{null} \\
+  M[\tm{class}_{H_3}(\tm{object})].\tm{field}(\tm{name\_str}) = (\tm{loc}, \tm{declared\_type}) \\
+  \tm{declared\_type} \le T \\
+  \tm{new\_value} = \tm{null} \lor \tm{class}_{H_3}(\tm{new\_value}) \le \tm{declared\_type} \\
+  H_4 = H_3[\tm{object}.\tm{fields}[\tm{loc}] \mapsto \tm{new\_value}]
+}{
+  \langle \tm{setfield}(T, \tm{expr}, \tm{name\_expr}, \tm{value\_expr});, \rho, H\rangle
+  \Downarrow_{\tm{stmt}} \langle \rho, H_4\rangle
+}
+\]
+{\small *The \textbf{\code{new\_value}} premise is needed because the static type
+check only bounds the value by T; the runtime therefore checks the value's
+actual class against the field's declared type.}
+
+\textbf{Method Invocation Expression (\code{invoke})}
+\[
+\infrule{
+  \langle \tm{expr}, \rho, H\rangle \Downarrow \langle \tm{object}, H_1\rangle \\
+  \langle \tm{name\_expr}, \rho, H_1\rangle \Downarrow \langle \tm{name\_str}, H_2\rangle \\
+  \langle \tm{arg\_expr}_i, \rho, H_{i+1}\rangle \Downarrow \langle \tm{arg\_value}_i, H_{i+2}\rangle
+    \text{ for } i = 1, \ldots, k, \text{ in order} \\[1ex]
+  \tm{object} \neq \tm{null} \\
+  M[\tm{class}_{H_{k+2}}(\tm{object})].\tm{method}(\tm{name\_str}) =
+    (\tm{method\_body}, [\tm{param}_1{:}\tm{param\_type}_1, \ldots, \tm{param}_m{:}\tm{param\_type}_m], \\
+    \tm{declared\_type}) \\[1ex]
+  \tm{declared\_type} = T, \quad T \neq \tm{void}, \quad k = m \\
+  \tm{compatible}(\tm{arg\_type}_i, \tm{param\_type}_i) \text{ for every } i = 1, \ldots, k \\
+  \tm{ordinary\_call}(\tm{method\_body}, \tm{object}, [\tm{arg\_value}_1, \ldots, \tm{arg\_value}_k], H_{k+2})
+    \Downarrow \langle \tm{result}, H'\rangle
+}{
+  \langle \tm{invoke}(T, \tm{expr}, \tm{name\_expr}, \tm{arg\_expr}_1, \ldots, \tm{arg\_expr}_k), \rho, H\rangle
+  \Downarrow \langle \tm{result}, H'\rangle
+}
+\]
+{\small *\textbf{\code{compatible(arg\_type, param\_type)}} checks whether the
+argument's recorded static type is assignment-compatible with the parameter
+type.\\
+*\textbf{\code{ordinary\_call(method\_body, object, args, H)}} executes the
+selected method with \code{this} bound to object and parameters bound to args,
+returning its result and updated heap.}
+
+\textbf{Method Invocation Statement (\code{invoke} void)}
+\[
+\infrule{
+  \langle \tm{expr}, \rho, H\rangle \Downarrow \langle \tm{object}, H_1\rangle \\
+  \langle \tm{name\_expr}, \rho, H_1\rangle \Downarrow \langle \tm{name\_str}, H_2\rangle \\
+  \langle \tm{arg\_expr}_i, \rho, H_{i+1}\rangle \Downarrow \langle \tm{arg\_value}_i, H_{i+2}\rangle
+    \text{ for } i = 1, \ldots, k, \text{ in order} \\[1ex]
+  \tm{object} \neq \tm{null} \\
+  M[\tm{class}_{H_{k+2}}(\tm{object})].\tm{method}(\tm{name\_str}) =
+    (\tm{method\_body}, [\tm{param}_1{:}\tm{param\_type}_1, \ldots, \tm{param}_m{:}\tm{param\_type}_m], \\
+    \tm{declared\_type}) \\[1ex]
+  \tm{declared\_type} = \tm{void}, \quad k = m \\
+  \tm{compatible}(\tm{arg\_type}_i, \tm{param\_type}_i) \text{ for every } i = 1, \ldots, k \\
+  \tm{ordinary\_call}(\tm{method\_body}, \tm{object}, [\tm{arg\_value}_1, \ldots, \tm{arg\_value}_k], H_{k+2})
+    \Downarrow \langle \tm{unit}, H'\rangle
+}{
+  \langle \tm{invoke}(\tm{void}, \tm{expr}, \tm{name\_expr}, \tm{arg\_expr}_1, \ldots, \tm{arg\_expr}_k);, \rho, H\rangle
+  \Downarrow_{\tm{stmt}} \langle \rho, H'\rangle
+}
+\]
+
+\textbf{Dynamic Construction (\code{new\_instance})}
+\[
+\infrule{
+  \langle \tm{name\_expr}, \rho, H\rangle \Downarrow \langle \tm{name\_str}, H_1\rangle \\
+  \langle \tm{arg\_expr}_i, \rho, H_i\rangle \Downarrow \langle \tm{arg\_value}_i, H_{i+1}\rangle
+    \text{ for } i = 1, \ldots, k, \text{ in order} \\[1ex]
+  \tm{target\_class} = \tm{lookup\_user\_class}(\tm{name\_str}), \quad \tm{compatible}(\tm{target\_class}, T) \\
+  \tm{constructor}(\tm{target\_class}, k) = \tm{selected\_ctor} \text{ with parameters }
+    [\tm{param\_type}_1, \ldots, \tm{param\_type}_k] \\[1ex]
+  \tm{compatible}(\tm{arg\_type}_i, \tm{param\_type}_i) \text{ for every } i = 1, \ldots, k \\[1ex]
+  \tm{construct}(\tm{target\_class}, \tm{selected\_ctor}, [\tm{arg\_value}_1, \ldots, \tm{arg\_value}_k], H_{k+1})
+    \Downarrow \langle \tm{object}, H'\rangle
+}{
+  \langle \tm{new\_instance}(T, \tm{name\_expr}, \tm{arg\_expr}_1, \ldots, \tm{arg\_expr}_k), \rho, H\rangle
+  \Downarrow \langle \tm{object}, H'\rangle
+}
+\]
+{\small *\textbf{\code{construct(target\_class, selected\_ctor, args, H)}}
+allocates an instance, initializes all fields to LO defaults, then executes the
+constructor and its delegation, returning the object and updated heap.}
+
+\textbf{Dynamic Allocation (\code{allocate})}
+\[
+\infrule{
+  \langle \tm{name\_expr}, \rho, H\rangle \Downarrow \langle \tm{name\_str}, H_1\rangle \\
+  \tm{target\_class} = \tm{lookup\_user\_class}(\tm{name\_str}), \quad \tm{target\_class} \le T \\
+  \tm{allocate\_default}(\tm{target\_class}, H_1) \Downarrow \langle \tm{object}, H_2\rangle
+}{
+  \langle \tm{allocate}(T, \tm{name\_expr}), \rho, H\rangle \Downarrow \langle \tm{object}, H_2\rangle
+}
+\]
+{\small *\textbf{\code{allocate\_default(C, H)}} allocates an instance of C and
+initializes all fields to LO defaults (the empty string for String fields),
+without running a constructor, returning the object and updated heap.}
+
+
+\subsection*{Metadata Layout}
+Reflection metadata lives in read-only side tables
+in \code{.rodata}, keyed by ClassDescriptor address, so ClassDescriptor and
+the object header are unchanged. Per class, the tables record field names,
+type tags and byte offsets (inherited first, in declaration order); method
+names, return and parameter tags, and vtable slots (in vtable order); and
+constructor arities and parameter tags, which only new\_instance uses. A
+single class table maps each descriptor to its metadata and each class name
+to its descriptor. The runtime searches it by linear scan, or sorts it by
+descriptor address at initialization and uses binary search.
+
+\textbf{Type tags.} Each type is one pointer-sized word: small integers for
+void, int, bool, String and the null type, and the ClassDescriptor address
+for a class (aligned, so never a small integer). An exact match is word
+equality. A subtype check $A \le P$ holds if the words are equal, if $A$ is
+the null type and $P$ is a class, or if both are classes and $P$ is on $A$'s
+descriptor parent chain (the walk \code{lo\_instanceof} does). String is not
+nullable in LO: null is assignable only to class types. Each reflective call
+site passes a \code{.rodata} array of its arguments' static tags, with its
+length, to the runtime helper; the argument values are passed separately,
+already evaluated.
