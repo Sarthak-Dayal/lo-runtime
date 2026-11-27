@@ -23,7 +23,7 @@
 \maketitle
 \vspace{-2.2em}
 
-\textbf{How to use this.} Each row is a component one person can own end to end. Fill in the
+\textbf{How to use this.} Each row is a numbered \emph{work package} (P4.$n$ or P5.$n$) one person can own end to end. Fill in the
 Owner column together. Size is a rough effort estimate (S/M/L). P4 (debugger) is due
 \textbf{Mon 11/30}; P5 (LO-5 reflection) has no deadline yet. Jay's \code{p4-g-mode.md} specifies the compiler side. Decided so far: reflection code is
 emitted only in programs that use it, and P5 work lives on \code{lo5/integration} until
@@ -32,44 +32,44 @@ emitted only in programs that use it, and P5 work lives on \code{lo5/integration
 \section*{P4: Debugger (due Mon 11/30)}
 \begin{tabularx}{\linewidth}{@{}L{4.6cm} X c c@{}}
 \toprule
-\textbf{Component} & \textbf{What it covers} & \textbf{Size} & \textbf{Owner} \\
+\textbf{Work package} & \textbf{What it covers} & \textbf{Size} & \textbf{Owner} \\
 \midrule
 \multicolumn{4}{@{}l}{\textit{Compiler \code{-g} mode (steps S1--S24 in Jay's \code{planning/p4-g-mode.md})}} \\
-Plumbing + declaration lines & \code{-g} flag threaded through stages; field/param/local declaration lines; \code{DebugInfo} side table (S3--S6, S9) & M & \own \\
-Terminator lines & \code{BasicBlock.terminator\_line} and the \code{-g} line rules in lowering (S8) & S & \own \\
-Variable homes & Keep named assignments; pin named values to fixed slots and GC root slots in both allocators; prologue reorder (S10--S14). Riskiest lane: touches GC and allocation & L & \own \\
-CFI + line table & Typed \code{.loc}; three-state CFI; function bounds, generated code first; \code{.loc} emission rules; golden line-table tests (S15--S19) & M & \own \\
-DWARF emitter & New \code{codegen/dwarf.rs}: unit header, types, subprograms, params/locals, globals per Chapter 9 (S20--S22) & L & \own \\
-Validation & \code{llvm-dwarfdump --verify} on linked binaries, P1--P3 suites under \code{-g}, gdb smoke test on the course host (S23--S24) & S & \own \\
+\textbf{P4.1} Plumbing + declaration lines & \code{-g} flag threaded through stages; field/param/local declaration lines; \code{DebugInfo} side table (S3--S6, S9) & M & \own \\
+\textbf{P4.2} Terminator lines & \code{BasicBlock.terminator\_line} and the \code{-g} line rules in lowering (S8) & S & \own \\
+\textbf{P4.3} Variable homes & Keep named assignments; pin named values to fixed slots and GC root slots in both allocators; prologue reorder (S10--S14). Riskiest lane: touches GC and allocation & L & \own \\
+\textbf{P4.4} CFI + line table & Typed \code{.loc}; three-state CFI; function bounds, generated code first; \code{.loc} emission rules; golden line-table tests (S15--S19) & M & \own \\
+\textbf{P4.5} DWARF emitter & New \code{codegen/dwarf.rs}: unit header, types, subprograms, params/locals, globals per Chapter 9 (S20--S22) & L & \own \\
+\textbf{P4.6} Validation & \code{llvm-dwarfdump --verify} on linked binaries, P1--P3 suites under \code{-g}, gdb smoke test on the course host (S23--S24) & S & \own \\
 \midrule
 \multicolumn{4}{@{}l}{\textit{Debugger crate (new \code{debugger/})}} \\
-Process interface & ptrace launch (no ASLR), memory/register/debug-register access, wait/stop reasons; mock for macOS testing & M & \own \\
-ELF + DWARF parsers & \code{.symtab}, \code{.debug\_abbrev}/\code{.debug\_info}, line program, CFI (\code{.eh\_frame}) & L & \own \\
-Breakpoints + stepping & int3 plant/step-over, break by function/\code{file:line}/address; \code{stepi}/\code{step}/\code{next} matching gdb & L & \own \\
-Backtrace + inspection & CFI unwinding, LO-only frames; \code{print}, \code{info locals}, \code{x/1dw}, \code{set var}; value renderer & M & \own \\
-Watchpoints & dr0--dr3 slots, dr7/dr6, old/new value, write site & M & \own \\
-Front ends & Batch script $\rightarrow$ exact transcript grammar; interactive prompt & M & \own \\
+\textbf{P4.7} Process interface & ptrace launch (no ASLR), memory/register/debug-register access, wait/stop reasons; mock for macOS testing & M & \own \\
+\textbf{P4.8} ELF + DWARF parsers & \code{.symtab}, \code{.debug\_abbrev}/\code{.debug\_info}, line program, CFI (\code{.eh\_frame}) & L & \own \\
+\textbf{P4.9} Breakpoints + stepping & int3 plant/step-over, break by function/\code{file:line}/address; \code{stepi}/\code{step}/\code{next} matching gdb & L & \own \\
+\textbf{P4.10} Backtrace + inspection & CFI unwinding, LO-only frames; \code{print}, \code{info locals}, \code{x/1dw}, \code{set var}; value renderer & M & \own \\
+\textbf{P4.11} Watchpoints & dr0--dr3 slots, dr7/dr6, old/new value, write site & M & \own \\
+\textbf{P4.12} Front ends & Batch script $\rightarrow$ exact transcript grammar; interactive prompt & M & \own \\
 \midrule
 \multicolumn{4}{@{}l}{\textit{Deliverables}} \\
-Test triples & $\ge 8$ program/script/golden triples, incl.\ watchpoint and recursive backtrace & M & \own \\
-Design note + README & 2--3 page note; language declaration; viva prep & S & \own \\
+\textbf{P4.13} Test triples & $\ge 8$ program/script/golden triples, incl.\ watchpoint and recursive backtrace & M & \own \\
+\textbf{P4.14} Design note + README & 2--3 page note; language declaration; viva prep & S & \own \\
 \bottomrule
 \end{tabularx}
 
 \section*{P5: LO-5 Reflection (on \code{lo5/integration})}
 \begin{tabularx}{\linewidth}{@{}L{4.6cm} X c c@{}}
 \toprule
-\textbf{Component} & \textbf{What it covers} & \textbf{Size} & \textbf{Owner} \\
+\textbf{Work package} & \textbf{What it covers} & \textbf{Size} & \textbf{Owner} \\
 \midrule
-Front end & Six keywords, productions P54--P60, AST/typed-AST nodes, type rules and \code{E\_REFLECT\_*} diagnostics & M & \own \\
-ReflectInfo + gating & Synthetic class via the preamble, the pre-scan gate, ten query helpers & M & \own \\
-Metadata tables & Record layouts (compiler + Rust, locked by tests), class table, field and method arrays, type tags & M & \own \\
-\code{getfield} / \code{setfield} & Lowering, typed runtime helpers, supertype match, value check, write barrier & M & \own \\
-\code{invoke} & Method lookup and validation, indirect call; zero-arg first, then $n$-arg & L & \own \\
-\code{allocate} & Lookup by name, subtype check, \code{lo\_alloc}, String defaults & S & \own \\
-\code{new\_instance} (Cut Stage 1) & Constructor metadata, construct functions, constructor lookup & M & \own \\
-WASM + interpreter & Reject reflection on WASM; interpreter rejects or implements (open decision) & S--M & \own \\
-Tests 1--12 + harness & \code{tests/lo5-reflection/}, exit-140 checks, serializer round-trip & M & \own \\
+\textbf{P5.1} Front end & Six keywords, productions P54--P60, AST/typed-AST nodes, type rules and \code{E\_REFLECT\_*} diagnostics & M & \own \\
+\textbf{P5.2} ReflectInfo + gating & Synthetic class via the preamble, the pre-scan gate, ten query helpers & M & \own \\
+\textbf{P5.3} Metadata tables & Record layouts (compiler + Rust, locked by tests), class table, field and method arrays, type tags & M & \own \\
+\textbf{P5.4} \code{getfield} / \code{setfield} & Lowering, typed runtime helpers, supertype match, value check, write barrier & M & \own \\
+\textbf{P5.5} \code{invoke} & Method lookup and validation, indirect call; zero-arg first, then $n$-arg & L & \own \\
+\textbf{P5.6} \code{allocate} & Lookup by name, subtype check, \code{lo\_alloc}, String defaults & S & \own \\
+\textbf{P5.7} \code{new\_instance} (Cut Stage 1) & Constructor metadata, construct functions, constructor lookup & M & \own \\
+\textbf{P5.8} WASM + interpreter & Reject reflection on WASM; interpreter rejects or implements (open decision) & S--M & \own \\
+\textbf{P5.9} Tests 1--12 + harness & \code{tests/lo5-reflection/}, exit-140 checks, serializer round-trip & M & \own \\
 \bottomrule
 \end{tabularx}
 
