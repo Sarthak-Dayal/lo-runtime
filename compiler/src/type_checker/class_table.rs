@@ -35,6 +35,7 @@ pub struct FieldInfo {
     pub name: String,
     pub ty: Type,
     pub owner: String,
+    pub line: u32,
 }
 
 /// An effective (possibly inherited) method: which class's signature won out

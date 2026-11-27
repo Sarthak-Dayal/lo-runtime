@@ -127,6 +127,7 @@ fn compute_effective(
             name: fname.clone(),
             ty: ftype.clone(),
             owner: name.to_string(),
+            line: *fline,
         });
     }
 
@@ -167,4 +168,40 @@ fn compute_effective(
     info.method_slot = method_slot;
     done.insert(name.to_string());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{lexer, parser, type_checker};
+
+    #[test]
+    fn effective_fields_keep_their_declaration_lines() {
+        let source = "class Main () {\n\
+                      \x20   int main() { return 0; }\n\
+                      }\n\
+                      class Base (\n\
+                      \x20   int count;\n\
+                      \x20   bool on;\n\
+                      ) { }\n\
+                      class Derived extends Base ( String tag; )\n\
+                      \x20   [ Derived() { super(0, false); } ] { }\n";
+        let tokens = lexer::tokenize(source).expect("lexes");
+        let program = parser::parse_program(&tokens).expect("parses");
+        let (_, table) = type_checker::check_program(program).expect("type checks");
+        let fields: Vec<_> = table
+            .get("Derived")
+            .expect("Derived")
+            .effective_fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.owner.as_str(), f.line))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                ("count", "Base", 5),
+                ("on", "Base", 6),
+                ("tag", "Derived", 8)
+            ]
+        );
+    }
 }
