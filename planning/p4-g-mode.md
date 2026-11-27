@@ -86,27 +86,33 @@ This doc lists everything the compiler (`compiler/`) needs so a `-g` build can b
     - `lower.rs` discards the statement lines of `If`/`While`/`Return`/`Break`.
 
     So `return 1;`, `return x;`, `if (x)`, `while (x)` and `break;` have no code tagged with their line.
-  - **Change:** add `terminator_pos: Option<(line, stmt)>` to `BasicBlock`, not to each `Terminator` variant. It has to carry the statement number (G5), because `return 1;`, `if (x)` and `break;` have no instructions; their terminator is where the statement starts, and where `prologue_end` goes if it's the first statement. Only about 11 `BasicBlock` literals exist, versus about 30 `Terminator` constructions in tests. Builder stamps **every** terminator, using one of three roles (store the role with the position):
-    - **Statement terminators** carry the statement's own `(line, stmt)` and can be the statement's entry (G10 decides): the `Branch` of an `if`/`while` test, a `return`'s `Return`, and a `break`'s `Jump`.
-    - **Expression-internal branches** carry the expression's `(line, stmt)` and are never an entry: the `Branch`es created by `choose` (`&&`, `||`, ternary), `null_guard`, `branch_if_equal`, and the division guards.
+  - **Change:** add `terminator_line: Option<u32>` to `BasicBlock`, not to each `Terminator` variant. Only about 11 `BasicBlock` literals exist, versus about 30 `Terminator` constructions in tests. `return 1;`, `if (x)` and `break;` have no instructions, so their terminator is the statement's only code, and it needs a line. Builder sets it as follows:
+    - **Statement terminators** get the statement's line: the `Branch` of an `if`/`while` test, a `return`'s `Return`, and a `break`'s `Jump`.
+    - **Expression-internal branches** get the expression's line: the `Branch`es created by `choose` (`&&`, `||`, ternary), `null_guard`, `branch_if_equal`, and the division guards.
       - Without this, `while ((done | (i < n)))` has a loop header (`cbr done`) with no position. It inherits the previous statement's line, so line 6 gets no row on iterations where `done` is false. In one case the header even maps to an unrelated `return` line.
-    - **Structural jumps** carry the owning `if`/`while` statement's `(line, stmt)`, but only for pc→line purposes, never as an entry: if-join jumps, `while` back-edges, empty-`else` jumps, and `Abort`, which takes the call's position. Without a position they show a foreign line in a backtrace or at a `stepi`.
-    - The implicit `Return(None)` at the end of a void body has no line of its own, since the AST records no closing brace. It takes the position of the body's last lowered statement, structurally, as `is_stmt 0`. `next` from that statement then runs through the return into the caller. (gas drops line-0 rows, so line 0 isn't an option; see G0.)
+    - **`Abort`** gets the line of the call it guards.
+    - **Structural jumps get no line** (`None`): the jump into a `while` test, if-joins, `while` back-edges, and empty-`else` jumps. If the jump into a loop carried the `while` line, it would be that line's *first* instruction, and the breakpoint would hit once instead of every iteration (G10's first-instruction rule). A jump with no line just keeps the previous instruction's line, which is harmless, since the debugger never stops on one except under `stepi`.
+    - **The implicit `Return(None)`** at the end of a void body takes the body's last statement's line. That line is already "seen", so it's never a stopping point, and `next` from that statement runs through the return into the caller. gas drops line-0 rows, so line 0 isn't an option (G0).
 
-    `dump.rs` must not print positions in default mode.
+    `dump.rs` must not print `terminator_line` in default mode.
   - *deps: none*
 
-- [ ] **G5 Number the statements on each instruction.**
-  - **Today:** `Instruction.line` is only "the line of the expression that produced this".
-  - **Change:**
-    - Add `stmt: u32` to `Instruction`: a per-function statement number (0 = prologue/generated) assigned by `Builder` as it lowers each statement. A statement starts wherever the number changes.
-    - `gc_roots` already copies `line` onto the `RootStore`/`RootLoad` it inserts, so copy `stmt` there too.
-    - Locals' zero-init (`Builder::new`) and parameter setup get `stmt` 0, which puts them before `prologue_end`. Statement 0 never produces a `.loc` of its own (G10).
-    - Keep a `stmt_line[stmt]` table: the line the *statement* starts on, from the AST statement, not its expression. For a multi-line statement such as `r =` on line 36 with `w.loop(1, false);` on line 37, the entry row must say 36, so that `break 36` resolves to it. The expression's own lines become later `is_stmt 0` rows.
-    - Add a constructor helper so the ~23 `Instruction { kind, line }` test literals keep compiling.
-  - **Why not a "starts statement" flag:** `remove_dead_copies` can delete the flagged instruction, and `gc_roots` inserts code before it, so a flag gets lost or ends up on the wrong instruction. A number survives both.
-  - Code after `return`/`break` is never lowered, so those lines get no rows. Write tests that expect this.
-  - *deps: G4*
+- [ ] **G5 Line rules for lowering (no new IR field).**
+  - **Today:** every instruction already carries `line`, the line of the sub-expression that produced it. That line survives `remove_dead_copies` and `gc_roots`, which copies it onto the root stores and loads it inserts.
+  - **Decision: no statement numbers.** G10 finds where each line's code starts by taking the first instruction emitted for that line in each function. Blocks are emitted in creation order, and a statement's own block is always created before any block its expression spawns, so the first instruction for a line is where that line's code begins. That holds even when later pieces of the same line land after other code, e.g. division guards created inside a then-branch end up after the else code.
+  - **Change (under `-g`):** locals' zero-init in `Builder::new` gets line 0 instead of the method's declaration line. Line 0 emits no `.loc`, so the zero-init stays under the function-entry row, and a one-line method like `int f() { return 1; }` still gets its body stopping point. This is `-g` only, because `--dump-ir` prints lines and the default dump must not change. It's the first change that needs the `-g` flag inside lowering.
+  - Code after `return`/`break` is never lowered, so those lines get no code. Write tests that expect this.
+  - **TODO, known limitation: statements split across lines.** LO allows them; the lexer treats newlines as spaces. Today each piece keeps its own line:
+    ```
+    36  r =
+    37      w.loop(1, false);
+    ```
+    The call is tagged 37 and comes first; the store into `r` is tagged 36 and comes last. With the first-instruction rule, `break 37` stops before the call, but `break 36` stops *after* the call, just before the store. It works, just in a surprising order. To fix it, under `-g` tag every instruction of a statement with one line. Decide which:
+    - **The first line (36).** `break 36` stops before the statement. `break 37` has no code, so it slides forward to the *next* statement, after this one has run.
+    - **The last line (37):** the largest line anywhere in the statement's expression, or in its condition for `if`/`while`. Breaking on any line of the statement stops before it runs, and a stop there reports 37. This matches gcc + gdb: a 2-line C statement checked in `lo-verify` was labeled entirely with its later line.
+
+    Either way, the statement's line is easy to get: the parser records each statement's first-token line (`parser.rs`), and every expression node carries its own line. Check the instructor's goldens for split statements before deciding.
+  - *deps: none*
 
 ## C. Named variables (IR → allocation → frame)
 
@@ -176,16 +182,16 @@ This doc lists everything the compiler (`compiler/`) needs so a `-g` build can b
 - [ ] **G10 Emit the line table from one place.**
   - **Today:** `select.rs` ignores `Instruction.line`. Blocks are emitted in creation order, and `if_statement` creates the `then`/`else` blocks before lowering the then-body. So blocks created *inside* the then-branch (choose, division, a nested `if`) land after the else code. With rows only at statement starts, that code would inherit the else branch's line.
   - **Change:** make `Selector::emit` the only place that emits `.loc`. It follows these rules (validated by simulating the real compiler's output on seven test programs):
-    1. **Track a per-function `seen` set of statement numbers.** The first position emitted for an unseen statement number is that statement's **entry**: emit `.loc 1 <stmt_line[stmt]> 0 is_stmt 1` and add the number to `seen`.
-       - Every other position change gets `is_stmt 0`. That covers continuation blocks after a label, expression-internal branches, and a statement's later lines.
-       - This is sound because a statement's entry block has the lowest index among its blocks, and blocks are laid out in creation order.
-       - Comparing against the previous `.loc` is not enough: `choose` blocks laid out after a later statement would get a second `is_stmt 1` row, and the debugger's `break`/`continue` would stop twice.
-    2. **Emit a `.loc` when `(line, stmt)` differs from the last one emitted, and at the first instruction after every block label** except block 0's. Write `is_stmt` explicitly every time, because gas's `is_stmt` is sticky.
-    3. **Structural positions** (G4) never become an entry and never add to `seen`. They emit a `.loc` (as `is_stmt 0`) only when they're the first code after a label.
-    4. **Statement 0** (prologue, zero-init) emits no `.loc`. It stays under the function-entry row. Otherwise gdb 12 and older stop at the zero-init row.
-    5. **A positioned terminator that emits no instruction** (a `break` jump that falls through) still emits `jmp <next label>` under `-g`, so the statement keeps its row. `jmp` is in the Chapter 8 subset; `nop` isn't listed.
-    6. **`prologue_end`** goes on the entry row of the first body statement that emits code, after the root setup and `lo_push_frame` (L22, §9.3).
-       - If that entry isn't in block 0, for example because the first statement is a `while` and block 0 falls into the loop header, `prologue_end` would land on code that runs every iteration, and `break <fn>` would hit each time. Instead, under `-g`, emit the block-0 fall-through as an explicit `jmp` to the header, carrying `.loc 1 <stmt_line> 0 is_stmt 0 prologue_end`. It runs once.
+    1. **Track a per-function `seen` set of lines.** The first instruction emitted for a line not yet seen is where the debugger stops for that line: emit `.loc 1 <line> 0 is_stmt 1` and add the line to `seen`.
+       - Every later instruction for an already-seen line that needs a `.loc` gets `is_stmt 0`: mapped to that line, but never a stopping point. That covers continuation blocks after a label, expression-internal branches laid out later, and the implicit return.
+       - Comparing against just the previous `.loc` is not enough. `choose` blocks laid out after a later statement would get a second stopping point, and the debugger would stop twice.
+       - Two statements on one line share one stopping point. That's fine: gdb's `next` doesn't stop twice on one line either, and the transcript only shows `FILE:L`.
+    2. **Emit a `.loc` when the line differs from the last one emitted, and at the first instruction after every block label** except block 0's. Write `is_stmt` explicitly every time, because gas's `is_stmt` is sticky.
+    3. **Instructions with no line** (structural jumps, G4) emit no `.loc`.
+    4. **Line 0** (the `-g` zero-init, G5) emits no `.loc`. It stays under the function-entry row. Otherwise gdb 12 and older stop at the zero-init row.
+    5. **A terminator with a line that emits no instruction** (a `break` jump that falls through) still emits `jmp <next label>` under `-g`, so the statement keeps its row. `jmp` is in the Chapter 8 subset; `nop` isn't listed.
+    6. **`prologue_end`** goes on the first instruction of the body, the first one with a nonzero line, after the root setup and `lo_push_frame` (L22, §9.3). It gets its own `.loc ... is_stmt 1 prologue_end` even when its line equals the declaration line (one-line methods).
+       - If that entry isn't in block 0, for example because the first statement is a `while` and block 0 falls into the loop header, `prologue_end` would land on code that runs every iteration, and `break <fn>` would hit each time. Instead, under `-g`, emit the block-0 fall-through as an explicit `jmp` to the header, carrying `.loc 1 <while line> 0 is_stmt 0 prologue_end`. It runs once.
        - If *no* statement emits code (`void nothing() { ; }`, or an empty explicit constructor), put `prologue_end` on the return code at the declaration line.
   - **File header:** emit `.file 0 "<comp_dir>" "<name>.lo"` and `.file 1 "<name>.lo"`, matching L22. Don't emit a free-standing `.loc` here: two `.loc`s in a row make gas write a spurious row at `.Ltext0`. Use `DW_AT_decl_file 1`. Use the basename, or a path relative to `comp_dir`, never an absolute build path (§9.4.1).
   - **§9.3 requirements this design meets:**
@@ -280,7 +286,7 @@ This doc lists everything the compiler (`compiler/`) needs so a `-g` build can b
   - *deps: G10–G13*
 
 - [ ] **G15 Write golden line-table tests.** For a few programs, assert the `.loc`/`is_stmt`/`prologue_end` sequence and the decoded line table. Seed programs should cover: short-circuit `while` headers, division in a loop, `break` falling through, a first-statement `while`, an empty method, and a multi-line statement. Check:
-  - exactly one `is_stmt 1` row per statement, and one per iteration for `while` tests;
+  - exactly one stopping point per line in each function, reached once per iteration for a `while` test;
   - no row for `else`, braces, join jumps or back-edges;
   - a `return 1;` row;
   - an `if (x)` row;
@@ -335,7 +341,7 @@ Lane A (safety)    S1 ───────────────────�
 Lane B (front end) S5 ─┐                                               │        │
                    S6 ─┼─→ S9 ───────────────┬──────────┬───────┐      │        │
                    S3 ─┘        ┌────────────┘          │       │      │        │
-                   S7 → S8 ─────┼──────────────→ S18 ──→ S19     │      │        │
+                   S8 ──────────┼──────────────→ S18 ──→ S19     │      │        │
 Lane C (homes)     S3 → S10                  ↑          │       │      │        │
                    S11 → S12 → S13 → S14 ────┼──────────┼──→ S22 │      │        │
 Lane D (emission)  S15 → S16 ────────────────┼──────────┼───────┼──→ S23 → S24 ←┘
@@ -344,20 +350,20 @@ Lane D (emission)  S15 → S16 ────────────────�
                    S9,S17 → S20 → S21 → S22 ─────────────────────┘──────┘
 ```
 
-**Start immediately, in parallel:** S1, S2, S3, S5, S6, S7, S11, S15. None of them depends on anything else.
+**Start immediately, in parallel:** S2, S5, S6, S8 (bringing S3's flag), S11, S15. None of them depends on anything else. S1 is done (kept as a local tool).
 
 ### Steps
 
 | # | Step | G-item | Main files | Depends on | Done when |
 |---|---|---|---|---|---|
-| **S1** | **Regression gate script.** Capture the default `--emit-asm`, `--emit-asm --spill-all` and `--dump-ir` for every corpus program into a golden dir. A script diffs against it and runs `cargo test`. | G17 | `scripts/` | — | The gate passes on unchanged `origin/main` |
+| **S1** ✅ | **Regression gate script** (done; kept as a local tool, not committed). It builds the baseline compiler from a git ref and the working tree, diffs `--emit-asm`, `--emit-asm --spill-all` and `--dump-ir` for every corpus program, and runs `cargo test`. | G17 | outside the repo | — | Passed on unchanged `main` (678 comparisons, 183 tests); a planted one-character selector change was caught (176 diffs) |
 | **S2** | **Strip the runtime archive's debug info** in `lo-build`: `objcopy --strip-debug` after the second cargo build, keeping `.eh_frame`. | G13 | `p3-grading-contract.sh` (+ P4 contract) | — | 0 members with `.debug_info`; 286 `.eh_frame` kept; P3 suite passes |
-| **S3** | **Add the `-g` flag and a `DebugMode`.** Parse it, then thread the mode (unused) through `build_ir → lower_program → insert_gc_roots → remove_dead_copies → allocate → emit_program → select_function → Frame::new`. | G1 | `codegen/driver.rs`, signatures | — | `-g` is accepted and its output equals default output |
-| **S4** | **`-g` toolchain flags and source path.** Pass `as --gdwarf-5` and `-Wl,--eh-frame-hdr` under `-g`, and pass the source path and comp_dir down to `emit_program`. | G1 | `codegen/driver.rs`, `codegen/mod.rs` | S3 | A `-g` binary has `.eh_frame_hdr` |
+| **S3** | **Add the `-g` flag and a `DebugMode`.** *Lands together with its first consumer (S8), not on its own, so no unused parameter is ever threaded through.* Parse it, then thread the mode (unused) through `build_ir → lower_program → insert_gc_roots → remove_dead_copies → allocate → emit_program → select_function → Frame::new`. | G1 | `codegen/driver.rs`, signatures | — | `-g` is accepted and its output equals default output |
+| **S4** | **`-g` toolchain flags and source path.** *Lands with S16/S18, when there is CFI and a line table for them to matter to.* Pass `as --gdwarf-5` and `-Wl,--eh-frame-hdr` under `-g`, and pass the source path and comp_dir down to `emit_program`. | G1 | `codegen/driver.rs`, `codegen/mod.rs` | S3 | A `-g` binary has `.eh_frame_hdr` |
 | **S5** | **Record field declaration lines** in `FieldInfo`, from `own_fields`. | G2 | `type_checker/class_table.rs`, `declarations.rs` | — | Unit test reads a field's line |
 | **S6** | **Record param and local declaration lines.** Add `formal_lines`/`local_lines` on the `TypedMethodDecl` struct and on `TypedConstructor::Explicit`. Don't change the interpreter or wasm. | G2 | `type_checker/typed_ast.rs`, `bodies.rs` | — | Interpreter and wasm unchanged; unit test |
-| **S7** | **Number the statements.** Add `stmt: u32` to `Instruction` (with a constructor helper for test literals), have `Builder` assign the numbers and keep `stmt_line[stmt]`, and make `gc_roots` copy `stmt`. `dump.rs` doesn't print it. | G5 | `ir/mod.rs`, `ir/lower.rs`, `ir/gc_roots.rs`, `ir/tests.rs` | — | Gate passes; IR test checks the numbers |
-| **S8** | **Stamp a position on every terminator.** Add `terminator_pos` with its role (statement / expression-internal / structural), set by `Builder` and by `choose`, `null_guard`, `branch_if_equal` and the division guards. The implicit `Return(None)` takes the last statement's position, structurally. | G4 | `ir/mod.rs`, `ir/lower.rs`, `ir/lower/operations.rs` | S7 | IR test: `return 1;`, `if (x)`, `while (a \| b)` and `break` all have positions |
+| ~~S7~~ | **Dropped.** Statement numbers aren't needed; G10 uses the first instruction for each line (see G5). Multi-line statements are a TODO in G5. | — | — | — | — |
+| **S8** | **Put lines on terminators**, plus the `-g` zero-init line 0. Add `terminator_line` on `BasicBlock`, set for statement terminators, expression-internal branches (`choose`, `null_guard`, `branch_if_equal`, division guards) and `Abort`; `None` for structural jumps. The implicit `Return(None)` takes the last statement's line. **The `-g` flag (S3) lands in this step**, as its first consumer. | G4, G5 | `ir/mod.rs`, `ir/lower.rs`, `ir/lower/operations.rs`, `codegen/driver.rs` | — | IR test: `return 1;`, `if (x)`, `while (a \| b)` and `break` have lines, and structural jumps don't; gate passes |
 | **S9** | **Build the `DebugInfo` side table** during lowering, under `-g`. Per function: kind, bare name, return type, declaration lines. Per variable: vreg, type, line, whether it's a param. Per class: parent, `instance_size`, its own fields with offsets. Plus the `in`/`out`/`err` addresses. | G3 | `ir/lower/program.rs`, new `ir/debug_info.rs` | S3, S5, S6 | Unit test on a small recursive program and a class hierarchy |
 | **S10** | **Keep named copies under `-g`:** `remove_dead_copies` skips copies whose `dst` has a name. | G6 | `ir/liveness.rs` | S3 | `-g` IR keeps `x = 5;` and the zero-inits; default unchanged |
 | **S11** | **Add a `PhysicalLocation::Root(slot)` variant.** `Frame::location` maps it to `Frame::root(slot)`. Nothing produces it yet. | G7 | `register_allocator/mod.rs`, `codegen/frame.rs` | — | Compiles; gate passes |
@@ -367,7 +373,7 @@ Lane D (emission)  S15 → S16 ────────────────�
 | **S15** | **Add a typed `Item::Loc` and make prologue/epilogue return `Item`s.** The other directives stay `Item::Directive`. | G9 | `codegen/x86.rs`, `print.rs`, `frame.rs` | — | Gate passes |
 | **S16** | **Three-state CFI for every function** under `-g`, using register numbers. No epilogue CFI. | G11 | `codegen/frame.rs`, `codegen/mod.rs` (wrapper) | S3, S15 | `readelf --debug-dump=frames` shows three rows per FDE |
 | **S17** | **Function bounds and layout under `-g`:** `.type`, `.size`, `.Lfunc_end_<sym>` and `.Ltext0`/`.Letext0`, and **emit generated functions first** (`main` wrapper, `lo_entry`, implicit constructors, IO methods). | G10 | `codegen/mod.rs`, `select.rs` | S3, S9 | `nm -n` shows generated code first; default order unchanged |
-| **S18** | **Emit the line table:** `.file 0`/`.file 1`, the `.Ldebug_line0` label, the function-entry row, and `Selector::emit`'s `.loc` rules 1–6 (the `seen` set, explicit `is_stmt`, the fall-through `break` `jmp`, `prologue_end` placement). | G10 | `codegen/select.rs`, `codegen/mod.rs` | S4, S7, S8, S9, S15, S17 | `llvm-dwarfdump --debug-line` shows the expected rows |
+| **S18** | **Emit the line table:** `.file 0`/`.file 1`, the `.Ldebug_line0` label, the function-entry row, and `Selector::emit`'s `.loc` rules 1–6 (the `seen` set, explicit `is_stmt`, the fall-through `break` `jmp`, `prologue_end` placement). | G10 | `codegen/select.rs`, `codegen/mod.rs` | S8, S9, S15, S17 | `llvm-dwarfdump --debug-line` shows the expected rows |
 | **S19** | **Golden line-table tests,** covering the G15 cases: one `is_stmt 1` row per statement, one per `while` iteration, none for generated code. | G15 | `compiler/tests/` | S18 | Tests pass |
 | **S20** | **DWARF emitter skeleton:** a typed DIE tree and serializer, the abbrev table, the unit header with label-difference length, the CU DIE (`DW_LANG_C99`, name, comp_dir, producer, `low_pc`/`high_pc`, `stmt_list`), and the `int`/`bool` base types. | G12 | new `codegen/dwarf.rs` | S9, S17 | `--verify` passes on a program with an empty CU; serializer unit tests |
 | **S21** | **Type DIEs:** pointer types, class types with `instance_size` and their own members at `FieldSlot.offset`, `DW_TAG_inheritance`, and the name-only `String` class. | G12 | `codegen/dwarf.rs` | S20 | `llvm-dwarfdump` shows the type table for a class hierarchy with inherited fields |
@@ -381,5 +387,5 @@ Lane D (emission)  S15 → S16 ────────────────�
 - **S3 makes every later `-g`-only change a one-line branch.** It's the only step most others need.
 - **The data-only steps (S5–S9, S11, S15) change no output.** They can land early and in any order.
 - **The variable-homes lane (S10–S14) is the riskiest code change.** It touches GC and the allocator, so it ends with a full `-g` suite run (S14) before any DWARF depends on it.
-- **The line table (S18) needs positions (S7, S8), declaration lines (S9) and layout (S17).** The DWARF emitter needs the homes (S13) for its locations.
+- **The line table (S18) needs terminator lines (S8), declaration lines (S9) and layout (S17).** The DWARF emitter needs the homes (S13) for its locations.
 - **The debugger team can start against S16 + S18 output** (CFI and line table) before S20–S22 exist. That's enough for breakpoints, stepping and an rbp/CFI backtrace. Locals and `print` need S22.
