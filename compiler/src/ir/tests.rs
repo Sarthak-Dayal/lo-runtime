@@ -36,18 +36,22 @@ fn example() -> ProgramIr {
                         then_block: BlockId(1),
                         else_block: BlockId(2),
                     },
+                    terminator_line: None,
                 },
                 BasicBlock {
                     instructions: vec![copy(1)],
                     terminator: Terminator::Jump(BlockId(3)),
+                    terminator_line: None,
                 },
                 BasicBlock {
                     instructions: vec![copy(2)],
                     terminator: Terminator::Jump(BlockId(3)),
+                    terminator_line: None,
                 },
                 BasicBlock {
                     instructions: vec![],
                     terminator: Terminator::Return(Some(Operand::Value(VirtualRegId(0)))),
+                    terminator_line: None,
                 },
             ],
         }],
@@ -302,19 +306,23 @@ fn assignment_analysis_handles_reverse_block_order_and_unreachable_predecessors(
         BasicBlock {
             instructions: vec![],
             terminator: Terminator::Return(Some(Operand::Value(VirtualRegId(0)))),
+            terminator_line: None,
         },
         // This unreachable path does not initialize v0 and must not affect b0.
         BasicBlock {
             instructions: vec![],
             terminator: Terminator::Jump(BlockId(0)),
+            terminator_line: None,
         },
         BasicBlock {
             instructions: vec![copy(7)],
             terminator: Terminator::Jump(BlockId(0)),
+            terminator_line: None,
         },
         BasicBlock {
             instructions: vec![],
             terminator: Terminator::Jump(BlockId(2)),
+            terminator_line: None,
         },
     ];
     program.validate().unwrap();
@@ -926,6 +934,7 @@ fn null_check_is_a_branch_to_an_abort_block() {
                 then_block: BlockId(1),
                 else_block: BlockId(2),
             },
+            terminator_line: None,
         },
         BasicBlock {
             instructions: vec![],
@@ -933,10 +942,12 @@ fn null_check_is_a_branch_to_an_abort_block() {
                 target: SymbolId(1),
                 args: vec![Operand::Symbol(SymbolId(2)), Operand::Int(4)],
             },
+            terminator_line: None,
         },
         BasicBlock {
             instructions: vec![],
             terminator: Terminator::Return(Some(Operand::Int(0))),
+            terminator_line: None,
         },
     ];
     p.validate().unwrap();
@@ -1032,4 +1043,105 @@ fn dead_copy_removal_preserves_calls_with_unused_results() {
     liveness::remove_dead_copies(function);
     assert!(matches!(function.blocks[0].instructions[0].kind,
         InstructionKind::Call { .. }));
+}
+
+fn lowered(source: &str, debug: DebugMode) -> ProgramIr {
+    let tokens = crate::lexer::tokenize(source).expect("lexes");
+    let program = crate::parser::parse_program(&tokens).expect("parses");
+    let (typed, classes) = crate::type_checker::check_program(program).expect("type checks");
+    lower::lower_program(&typed, &classes, crate::layout::NATIVE, debug)
+        .expect("lowers")
+        .into_program()
+}
+
+fn function<'p>(program: &'p ProgramIr, symbol: &str) -> &'p FunctionIr {
+    program
+        .functions
+        .iter()
+        .find(|f| program.symbols[f.symbol.0].name == symbol)
+        .expect(symbol)
+}
+
+const TERMINATOR_LINES_SOURCE: &str = "class Main () {
+    int main() { return 0; }
+}
+class T () {
+    int f(bool a, bool b) {
+        int r;
+        r = 0;
+        if (a) {
+            r = 1;
+        } else {
+            r = 2;
+        }
+        while ((a | b)) {
+            break;
+        }
+        return 1;
+    }
+    void g() {
+        int k;
+        k = 3;
+    }
+}
+";
+
+#[test]
+fn terminators_carry_their_statement_lines_and_connecting_jumps_carry_none() {
+    let program = lowered(TERMINATOR_LINES_SOURCE, DebugMode::Off);
+    let f = function(&program, "lo_method_1_T_1_f");
+    let ends: Vec<(&str, Option<u32>)> = f
+        .blocks
+        .iter()
+        .map(|block| {
+            let kind = match block.terminator {
+                Terminator::Jump(_) => "jump",
+                Terminator::Branch { .. } => "branch",
+                Terminator::Return(_) => "return",
+                Terminator::Abort { .. } => "abort",
+            };
+            (kind, block.terminator_line)
+        })
+        .collect();
+    // if (a): line 8; the `|` and the while test: line 13; break: 14; return 1: 16.
+    assert!(ends.contains(&("branch", Some(8))), "{ends:?}");
+    assert!(ends.contains(&("branch", Some(13))), "{ends:?}");
+    assert!(ends.contains(&("jump", Some(14))), "{ends:?}");
+    assert!(ends.contains(&("return", Some(16))), "{ends:?}");
+    // Every other jump only connects blocks: the if join, the jump into the loop
+    // test, the `|`'s join and the loop's back edge.
+    let jumps_with_lines = ends
+        .iter()
+        .filter(|(kind, line)| *kind == "jump" && line.is_some())
+        .count();
+    assert_eq!(
+        jumps_with_lines, 1,
+        "only `break` is a jump with a line: {ends:?}"
+    );
+
+    // The implicit return closing a void body takes the last statement's line.
+    let g = function(&program, "lo_method_1_T_1_g");
+    let last = g.blocks.last().expect("g has blocks");
+    assert!(matches!(last.terminator, Terminator::Return(None)));
+    assert_eq!(last.terminator_line, Some(20));
+}
+
+#[test]
+fn debug_build_moves_local_zero_init_to_line_0() {
+    let init_line = |debug| {
+        let program = lowered(TERMINATOR_LINES_SOURCE, debug);
+        let f = function(&program, "lo_method_1_T_1_f");
+        let first = &f.blocks[f.entry.0].instructions[0];
+        assert!(
+            matches!(first.kind, InstructionKind::Copy { .. }),
+            "zero-init of r"
+        );
+        first.line
+    };
+    assert_eq!(
+        init_line(DebugMode::Off),
+        5,
+        "default build: the method's line"
+    );
+    assert_eq!(init_line(DebugMode::On), GENERATED_LINE);
 }

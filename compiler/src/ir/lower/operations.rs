@@ -204,21 +204,27 @@ impl Builder<'_, '_> {
         );
         let abort = self.block();
         let next = self.block();
-        self.finish(Terminator::Branch {
-            condition: Operand::Value(condition),
-            then_block: abort,
-            else_block: next,
-        });
+        self.finish(
+            Terminator::Branch {
+                condition: Operand::Value(condition),
+                then_block: abort,
+                else_block: next,
+            },
+            Some(line),
+        );
         self.current = Some(abort);
         let bytes = self.ctx.bytes(method.as_bytes())?;
         let target = self.ctx.symbol("lo_abort_null_receiver")?;
-        self.finish(Terminator::Abort {
-            target,
-            args: vec![
-                Operand::Symbol(bytes),
-                Operand::Int(byte_length(method.len())?),
-            ],
-        });
+        self.finish(
+            Terminator::Abort {
+                target,
+                args: vec![
+                    Operand::Symbol(bytes),
+                    Operand::Int(byte_length(method.len())?),
+                ],
+            },
+            Some(line),
+        );
         self.current = Some(next);
         Ok(())
     }
@@ -327,7 +333,7 @@ impl Builder<'_, '_> {
             args.push(self.load(self.receiver(), destination, IrType::Int32, line));
         }
         let result = self.runtime(name, args, line)?;
-        self.finish(Terminator::Return(result));
+        self.finish(Terminator::Return(result), Some(line));
         Ok(())
     }
 

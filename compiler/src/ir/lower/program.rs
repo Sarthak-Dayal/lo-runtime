@@ -14,6 +14,7 @@ pub(super) struct Context<'a> {
     pub ir: ProgramIr,
     pub classes: &'a ClassTable,
     pub target: Target,
+    pub debug: DebugMode,
     layouts: HashMap<String, ClassLayout>,
     bytes: HashMap<Vec<u8>, SymbolId>,
 }
@@ -24,8 +25,9 @@ pub fn lower_program(
     program: &TypedProgram,
     classes: &ClassTable,
     target: Target,
+    debug: DebugMode,
 ) -> Result<CheckedIr, String> {
-    let mut ctx = Context::new(classes, target);
+    let mut ctx = Context::new(classes, target, debug);
     ctx.declarations(program)?;
     for class in &program.classes {
         for ctor in &class.constructors {
@@ -43,7 +45,7 @@ pub fn lower_program(
 }
 
 impl<'a> Context<'a> {
-    fn new(classes: &'a ClassTable, target: Target) -> Self {
+    fn new(classes: &'a ClassTable, target: Target, debug: DebugMode) -> Self {
         Self {
             ir: ProgramIr {
                 symbols: vec![],
@@ -54,6 +56,7 @@ impl<'a> Context<'a> {
             },
             classes,
             target,
+            debug,
             layouts: HashMap::new(),
             bytes: HashMap::new(),
         }
