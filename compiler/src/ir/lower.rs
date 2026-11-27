@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::ast::{Binop, Type, Unop};
 use crate::type_checker::{
     CastDirection, TypedConstructor, TypedDelegation, TypedExpr, TypedMethodBody, TypedMethodDecl,
-    TypedStmt,
+    TypedStmt, TypedVar,
 };
 
 use super::*;
@@ -73,7 +73,7 @@ fn lower_constructor(
             builder.statements(stmts)?;
         }
         TypedConstructor::Implicit { fields } => {
-            for (name, ty) in fields {
+            for TypedVar { name, ty, .. } in fields {
                 let value = Operand::Value(builder.bindings[name]);
                 let offset = builder.ctx.field_offset(class, name)?;
                 builder.store_field(builder.receiver(), offset, value, value_type(ty)?, line)?;
@@ -192,8 +192,8 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
         ctx: &'ctx mut Context<'ast>,
         symbol: SymbolId,
         has_receiver: bool,
-        formals: &[(String, Type)],
-        locals: &[(String, Type)],
+        formals: &[TypedVar],
+        locals: &[TypedVar],
         line: u32,
     ) -> Result<Self, String> {
         let mut builder = Self {
@@ -219,14 +219,14 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
                 .new_register(IrType::Ref, Some("this".into()));
             builder.function.params.push(id);
         }
-        for (name, ty) in formals {
+        for TypedVar { name, ty, .. } in formals {
             let id = builder
                 .function
                 .new_register(value_type(ty)?, Some(name.clone()));
             builder.function.params.push(id);
             builder.bindings.insert(name.clone(), id);
         }
-        for (name, ty) in locals {
+        for TypedVar { name, ty, .. } in locals {
             let id = builder
                 .function
                 .new_register(value_type(ty)?, Some(name.clone()));

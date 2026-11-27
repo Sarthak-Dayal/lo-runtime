@@ -13,7 +13,7 @@ pub use errors::{ErrorCode, TypeError};
 pub use typed_ast::{
     BindingInfo, CastDirection, ClassKind, MethodResolution, TypedClassDecl, TypedConstructor,
     TypedDelegation, TypedExpr, TypedMethodBody, TypedMethodCall, TypedMethodDecl, TypedObjName,
-    TypedProgram, TypedStmt,
+    TypedProgram, TypedStmt, TypedVar,
 };
 
 use crate::ast::Program;

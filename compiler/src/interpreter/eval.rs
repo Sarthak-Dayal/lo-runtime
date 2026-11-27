@@ -6,7 +6,7 @@ use crate::ast::{Binop, IoOp, Type, Unop};
 use crate::type_checker::{
     BindingInfo, CastDirection, ClassTable, MethodResolution, TypedClassDecl, TypedConstructor,
     TypedDelegation, TypedExpr, TypedMethodBody, TypedMethodCall, TypedMethodDecl, TypedObjName,
-    TypedProgram, TypedStmt,
+    TypedProgram, TypedStmt, TypedVar,
 };
 
 use super::abort::AbortKind;
@@ -478,7 +478,7 @@ impl<'p> Interp<'p> {
         match ctor {
             TypedConstructor::Implicit { fields } => {
                 // `this.field_i = formal_i`, positionally, in field order.
-                for (i, (name, _)) in fields.iter().enumerate() {
+                for (i, TypedVar { name, .. }) in fields.iter().enumerate() {
                     let slot = self.field_slot(this, name);
                     self.heap.set_field(this, slot, args[i]);
                 }
@@ -956,7 +956,12 @@ mod tests {
         let (p, t) = tiny();
         let mut it = Interp::new(&p, &t, DEFAULT_HEAP_LIMIT);
         let empty = it.heap.empty();
-        let mut f = Frame::new(None, &[], vec![], &[("x".to_string(), Type::Int)], empty);
+        let x = TypedVar {
+            name: "x".into(),
+            ty: Type::Int,
+            line: 0,
+        };
+        let mut f = Frame::new(None, &[], vec![], &[x], empty);
         let stmt = TypedStmt::Assign {
             target: "x".to_string(),
             binding: BindingInfo::Local(Type::Int),
@@ -973,7 +978,12 @@ mod tests {
         let (p, t) = tiny();
         let mut it = Interp::new(&p, &t, DEFAULT_HEAP_LIMIT);
         let empty = it.heap.empty();
-        let locals = [("i".to_string(), Type::Int), ("s".to_string(), Type::Int)];
+        let local = |name: &str| TypedVar {
+            name: name.into(),
+            ty: Type::Int,
+            line: 0,
+        };
+        let locals = [local("i"), local("s")];
         let mut f = Frame::new(None, &[], vec![], &locals, empty);
         let var = |n: &str| {
             Box::new(TypedExpr::Var {

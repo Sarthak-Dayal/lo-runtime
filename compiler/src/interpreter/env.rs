@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ast::Type;
+use crate::type_checker::TypedVar;
 
 use super::heap::{ObjId, StrId};
 use super::value::{type_default, Value};
@@ -19,9 +19,9 @@ impl Frame {
     /// checker forbids a local shadowing a formal).
     pub fn new(
         this: Option<ObjId>,
-        params: &[(String, Type)],
+        params: &[TypedVar],
         args: Vec<Value>,
-        locals: &[(String, Type)],
+        locals: &[TypedVar],
         empty: StrId,
     ) -> Frame {
         debug_assert_eq!(
@@ -31,10 +31,10 @@ impl Frame {
         );
         let mut slots = args;
         let mut index = HashMap::with_capacity(params.len() + locals.len());
-        for (i, (name, _)) in params.iter().enumerate() {
+        for (i, TypedVar { name, .. }) in params.iter().enumerate() {
             index.insert(name.clone(), i);
         }
-        for (name, ty) in locals {
+        for TypedVar { name, ty, .. } in locals {
             index.insert(name.clone(), slots.len());
             slots.push(type_default(ty, empty));
         }

@@ -3,7 +3,7 @@ use std::fmt::Write;
 
 use crate::ast::{IoOp, Type};
 use crate::type_checker::{
-    TypedClassDecl, TypedConstructor, TypedDelegation, TypedMethodBody, TypedMethodDecl,
+    TypedClassDecl, TypedConstructor, TypedDelegation, TypedMethodBody, TypedMethodDecl, TypedVar,
 };
 
 use super::abi::{
@@ -53,8 +53,8 @@ impl<'m, 'a> Function<'m, 'a> {
         module: &'m mut Module<'a>,
         class: &str,
         symbol: String,
-        formals: &[(String, Type)],
-        locals: &[(String, Type)],
+        formals: &[TypedVar],
+        locals: &[TypedVar],
         result: &Type,
         entry: bool,
     ) -> Self {
@@ -124,7 +124,7 @@ impl<'m, 'a> Function<'m, 'a> {
                 f.p12_block(stmts);
             }
             TypedConstructor::Implicit { fields } => {
-                for (name, ty) in fields {
+                for TypedVar { name, ty, .. } in fields {
                     let offset = f.module.field_offset(&class.class_name, name);
                     f.store_field(0, offset, f.bindings[name], ty);
                 }
@@ -182,15 +182,15 @@ impl<'m, 'a> Function<'m, 'a> {
     }
 
     // P9: receiver is parameter 0; source formals follow in declaration order.
-    fn p9_formals(&mut self, formals: &[(String, Type)]) {
-        for (name, ty) in formals {
+    fn p9_formals(&mut self, formals: &[TypedVar]) {
+        for TypedVar { name, ty, .. } in formals {
             self.named(name, ty);
         }
     }
 
     // P11: hoisted locals are initialized once, including skipped-block locals.
-    fn p11_locals(&mut self, locals: &[(String, Type)]) {
-        for (name, ty) in locals {
+    fn p11_locals(&mut self, locals: &[TypedVar]) {
+        for TypedVar { name, ty, .. } in locals {
             let local = self.named(name, ty);
             if ty == &Type::String {
                 self.string_defaults.push(local);

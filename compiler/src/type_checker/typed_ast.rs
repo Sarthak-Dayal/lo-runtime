@@ -4,10 +4,18 @@ use crate::ast::{Binop, IoOp, Type, Unop};
 // Typed AST
 //
 // Deliberately does not borrow ast::Formal/VarDecl for its own fields/params —
-// both are stored here as flattened (String, Type) pairs. That decouples this
-// tree from however the parser's own field/param types are named or shaped,
-// which has already changed twice.
+// both are stored here as flattened `TypedVar`s, one per name. That decouples
+// this tree from however the parser's own field/param types are named or
+// shaped, which has already changed twice.
 // ---------------------------------------------------------------------------
+
+/// One named field, formal or local, with the line it was declared on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypedVar {
+    pub name: String,
+    pub ty: Type,
+    pub line: u32,
+}
 
 pub struct TypedProgram {
     pub classes: Vec<TypedClassDecl>,
@@ -23,7 +31,7 @@ pub struct TypedClassDecl {
     pub class_name: String,
     pub kind: ClassKind,
     pub extends: Option<String>,
-    pub fields: Vec<(String, Type)>,
+    pub fields: Vec<TypedVar>,
     pub constructors: Vec<TypedConstructor>,
     pub methods: Vec<TypedMethodDecl>,
     pub line: u32,
@@ -31,9 +39,9 @@ pub struct TypedClassDecl {
 
 pub enum TypedConstructor {
     Explicit {
-        formals: Vec<(String, Type)>,
+        formals: Vec<TypedVar>,
         delegation: Option<TypedDelegation>,
-        locals: Vec<(String, Type)>,
+        locals: Vec<TypedVar>,
         stmts: Vec<TypedStmt>,
         line: u32,
     },
@@ -41,7 +49,7 @@ pub enum TypedConstructor {
     /// downstream consumers don't each have to re-derive what an implicit
     /// constructor does. No `line`: unlike `Explicit`, this has no source
     /// constructor to point at.
-    Implicit { fields: Vec<(String, Type)> },
+    Implicit { fields: Vec<TypedVar> },
 }
 
 pub enum TypedDelegation {
@@ -52,14 +60,14 @@ pub enum TypedDelegation {
 pub struct TypedMethodDecl {
     pub method_name: String,
     pub return_type: Type,
-    pub formals: Vec<(String, Type)>,
+    pub formals: Vec<TypedVar>,
     pub body: TypedMethodBody,
     pub line: u32,
 }
 
 pub enum TypedMethodBody {
     UserDefined {
-        locals: Vec<(String, Type)>,
+        locals: Vec<TypedVar>,
         stmts: Vec<TypedStmt>,
     },
     Io(IoOp),
