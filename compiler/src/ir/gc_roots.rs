@@ -7,9 +7,9 @@
 //! alive (`runtime-abi.md` §3.3). Each `Ref` gets one slot for the whole function.
 //!
 //! Under `-g`, named `Ref`s live in root slots `0..N` for the whole function
-//! (`FunctionIr::named_ref_roots`), so the collector updates them in place and a
-//! debugger never sees a stale pointer. They are not saved, reloaded or nulled
-//! around calls; temporaries take slots `N..`.
+//! (`FunctionIr::named_refs_in_root_slots`), so the collector updates them in
+//! place and a debugger never sees a stale pointer. They are not saved, reloaded
+//! or nulled around calls; temporaries take slots `N..`.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -26,7 +26,7 @@ pub fn insert_gc_roots(ir: CheckedIr, debug: DebugMode) -> ProgramIr {
 
 fn insert_function_roots(function: &mut FunctionIr, debug: DebugMode) {
     let named = match debug {
-        DebugMode::On => function.named_ref_roots(),
+        DebugMode::On => function.named_refs_in_root_slots(),
         DebugMode::Off => vec![],
     };
     let mut live_refs_at_call = refs_live_across_calls(function);

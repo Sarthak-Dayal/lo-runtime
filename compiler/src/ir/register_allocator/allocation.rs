@@ -34,23 +34,23 @@ fn values_surviving_calls(function: &FunctionIr) -> HashSet<VirtualRegId> {
 }
 
 /// `live_intervals` must be sorted by start, as `build_function_live_intervals`
-/// returns them. `homes` are locations fixed before the scan (root slots, and
-/// spill slots `0..K`); a register in `homes` must not also be in
-/// `live_intervals`, or the scan would give it a second location.
+/// returns them. `named_slots` are the named values' slots, fixed before the
+/// scan (root slots, and home slots `0..K`); a register in `named_slots` must
+/// not also be in `live_intervals`, or the scan would give it a second location.
 pub(super) fn allocate_function(
     function: &FunctionIr,
     live_intervals: &[LiveInterval],
     target_constraints: &TargetConstraints,
-    homes: HashMap<VirtualRegId, PhysicalLocation>,
+    named_slots: HashMap<VirtualRegId, PhysicalLocation>,
 ) -> FunctionAllocation {
     let surviving_calls = values_surviving_calls(function);
-    let named_stack_slots = homes
+    let home_slot_count = named_slots
         .values()
         .filter(|location| matches!(location, PhysicalLocation::Spill(_)))
         .count();
     let mut function_allocation = FunctionAllocation {
-        spill_slot_count: named_stack_slots,
-        register_locations: homes,
+        spill_slot_count: home_slot_count,
+        register_locations: named_slots,
         used_callee_saved_registers: Vec::new(),
     };
     let mut active_intervals = Vec::new();

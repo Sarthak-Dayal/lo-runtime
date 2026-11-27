@@ -1306,7 +1306,7 @@ fn debug_build_keeps_named_refs_in_fixed_root_slots() {
 
     let debug = checked_ir(NAMED_REFS_SOURCE, DebugMode::On);
     let main = function(debug.program(), "lo_method_4_Main_4_main");
-    let roots = main.named_ref_roots();
+    let roots = main.named_refs_in_root_slots();
     let names: Vec<_> = roots
         .iter()
         .map(|r| main.register_names[r.0].as_deref().unwrap())

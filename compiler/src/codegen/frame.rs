@@ -78,9 +78,7 @@ pub struct Frame {
     spill_start: i32,
     spill_slots: usize,
     ret_save: Option<i32>,
-    /// A parameter lives in a root slot (a named `Ref` under `-g`), so the root
-    /// slots are nulled before the parameters are stored, not after.
-    params_in_roots: bool,
+    zero_root_slots_first: bool,
     /// Bytes subtracted from `rsp` after `push rbp ; mov rbp, rsp`. rsp is
     /// 16-aligned after `push rbp`, and this is a multiple of 16, so every call in
     /// the body starts aligned (System V §3.2.2).
@@ -130,7 +128,7 @@ impl Frame {
             -used
         });
 
-        let params_in_roots = function.params.iter().any(|param| {
+        let zero_root_slots_first = function.params.iter().any(|param| {
             matches!(
                 allocation.register_locations.get(param),
                 Some(PhysicalLocation::Root(_))
@@ -143,7 +141,7 @@ impl Frame {
             spill_start,
             spill_slots: allocation.spill_slot_count,
             ret_save,
-            params_in_roots,
+            zero_root_slots_first,
             size: round_up(used, STACK_ALIGN),
         })
     }
@@ -218,7 +216,7 @@ impl Frame {
                 Operand::r64(*saved),
             ));
         }
-        if self.params_in_roots {
+        if self.zero_root_slots_first {
             self.init_shadow_frame(&mut out);
             self.move_params(params, &mut out)?;
         } else {

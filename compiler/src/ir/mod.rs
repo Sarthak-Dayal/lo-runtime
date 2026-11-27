@@ -156,12 +156,12 @@ impl FunctionIr {
             .any(|instruction| matches!(instruction.kind, InstructionKind::Call { .. }))
     }
 
-    /// The named `Ref`s (`this`, reference formals and locals) that live in
-    /// shadow-frame root slots `0..N` under `-g`, in register order, so the
-    /// collector updates them in place. Only a function with calls has a shadow
-    /// frame; a leaf function cannot collect, so its references need no root.
+    /// Under `-g`, the named `Ref`s (`this`, reference formals and locals) that
+    /// live in root slots `0..N` instead of home slots, in register order, so the
+    /// collector updates them in place. Only a function with calls has root
+    /// slots; a leaf function cannot collect, so its references keep home slots.
     /// `gc_roots` and both allocators use this list, so they agree on the slots.
-    pub fn named_ref_roots(&self) -> Vec<VirtualRegId> {
+    pub fn named_refs_in_root_slots(&self) -> Vec<VirtualRegId> {
         if !self.has_calls() {
             return vec![];
         }

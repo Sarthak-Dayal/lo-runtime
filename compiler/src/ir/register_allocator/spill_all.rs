@@ -13,14 +13,14 @@ use super::{FunctionAllocation, PhysicalLocation, ProgramAllocation, SpillSlotId
 
 /// Virtual register `n` gets spill slot `n`. No registers are used, so no
 /// callee-saved register needs preserving. Under `-g`, named `Ref`s live in
-/// their root slots instead (`FunctionIr::named_ref_roots`), as in linear scan.
+/// their root slots instead (`FunctionIr::named_refs_in_root_slots`), as in linear scan.
 pub fn spill_everything(function: &FunctionIr, debug: DebugMode) -> FunctionAllocation {
     let count = function.register_types.len();
     let mut register_locations: HashMap<_, _> = (0..count)
         .map(|n| (VirtualRegId(n), PhysicalLocation::Spill(SpillSlotId(n))))
         .collect();
     if debug == DebugMode::On {
-        for (slot, register) in function.named_ref_roots().into_iter().enumerate() {
+        for (slot, register) in function.named_refs_in_root_slots().into_iter().enumerate() {
             register_locations.insert(register, PhysicalLocation::Root(slot as u32));
         }
     }
