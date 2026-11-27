@@ -242,8 +242,6 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
                 Type::String => Operand::Symbol(builder.ctx.symbol(symbols::EMPTY_STRING)?),
                 Type::Void => return Err("IR: void local".into()),
             };
-            // Under -g the zero-init is setup, not source: line 0 keeps it from
-            // becoming a stopping point at the declaration line.
             let init_line = match builder.ctx.debug {
                 DebugMode::On => GENERATED_LINE,
                 DebugMode::Off => line,
@@ -321,7 +319,7 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
             if self.current.is_none() {
                 break;
             }
-            self.last_statement_line = Some(statement_line(stmt));
+            self.last_statement_line = Some(stmt.line());
             match stmt {
                 TypedStmt::Assign {
                     target,
@@ -738,18 +736,5 @@ fn binary_op(op: Binop) -> BinaryOp {
         Binop::Lt => BinaryOp::Lt,
         Binop::Gt => BinaryOp::Gt,
         Binop::And | Binop::Or => unreachable!("&& and || are lowered as a ternary"),
-    }
-}
-
-/// The line a statement starts on (a call statement's line is its call's).
-fn statement_line(stmt: &TypedStmt) -> u32 {
-    match stmt {
-        TypedStmt::Assign { line, .. } => *line,
-        TypedStmt::Return(_, line)
-        | TypedStmt::If(_, _, _, line)
-        | TypedStmt::While(_, _, line)
-        | TypedStmt::Break(line)
-        | TypedStmt::Empty(line) => *line,
-        TypedStmt::CallStmt(call) => call.line,
     }
 }
