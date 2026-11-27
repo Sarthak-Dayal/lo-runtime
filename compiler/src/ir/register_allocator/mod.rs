@@ -14,6 +14,10 @@
 //!    registers; any other value takes caller-saved ones first.
 //! 4. target.rs: the register pool and the callee-saved set.
 //!
+//! Under `-g`, named values (`this`, formals, locals) first get stack slots of
+//! their own and are left out of the scan, so each stays at one stack address
+//! for the whole function, which is what the debug info describes.
+//!
 //! Code generation (`codegen::frame`) turns the result into spill addresses and
 //! saves and restores the callee-saved registers the allocation used.
 
@@ -23,7 +27,7 @@ pub mod spill_all;
 mod target;
 
 use crate::ir::liveness::compute_function_liveness;
-use crate::ir::{CheckedIr, SymbolId, VirtualRegId};
+use crate::ir::{CheckedIr, DebugMode, FunctionIr, SymbolId, VirtualRegId};
 use std::collections::HashMap;
 
 pub use target::{PhysicalRegId, TargetConstraints};
@@ -52,7 +56,11 @@ pub struct ProgramAllocation {
     pub function_allocations: HashMap<SymbolId, FunctionAllocation>,
 }
 
-pub fn allocate_registers(ir: &CheckedIr, target: &TargetConstraints) -> ProgramAllocation {
+pub fn allocate_registers(
+    ir: &CheckedIr,
+    target: &TargetConstraints,
+    debug: DebugMode,
+) -> ProgramAllocation {
     target::debug_check(target);
     let function_allocations = ir
         .program()
@@ -60,12 +68,32 @@ pub fn allocate_registers(ir: &CheckedIr, target: &TargetConstraints) -> Program
         .iter()
         .map(|function| {
             let liveness = compute_function_liveness(function);
-            let intervals = live_intervals::build_function_live_intervals(function, &liveness);
-            let allocation = allocation::allocate_function(function, &intervals, target);
+            let homes = stack_homes(function, debug);
+            let intervals: Vec<_> =
+                live_intervals::build_function_live_intervals(function, &liveness)
+                    .into_iter()
+                    .filter(|interval| !homes.contains_key(&interval.register))
+                    .collect();
+            let allocation = allocation::allocate_function(function, &intervals, target, homes);
             (function.symbol, allocation)
         })
         .collect();
     ProgramAllocation {
         function_allocations,
     }
+}
+
+/// Under `-g`, spill slots `0..K` for the function's K named values, in register
+/// order; otherwise none.
+fn stack_homes(function: &FunctionIr, debug: DebugMode) -> HashMap<VirtualRegId, PhysicalLocation> {
+    if debug == DebugMode::Off {
+        return HashMap::new();
+    }
+    let named_registers = (0..function.register_names.len())
+        .filter(|&register| function.register_names[register].is_some())
+        .map(VirtualRegId);
+    named_registers
+        .enumerate()
+        .map(|(slot, register)| (register, PhysicalLocation::Spill(SpillSlotId(slot))))
+        .collect()
 }
