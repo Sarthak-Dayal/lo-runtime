@@ -1185,3 +1185,64 @@ fn debug_build_keeps_copies_into_named_values() {
         "-g keeps the zero-init and x = 5"
     );
 }
+
+#[test]
+fn debug_build_gives_named_values_their_own_stack_slots() {
+    use register_allocator::{
+        allocate_registers, PhysicalLocation, SpillSlotId, TargetConstraints,
+    };
+    let source = "class Main () {
+    int main() { return 0; }
+}
+class Calc () {
+    int f(int a, int b) {
+        int x;
+        int y;
+        x = (a + b);
+        y = (x * a);
+        return (x + y);
+    }
+}
+";
+    // Where each register of Calc.f ends up, the way the driver builds it.
+    let allocate = |debug| {
+        let tokens = crate::lexer::tokenize(source).expect("lexes");
+        let program = crate::parser::parse_program(&tokens).expect("parses");
+        let (typed, classes) = crate::type_checker::check_program(program).expect("type checks");
+        let ir =
+            lower::lower_program(&typed, &classes, crate::layout::NATIVE, debug).expect("lowers");
+        let mut program = gc_roots::insert_gc_roots(ir);
+        for function in &mut program.functions {
+            liveness::remove_dead_copies(function, debug);
+        }
+        let checked = program.verify().expect("verifies");
+        let allocation = allocate_registers(&checked, &TargetConstraints::system_v(), debug);
+        let f = function(checked.program(), "lo_method_4_Calc_1_f");
+        let names = f.register_names.clone();
+        let locations = allocation.function_allocations[&f.symbol]
+            .register_locations
+            .clone();
+        (names, locations)
+    };
+
+    let (names, debug) = allocate(DebugMode::On);
+    let named: Vec<_> = (0..names.len()).filter(|&n| names[n].is_some()).collect();
+    assert_eq!(named.len(), 5, "this, a, b, x, y");
+    for (slot, &register) in named.iter().enumerate() {
+        assert_eq!(
+            debug[&VirtualRegId(register)],
+            PhysicalLocation::Spill(SpillSlotId(slot)),
+            "{:?} has its own stack slot under -g",
+            names[register]
+        );
+    }
+
+    let (_, default) = allocate(DebugMode::Off);
+    assert!(
+        named.iter().any(|&register| matches!(
+            default.get(&VirtualRegId(register)),
+            Some(PhysicalLocation::Register(_))
+        )),
+        "the default build still keeps some named values in registers"
+    );
+}

@@ -60,7 +60,7 @@ pub fn compile_to_asm(
     let ir = build_ir(path, debug)?;
     let allocation = match strategy {
         AllocStrategy::SpillAll => spill_everything_program(&ir),
-        AllocStrategy::LinearScan => allocate_registers(&ir, &TargetConstraints::system_v()),
+        AllocStrategy::LinearScan => allocate_registers(&ir, &TargetConstraints::system_v(), debug),
     };
     emit_program(ir.program(), &allocation)
 }
