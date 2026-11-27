@@ -40,6 +40,17 @@ This doc lists everything the compiler (`compiler/`) needs so a `-g` build can b
 
 ---
 
+## Open TODOs
+
+- [ ] **Confirm how "gdb is the oracle" is applied.** The P4 handout says: "The behavior of a standard gdb binary is the oracle against which the autograder grades your transcript: where execution stops, the values it reports, and the order of the frames." Several decisions here lean on matching gdb, so once the published triples (and the P4 grading contract) are out, check:
+  - **Which binary gdb's behavior is taken from:** our `-g` binary, or the reference compiler's. If it's the reference's, our line choices must match theirs, not just gdb's general rules.
+  - **Breakpoints on lines with no code** slide forward to the next line with code, as gdb does: closing braces such as a `while` body's `}`, `} else {`, and code after `return`/`break`, which is never compiled.
+  - **A `void` method's closing brace.** gcc gives it code (the return); we don't, because the hidden return takes the last statement's line. Neither the handout nor Chapter 9 requires a row for it (§9.3 asks for a row per *statement*), so only change this if a triple needs it.
+  - **Statements split across lines:** see the G5 TODO (first line vs last line).
+- [ ] **Statements split across lines: label with the first line or the last line.** Details in G5.
+
+---
+
 ## A. Plumbing
 
 - [ ] **G1 Add a `-g` flag and a `DebugMode` threaded through every stage.**
