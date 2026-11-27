@@ -89,17 +89,11 @@ fn stack_homes(function: &FunctionIr, debug: DebugMode) -> HashMap<VirtualRegId,
     if debug == DebugMode::Off {
         return HashMap::new();
     }
-    function
-        .register_names
-        .iter()
+    let named_registers = (0..function.register_names.len())
+        .filter(|&register| function.register_names[register].is_some())
+        .map(VirtualRegId);
+    named_registers
         .enumerate()
-        .filter(|(_, name)| name.is_some())
-        .enumerate()
-        .map(|(slot, (register, _))| {
-            (
-                VirtualRegId(register),
-                PhysicalLocation::Spill(SpillSlotId(slot)),
-            )
-        })
+        .map(|(slot, register)| (register, PhysicalLocation::Spill(SpillSlotId(slot))))
         .collect()
 }
