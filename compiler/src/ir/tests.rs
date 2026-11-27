@@ -293,7 +293,7 @@ fn accepts_initialized_loop() {
         then_block: BlockId(1),
         else_block: BlockId(3),
     };
-    liveness::remove_dead_copies(&mut p.functions[0]);
+    liveness::remove_dead_copies(&mut p.functions[0], DebugMode::Off);
     assert_eq!(p.functions[0].blocks[0].instructions.len(), 1);
     p.validate().unwrap();
 }
@@ -1017,13 +1017,13 @@ fn dead_defaults_are_removed_but_defaults_read_on_a_branch_survive() {
     let mut program = example();
     let function = &mut program.functions[0];
     function.blocks[0].instructions.push(copy(0));
-    liveness::remove_dead_copies(function);
+    liveness::remove_dead_copies(function, DebugMode::Off);
     assert!(function.blocks[0].instructions.is_empty());
     assert_eq!(function.blocks[1].instructions.len(), 1);
     assert_eq!(function.blocks[2].instructions.len(), 1);
     function.blocks[0].instructions.push(copy(0));
     function.blocks[2].instructions.clear();
-    liveness::remove_dead_copies(function);
+    liveness::remove_dead_copies(function, DebugMode::Off);
     assert_eq!(function.blocks[0].instructions.len(), 1);
     program.validate().unwrap();
 }
@@ -1040,7 +1040,7 @@ fn dead_copy_removal_preserves_calls_with_unused_results() {
         },
         line: 1,
     });
-    liveness::remove_dead_copies(function);
+    liveness::remove_dead_copies(function, DebugMode::Off);
     assert!(matches!(function.blocks[0].instructions[0].kind,
         InstructionKind::Call { .. }));
 }
@@ -1144,4 +1144,44 @@ fn debug_build_moves_local_zero_init_to_line_0() {
         "default build: the method's line"
     );
     assert_eq!(init_line(DebugMode::On), GENERATED_LINE);
+}
+
+#[test]
+fn debug_build_keeps_copies_into_named_values() {
+    let source = "class Main () {
+    int main() {
+        int x;
+        int y;
+        x = 5;
+        y = 1;
+        return y;
+    }
+}
+";
+    // Copies into x after cleanup: its zero-init and `x = 5`, both never read.
+    let copies_into_x = |debug| {
+        let mut program = lowered(source, debug);
+        let main = program
+            .functions
+            .iter_mut()
+            .find(|f| f.register_names.iter().any(|n| n.as_deref() == Some("x")))
+            .expect("main");
+        liveness::remove_dead_copies(main, debug);
+        let x = main
+            .register_names
+            .iter()
+            .position(|n| n.as_deref() == Some("x"))
+            .expect("x");
+        main.blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .filter(|i| matches!(i.kind, InstructionKind::Copy { dst, .. } if dst.0 == x))
+            .count()
+    };
+    assert_eq!(copies_into_x(DebugMode::Off), 0, "default build drops both");
+    assert_eq!(
+        copies_into_x(DebugMode::On),
+        2,
+        "-g keeps the zero-init and x = 5"
+    );
 }
