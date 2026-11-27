@@ -156,7 +156,7 @@ fn lower_startup(ctx: &mut Context<'_>) -> Result<FunctionIr, String> {
     let main_method = builder.ctx.symbol(&symbols::method("Main", "main"))?;
     let result = builder.call(main_method, vec![main], GENERATED_LINE);
     builder.runtime("lo_pop_frame", vec![], GENERATED_LINE)?;
-    builder.finish(Terminator::Return(result));
+    builder.finish(Terminator::Return(result), Some(GENERATED_LINE));
     builder.complete(&Type::Int, GENERATED_LINE)
 }
 
@@ -173,6 +173,7 @@ fn value_type(ty: &Type) -> Result<IrType, String> {
 struct OpenBlock {
     instructions: Vec<Instruction>,
     terminator: Option<Terminator>,
+    terminator_line: Option<u32>,
 }
 
 /// Builds one function's blocks. `current` is the block being filled; `None`
@@ -185,6 +186,8 @@ struct Builder<'ctx, 'ast> {
     current: Option<BlockId>,
     bindings: HashMap<String, VirtualRegId>,
     loop_exits: Vec<BlockId>,
+    /// The line of the last statement lowered so far, for the implicit return.
+    last_statement_line: Option<u32>,
 }
 
 impl<'ctx, 'ast> Builder<'ctx, 'ast> {
@@ -211,6 +214,7 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
             current: None,
             bindings: HashMap::new(),
             loop_exits: vec![],
+            last_statement_line: None,
         };
         builder.current = Some(builder.block());
         if has_receiver {
@@ -238,7 +242,11 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
                 Type::String => Operand::Symbol(builder.ctx.symbol(symbols::EMPTY_STRING)?),
                 Type::Void => return Err("IR: void local".into()),
             };
-            builder.emit(InstructionKind::Copy { dst: id, src }, line);
+            let init_line = match builder.ctx.debug {
+                DebugMode::On => GENERATED_LINE,
+                DebugMode::Off => line,
+            };
+            builder.emit(InstructionKind::Copy { dst: id, src }, init_line);
         }
         Ok(builder)
     }
@@ -248,7 +256,8 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
             if *result != Type::Void {
                 return Err(format!("IR line {line}: non-void method falls through"));
             }
-            self.finish(Terminator::Return(None));
+            let return_line = self.last_statement_line.unwrap_or(line);
+            self.finish(Terminator::Return(None), Some(return_line));
         }
         self.function.blocks = self
             .blocks
@@ -257,6 +266,7 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
                 Ok(BasicBlock {
                     instructions: block.instructions,
                     terminator: block.terminator.ok_or("IR: unterminated block")?,
+                    terminator_line: block.terminator_line,
                 })
             })
             .collect::<Result<_, String>>()?;
@@ -276,6 +286,7 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
         self.blocks.push(OpenBlock {
             instructions: vec![],
             terminator: None,
+            terminator_line: None,
         });
         id
     }
@@ -287,9 +298,12 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
             .push(Instruction { kind, line });
     }
 
-    fn finish(&mut self, terminator: Terminator) {
+    /// Ends the current block. `line` is the terminator's own source line, or
+    /// `None` for a jump that only connects blocks (see `BasicBlock`).
+    fn finish(&mut self, terminator: Terminator, line: Option<u32>) {
         let block = self.current.take().expect("terminator needs an open block");
         self.blocks[block.0].terminator = Some(terminator);
+        self.blocks[block.0].terminator_line = line;
     }
 
     /// The register that holds a local or formal for the whole function.
@@ -305,6 +319,7 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
             if self.current.is_none() {
                 break;
             }
+            self.last_statement_line = Some(stmt.line());
             match stmt {
                 TypedStmt::Assign {
                     target,
@@ -315,18 +330,18 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
                     let src = self.expression(value)?;
                     self.assign(target, binding, src, *line)?;
                 }
-                TypedStmt::Return(expr, _) => {
+                TypedStmt::Return(expr, line) => {
                     let value = self.expression(expr)?;
-                    self.finish(Terminator::Return(Some(value)));
+                    self.finish(Terminator::Return(Some(value)), Some(*line));
                 }
-                TypedStmt::If(cond, yes, no, _) => self.if_statement(cond, yes, no)?,
-                TypedStmt::While(cond, body, _) => self.while_statement(cond, body)?,
+                TypedStmt::If(cond, yes, no, line) => self.if_statement(cond, yes, no, *line)?,
+                TypedStmt::While(cond, body, line) => self.while_statement(cond, body, *line)?,
                 TypedStmt::Break(line) => {
                     let exit = *self
                         .loop_exits
                         .last()
                         .ok_or_else(|| format!("IR line {line}: break outside loop"))?;
-                    self.finish(Terminator::Jump(exit));
+                    self.finish(Terminator::Jump(exit), Some(*line));
                 }
                 TypedStmt::Empty(_) => {}
                 TypedStmt::CallStmt(call) => {
@@ -342,15 +357,19 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
         cond: &TypedExpr,
         yes: &[TypedStmt],
         no: &[TypedStmt],
+        line: u32,
     ) -> Result<(), String> {
         let condition = self.expression(cond)?;
         let then_block = self.block();
         let else_block = self.block();
-        self.finish(Terminator::Branch {
-            condition,
-            then_block,
-            else_block,
-        });
+        self.finish(
+            Terminator::Branch {
+                condition,
+                then_block,
+                else_block,
+            },
+            Some(line),
+        );
         self.current = Some(then_block);
         self.statements(yes)?;
         let then_end = self.current.take();
@@ -363,30 +382,38 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
             let join = self.block();
             for end in [then_end, else_end].into_iter().flatten() {
                 self.current = Some(end);
-                self.finish(Terminator::Jump(join));
+                self.finish(Terminator::Jump(join), None);
             }
             self.current = Some(join);
         }
         Ok(())
     }
 
-    fn while_statement(&mut self, cond: &TypedExpr, body: &[TypedStmt]) -> Result<(), String> {
+    fn while_statement(
+        &mut self,
+        cond: &TypedExpr,
+        body: &[TypedStmt],
+        line: u32,
+    ) -> Result<(), String> {
         let test = self.block();
         let body_block = self.block();
         let exit = self.block();
-        self.finish(Terminator::Jump(test));
+        self.finish(Terminator::Jump(test), None);
         self.current = Some(test);
         let condition = self.expression(cond)?;
-        self.finish(Terminator::Branch {
-            condition,
-            then_block: body_block,
-            else_block: exit,
-        });
+        self.finish(
+            Terminator::Branch {
+                condition,
+                then_block: body_block,
+                else_block: exit,
+            },
+            Some(line),
+        );
         self.loop_exits.push(exit);
         self.current = Some(body_block);
         self.statements(body)?;
         if self.current.is_some() {
-            self.finish(Terminator::Jump(test));
+            self.finish(Terminator::Jump(test), None);
         }
         self.loop_exits.pop();
         self.current = Some(exit);
@@ -592,17 +619,17 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
         self.branch_if_equal(rhs, 0, zero, check_negative_one, line);
         self.current = Some(zero);
         self.division_special(dst, op, lhs, 0, line);
-        self.finish(Terminator::Jump(join));
+        self.finish(Terminator::Jump(join), None);
 
         self.current = Some(check_negative_one);
         self.branch_if_equal(rhs, -1, negative_one, ordinary, line);
         self.current = Some(negative_one);
         self.division_special(dst, op, lhs, -1, line);
-        self.finish(Terminator::Jump(join));
+        self.finish(Terminator::Jump(join), None);
 
         self.current = Some(ordinary);
         self.emit(InstructionKind::Binary { dst, op, lhs, rhs }, line);
-        self.finish(Terminator::Jump(join));
+        self.finish(Terminator::Jump(join), None);
         self.current = Some(join);
     }
 
@@ -626,11 +653,14 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
             },
             line,
         );
-        self.finish(Terminator::Branch {
-            condition: Operand::Value(condition),
-            then_block,
-            else_block,
-        });
+        self.finish(
+            Terminator::Branch {
+                condition: Operand::Value(condition),
+                then_block,
+                else_block,
+            },
+            Some(line),
+        );
     }
 
     /// `lhs op divisor` for divisor 0 or -1, without `idiv`.
@@ -675,16 +705,19 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
         let else_block = self.block();
         let join = self.block();
         let dst = self.value(ty);
-        self.finish(Terminator::Branch {
-            condition,
-            then_block,
-            else_block,
-        });
+        self.finish(
+            Terminator::Branch {
+                condition,
+                then_block,
+                else_block,
+            },
+            Some(line),
+        );
         for (block, expr) in [(then_block, yes), (else_block, no)] {
             self.current = Some(block);
             let src = self.expression(expr)?;
             self.emit(InstructionKind::Copy { dst, src }, line);
-            self.finish(Terminator::Jump(join));
+            self.finish(Terminator::Jump(join), None);
         }
         self.current = Some(join);
         Ok(Operand::Value(dst))

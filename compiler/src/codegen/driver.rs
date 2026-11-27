@@ -11,6 +11,7 @@
 //!                                            (LIB.a defaults to $LO_RUNTIME)
 //! Allocation: linear scan by default; `--spill-all` selects the spill-everything
 //! reference (every virtual register in a stack slot), useful for debugging.
+//! `-g` selects the debug build (P4), in any of the three modes.
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -19,7 +20,7 @@ use std::process::Command;
 use crate::ir::lower::lower_program;
 use crate::ir::register_allocator::spill_all::spill_everything_program;
 use crate::ir::register_allocator::{allocate_registers, TargetConstraints};
-use crate::ir::{gc_roots, CheckedIr};
+use crate::ir::{gc_roots, CheckedIr, DebugMode};
 use crate::layout::NATIVE;
 
 use super::emit_program;
@@ -34,12 +35,12 @@ pub enum AllocStrategy {
 }
 
 const USAGE: &str = "usage: lo-compiler (--dump-ir FILE.lo | --emit-asm FILE.lo [OUT.s] | \
-                     --native FILE.lo OUTPUT [--runtime LIB.a]) [--spill-all | --linear-scan]";
+                     --native FILE.lo OUTPUT [--runtime LIB.a]) [--spill-all | --linear-scan] [-g]";
 
 /// Lowered, rooted and verified IR: exactly what instruction selection consumes.
-pub fn build_ir(path: &OsStr) -> Result<CheckedIr, String> {
+pub fn build_ir(path: &OsStr, debug: DebugMode) -> Result<CheckedIr, String> {
     let (typed, classes) = crate::front_end(path)?;
-    let ir = lower_program(&typed, &classes, NATIVE)?;
+    let ir = lower_program(&typed, &classes, NATIVE, debug)?;
     let mut ir = gc_roots::insert_gc_roots(ir);
     for function in &mut ir.functions {
         crate::ir::remove_dead_copies(function);
@@ -47,12 +48,16 @@ pub fn build_ir(path: &OsStr) -> Result<CheckedIr, String> {
     ir.verify()
 }
 
-pub fn dump_ir(path: &OsStr) -> Result<String, String> {
-    Ok(build_ir(path)?.program().dump())
+pub fn dump_ir(path: &OsStr, debug: DebugMode) -> Result<String, String> {
+    Ok(build_ir(path, debug)?.program().dump())
 }
 
-pub fn compile_to_asm(path: &OsStr, strategy: AllocStrategy) -> Result<String, String> {
-    let ir = build_ir(path)?;
+pub fn compile_to_asm(
+    path: &OsStr,
+    strategy: AllocStrategy,
+    debug: DebugMode,
+) -> Result<String, String> {
+    let ir = build_ir(path, debug)?;
     let allocation = match strategy {
         AllocStrategy::SpillAll => spill_everything_program(&ir),
         AllocStrategy::LinearScan => allocate_registers(&ir, &TargetConstraints::system_v()),
@@ -122,6 +127,7 @@ pub fn cli(args: &[OsString]) -> Option<Result<String, String>> {
 
 struct Options<'a> {
     strategy: AllocStrategy,
+    debug: DebugMode,
     runtime: Option<OsString>,
     positional: Vec<&'a OsString>,
 }
@@ -129,6 +135,7 @@ struct Options<'a> {
 fn parse_options(args: &[OsString]) -> Result<Options<'_>, String> {
     let mut options = Options {
         strategy: AllocStrategy::LinearScan,
+        debug: DebugMode::Off,
         runtime: std::env::var_os("LO_RUNTIME"),
         positional: vec![],
     };
@@ -137,6 +144,7 @@ fn parse_options(args: &[OsString]) -> Result<Options<'_>, String> {
         match arg.to_str() {
             Some("--spill-all") => options.strategy = AllocStrategy::SpillAll,
             Some("--linear-scan") => options.strategy = AllocStrategy::LinearScan,
+            Some("-g") => options.debug = DebugMode::On,
             Some("--runtime") => options.runtime = Some(iter.next().ok_or(USAGE)?.clone()),
             _ => options.positional.push(arg),
         }
@@ -146,12 +154,12 @@ fn parse_options(args: &[OsString]) -> Result<Options<'_>, String> {
 
 fn run_cli(mode: &str, args: &[OsString]) -> Result<String, String> {
     let options = parse_options(args)?;
-    let strategy = options.strategy;
+    let (strategy, debug) = (options.strategy, options.debug);
     match (mode, options.positional.as_slice()) {
-        ("--dump-ir", [file]) => dump_ir(file),
-        ("--emit-asm", [file]) => compile_to_asm(file, strategy),
+        ("--dump-ir", [file]) => dump_ir(file, debug),
+        ("--emit-asm", [file]) => compile_to_asm(file, strategy, debug),
         ("--emit-asm", [file, out]) => {
-            let asm = compile_to_asm(file, strategy)?;
+            let asm = compile_to_asm(file, strategy, debug)?;
             std::fs::write(out, asm).map_err(|e| format!("write output: {e}"))?;
             Ok(String::new())
         }
@@ -159,7 +167,7 @@ fn run_cli(mode: &str, args: &[OsString]) -> Result<String, String> {
             let runtime = options
                 .runtime
                 .ok_or("--native needs --runtime LIB.a (or $LO_RUNTIME)")?;
-            let asm = compile_to_asm(file, strategy)?;
+            let asm = compile_to_asm(file, strategy, debug)?;
             assemble_and_link(&asm, Path::new(&runtime), Path::new(out))?;
             Ok(String::new())
         }

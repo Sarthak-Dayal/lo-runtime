@@ -111,6 +111,21 @@ pub enum TypedStmt {
     CallStmt(TypedMethodCall),
 }
 
+impl TypedStmt {
+    /// The line the statement starts on; a call statement's is its call's.
+    pub fn line(&self) -> u32 {
+        match self {
+            TypedStmt::Assign { line, .. } => *line,
+            TypedStmt::Return(_, line)
+            | TypedStmt::If(_, _, _, line)
+            | TypedStmt::While(_, _, line)
+            | TypedStmt::Break(line)
+            | TypedStmt::Empty(line) => *line,
+            TypedStmt::CallStmt(call) => call.line,
+        }
+    }
+}
+
 pub struct TypedMethodCall {
     pub obj_name: TypedObjName,
     pub method_name: String,

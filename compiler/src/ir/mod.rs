@@ -84,6 +84,15 @@ pub enum DataItem {
 /// declarations also carry line 0).
 pub const GENERATED_LINE: u32 = 0;
 
+/// Whether this is the `-g` debug build. The default build must not change
+/// when debug-only behavior is added, so every such change checks this.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DebugMode {
+    #[default]
+    Off,
+    On,
+}
+
 pub struct CheckedIr {
     program: ProgramIr,
 }
@@ -167,6 +176,11 @@ impl FunctionIr {
 pub struct BasicBlock {
     pub instructions: Vec<Instruction>,
     pub terminator: Terminator,
+    /// The source line of the terminator, when it is source code of its own: an
+    /// `if`/`while` test, a `return` or `break`, or a branch inside an expression.
+    /// `None` for jumps that only connect blocks (into a loop test, an `if` join,
+    /// a loop's back edge), so they never become a debugger stopping point.
+    pub terminator_line: Option<u32>,
 }
 
 pub struct Instruction {
