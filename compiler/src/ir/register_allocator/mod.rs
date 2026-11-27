@@ -14,10 +14,9 @@
 //!    registers; any other value takes caller-saved ones first.
 //! 4. target.rs: the register pool and the callee-saved set.
 //!
-//! Under `-g`, named values (`this`, formals, locals) are given their slot first
-//! and left out of the scan, so each stays at one stack address for the whole
-//! function, which is what the debug info describes. A named `Ref` in a function
-//! with calls lives in a root slot; every other named value gets a home slot.
+//! Under `-g`, named values (`this`, formals, locals) first get stack slots of
+//! their own and are left out of the scan, so each stays at one stack address
+//! for the whole function, which is what the debug info describes.
 //!
 //! Code generation (`codegen::frame`) turns the result into spill addresses and
 //! saves and restores the callee-saved registers the allocation used.
@@ -40,8 +39,6 @@ pub struct SpillSlotId(pub usize);
 pub enum PhysicalLocation {
     Register(PhysicalRegId),
     Spill(SpillSlotId),
-    /// Shadow-frame root slot `n` (only named `Ref`s under `-g`).
-    Root(u32),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -71,14 +68,13 @@ pub fn allocate_registers(
         .iter()
         .map(|function| {
             let liveness = compute_function_liveness(function);
-            let named_slots = named_value_slots(function, debug);
+            let homes = stack_homes(function, debug);
             let intervals: Vec<_> =
                 live_intervals::build_function_live_intervals(function, &liveness)
                     .into_iter()
-                    .filter(|interval| !named_slots.contains_key(&interval.register))
+                    .filter(|interval| !homes.contains_key(&interval.register))
                     .collect();
-            let allocation =
-                allocation::allocate_function(function, &intervals, target, named_slots);
+            let allocation = allocation::allocate_function(function, &intervals, target, homes);
             (function.symbol, allocation)
         })
         .collect();
@@ -87,28 +83,17 @@ pub fn allocate_registers(
     }
 }
 
-/// Under `-g`, where each named value lives: root slot `i` for the `i`th of
-/// `FunctionIr::named_refs_in_root_slots`, and home slots `0..K` (spill slots)
-/// for the other K named values, in register order. Without `-g`, none.
-fn named_value_slots(
-    function: &FunctionIr,
-    debug: DebugMode,
-) -> HashMap<VirtualRegId, PhysicalLocation> {
+/// Under `-g`, spill slots `0..K` for the function's K named values, in register
+/// order; otherwise none.
+fn stack_homes(function: &FunctionIr, debug: DebugMode) -> HashMap<VirtualRegId, PhysicalLocation> {
     if debug == DebugMode::Off {
         return HashMap::new();
     }
-    let in_root_slots = function.named_refs_in_root_slots();
-    let root_slots = in_root_slots
-        .iter()
+    let named_registers = (0..function.register_names.len())
+        .filter(|&register| function.register_names[register].is_some())
+        .map(VirtualRegId);
+    named_registers
         .enumerate()
-        .map(|(slot, &register)| (register, PhysicalLocation::Root(slot as u32)));
-    let gets_home_slot = |register: &VirtualRegId| {
-        function.register_names[register.0].is_some() && !in_root_slots.contains(register)
-    };
-    let home_slots = (0..function.register_names.len())
-        .map(VirtualRegId)
-        .filter(gets_home_slot)
-        .enumerate()
-        .map(|(slot, register)| (register, PhysicalLocation::Spill(SpillSlotId(slot))));
-    root_slots.chain(home_slots).collect()
+        .map(|(slot, register)| (register, PhysicalLocation::Spill(SpillSlotId(slot))))
+        .collect()
 }

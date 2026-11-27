@@ -1260,17 +1260,9 @@ fn checked_ir(source: &str, debug: DebugMode) -> CheckedIr {
     program.verify().expect("verifies")
 }
 
-/// True if `operand` is the register named `name` in `f`.
-fn holds_named(f: &FunctionIr, name: &str, operand: &Operand) -> bool {
-    match operand {
-        Operand::Value(v) => f.register_names[v.0].as_deref() == Some(name),
-        _ => false,
-    }
-}
-
 /// `c` is read only as the receiver of `c.run(7)`, so it is never live across a
 /// call: the default build never roots it, and a collection during `c.run`
-/// would leave its stack copy pointing at the old object.
+/// would leave its home slot pointing at the old object.
 const NAMED_REFS_SOURCE: &str = "class Main () {
     int main() {
         Calc c;
@@ -1286,76 +1278,64 @@ class Calc () {
 ";
 
 #[test]
-fn debug_build_keeps_named_refs_in_fixed_root_slots() {
-    use register_allocator::spill_all::spill_everything_program;
-    use register_allocator::{allocate_registers, PhysicalLocation, TargetConstraints};
-
-    let stores_c = |f: &FunctionIr| {
-        f.blocks
+fn debug_build_saves_and_reloads_every_named_ref_around_every_call() {
+    // Around `c.run(7)`, the last call that sees `c`: whether `c` is saved into
+    // a root slot just before it, whether it is reloaded just after it, and
+    // whether any root slot holding `c` is ever set to null.
+    let around_last_call = |debug| {
+        let ir = checked_ir(NAMED_REFS_SOURCE, debug);
+        let main = function(ir.program(), "lo_method_4_Main_4_main");
+        let c = main
+            .register_names
             .iter()
-            .flat_map(|b| &b.instructions)
-            .any(|i| match &i.kind {
-                InstructionKind::RootStore { value, .. } => holds_named(f, "c", value),
-                _ => false,
+            .position(|name| name.as_deref() == Some("c"))
+            .map(VirtualRegId)
+            .expect("c");
+        let block = main
+            .blocks
+            .iter()
+            .find(|block| {
+                block.instructions.iter().any(|i| {
+                    matches!(
+                        i.kind,
+                        InstructionKind::Call {
+                            target: CallTarget::Indirect(_),
+                            ..
+                        }
+                    )
+                })
             })
+            .expect("the block calling c.run");
+        let call = block
+            .instructions
+            .iter()
+            .position(|i| matches!(i.kind, InstructionKind::Call { .. }))
+            .expect("c.run");
+        let saved_before = block.instructions[..call].iter().any(|i| {
+            matches!(i.kind, InstructionKind::RootStore { value: Operand::Value(v), .. } if v == c)
+        });
+        let reloaded_after = block.instructions[call + 1..]
+            .iter()
+            .any(|i| matches!(i.kind, InstructionKind::RootLoad { dst, .. } if dst == c));
+        let instructions = || main.blocks.iter().flat_map(|b| &b.instructions);
+        let slots_of_c: Vec<u32> = instructions()
+            .filter_map(|i| match i.kind {
+                InstructionKind::RootStore {
+                    slot,
+                    value: Operand::Value(v),
+                } if v == c => Some(slot),
+                _ => None,
+            })
+            .collect();
+        let c_slot_nulled = instructions().any(|i| {
+            matches!(i.kind, InstructionKind::RootStore { slot, value: Operand::Null }
+                if slots_of_c.contains(&slot))
+        });
+        (saved_before, reloaded_after, c_slot_nulled)
     };
 
-    let default = checked_ir(NAMED_REFS_SOURCE, DebugMode::Off);
-    let main = function(default.program(), "lo_method_4_Main_4_main");
-    assert!(!stores_c(main), "the default build never roots c");
-
-    let debug = checked_ir(NAMED_REFS_SOURCE, DebugMode::On);
-    let main = function(debug.program(), "lo_method_4_Main_4_main");
-    let roots = main.named_refs_in_root_slots();
-    let names: Vec<_> = roots
-        .iter()
-        .map(|r| main.register_names[r.0].as_deref().unwrap())
-        .collect();
-    assert_eq!(names, ["this", "c"]);
-    // Slots 0 and 1 belong to `this` and `c` for the whole function; the new
-    // Calc object, held across its constructor call, takes slot 2.
-    assert_eq!(main.root_slots, 3);
-    for instruction in main.blocks.iter().flat_map(|b| &b.instructions) {
-        if let InstructionKind::RootStore { slot, .. } | InstructionKind::RootLoad { slot, .. } =
-            instruction.kind
-        {
-            assert!(slot >= 2, "named roots are never saved, reloaded or nulled");
-        }
-    }
-
-    let system_v = TargetConstraints::system_v();
-    for allocation in [
-        allocate_registers(&debug, &system_v, DebugMode::On),
-        spill_everything_program(&debug, DebugMode::On),
-    ] {
-        let locations = &allocation.function_allocations[&main.symbol].register_locations;
-        assert_eq!(locations[&roots[0]], PhysicalLocation::Root(0));
-        assert_eq!(locations[&roots[1]], PhysicalLocation::Root(1));
-    }
-}
-
-#[test]
-fn debug_build_nulls_root_slots_before_storing_this() {
-    use register_allocator::{allocate_registers, TargetConstraints};
-    let ir = checked_ir(NAMED_REFS_SOURCE, DebugMode::On);
-    let allocation = allocate_registers(&ir, &TargetConstraints::system_v(), DebugMode::On);
-    let asm = crate::codegen::emit_program(ir.program(), &allocation).expect("emits");
-    let prologue: Vec<&str> = asm
-        .split("lo_method_4_Main_4_main:\n")
-        .nth(1)
-        .expect("Main.main")
-        .lines()
-        .take_while(|line| !line.contains("call lo_push_frame"))
-        .collect();
-    // `this` arrives in rdi and lives in root slot 0: its store must come after
-    // the shadow frame's slots are nulled, or the nulling would erase it.
-    let store_this = prologue
-        .iter()
-        .position(|line| line.trim_start().starts_with("mov qword ptr") && line.ends_with(", rdi"))
-        .expect("this is stored to its root slot");
-    let last_null = prologue
-        .iter()
-        .rposition(|line| line.trim_start().starts_with("mov qword ptr") && line.ends_with(", 0"))
-        .expect("root slots are nulled");
-    assert!(last_null < store_this, "{prologue:#?}");
+    // The default build stops tracking `c` once the program is done with it.
+    assert_eq!(around_last_call(DebugMode::Off), (false, false, false));
+    // -g keeps `c` in its root slot across every call and never clears it.
+    assert_eq!(around_last_call(DebugMode::On), (true, true, false));
 }
