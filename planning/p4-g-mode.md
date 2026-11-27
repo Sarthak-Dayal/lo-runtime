@@ -267,7 +267,7 @@ This doc lists everything the compiler (`compiler/`) needs so a `-g` build can b
 
 ## E. Runtime and validation
 
-- [ ] **G13 Strip debug info from the runtime archive.** §9.4 assumes exactly one CU per program; this makes that literally true.
+- [ ] ⏸ **G13 Strip debug info from the runtime archive.** §9.4 assumes exactly one CU per program; this makes that literally true.
   - **Today:** in the x86 `liblo_runtime.a`, 312 of 329 members carry `.debug_info`/`.debug_line` (rustc std), and 286 carry `.eh_frame`.
   - **Why it matters:**
     - `llvm-dwarfdump --verify` on the *linked* binary checks std's CUs too, which we don't control.
@@ -321,6 +321,7 @@ This doc lists everything the compiler (`compiler/`) needs so a `-g` build can b
   - drops the wrapper (`external = 1`) and anything with no DIE (`lo_entry`, the runtime, libc) from backtraces.
 - **The collector rewrites named-ref root slots.** It writes every root slot on every collection, and the value changes when an object moves. A watch on a ref local can therefore trap inside the collector. That falls under the "anywhere else in the runtime" case above: refresh the cached value and continue.
 - **Watch scope.** Watches must be deleted when their frame returns, because a later callee's prologue reuses the slot. Graded scripts guarantee this.
+- **Only read the LO program's own debug info.** A binary can contain other debug info, e.g. the Rust standard library's in the runtime if G13/S2 is skipped. Use only the unit our compiler wrote: it's the one covering the LO methods' addresses, and its `stmt_list` names our line program. Skip every other unit by its length field.
 - **Prologue writes and default init happen before `prologue_end`.** That's fine, since watches are only set at a stop after it.
 - **Line-table consumption rules for the debugger** (from the round-2 simulation):
   - When `step` enters a callee, skip rows before `prologue_end`. L23's "activation changed" rule would otherwise stop at the callee's entry row, before its frame is set up.
@@ -350,14 +351,14 @@ Lane D (emission)  S15 → S16 ────────────────�
                    S9,S17 → S20 → S21 → S22 ─────────────────────┘──────┘
 ```
 
-**Start immediately, in parallel:** S2, S5, S6, S8 (bringing S3's flag), S11, S15. None of them depends on anything else. S1 is done (kept as a local tool).
+**Start immediately, in parallel:** S5, S6, S8 (bringing S3's flag), S11, S15. None of them depends on anything else. S1 is done (kept as a local tool).
 
 ### Steps
 
 | # | Step | G-item | Main files | Depends on | Done when |
 |---|---|---|---|---|---|
 | **S1** ✅ | **Regression gate script** (done; kept as a local tool, not committed). It builds the baseline compiler from a git ref and the working tree, diffs `--emit-asm`, `--emit-asm --spill-all` and `--dump-ir` for every corpus program, and runs `cargo test`. | G17 | outside the repo | — | Passed on unchanged `main` (678 comparisons, 183 tests); a planted one-character selector change was caught (176 diffs) |
-| **S2** | **Strip the runtime archive's debug info** in `lo-build`: `objcopy --strip-debug` after the second cargo build, keeping `.eh_frame`. | G13 | `p3-grading-contract.sh` (+ P4 contract) | — | 0 members with `.debug_info`; 286 `.eh_frame` kept; P3 suite passes |
+| **S2** ⏸ | **Optional, decide later: strip the runtime archive's debug info.** Not needed for correctness: our debugger reads only the LO program's own debug info, and `--verify` passed with the Rust std debug info present. Stripping (`objcopy --strip-debug`, keeping `.eh_frame`) only makes gdb comparisons cleaner and binaries smaller. Its home is `lo-build` in the P4 grading contract, which isn't published yet. | G13 | P4 grading contract | — | Decide when the P4 contract exists |
 | **S3** | **Add the `-g` flag and a `DebugMode`.** *Lands together with its first consumer (S8), not on its own, so no unused parameter is ever threaded through.* Parse it, then thread the mode (unused) through `build_ir → lower_program → insert_gc_roots → remove_dead_copies → allocate → emit_program → select_function → Frame::new`. | G1 | `codegen/driver.rs`, signatures | — | `-g` is accepted and its output equals default output |
 | **S4** | **`-g` toolchain flags and source path.** *Lands with S16/S18, when there is CFI and a line table for them to matter to.* Pass `as --gdwarf-5` and `-Wl,--eh-frame-hdr` under `-g`, and pass the source path and comp_dir down to `emit_program`. | G1 | `codegen/driver.rs`, `codegen/mod.rs` | S3 | A `-g` binary has `.eh_frame_hdr` |
 | **S5** | **Record field declaration lines** in `FieldInfo`, from `own_fields`. | G2 | `type_checker/class_table.rs`, `declarations.rs` | — | Unit test reads a field's line |
