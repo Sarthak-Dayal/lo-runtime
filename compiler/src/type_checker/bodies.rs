@@ -9,9 +9,10 @@ use super::class_table::check_type_reference;
 use super::declarations::check_not_reserved_var_name;
 use super::{
     BindingInfo, ClassTable, ErrorCode, TypeError, TypedClassDecl, TypedConstructor,
-    TypedMethodBody, TypedMethodDecl, TypedProgram, TypedStmt,
+    TypedMethodBody, TypedMethodDecl, TypedProgram, TypedStmt, TypedVar,
 };
 use crate::ast::{Formal, MethodBody, Program, Stmt, Type, VarDecl};
+use crate::ir::GENERATED_LINE;
 use calls::{check_delegation, check_delegation_cycle, check_method_call};
 use expressions::{assignment_compatible, check_expr, expect_bool, typed_of};
 
@@ -99,13 +100,27 @@ struct BodyCtx<'a> {
     in_constructor: bool,
 }
 
-fn flatten_locals(locals: &[VarDecl]) -> Vec<(String, Type)> {
-    locals
+fn typed_formals(formals: &[Formal]) -> Vec<TypedVar> {
+    formals
+        .iter()
+        .map(|f| TypedVar {
+            name: f.identifier.clone(),
+            ty: f.declared_type.clone(),
+            line: f.line,
+        })
+        .collect()
+}
+
+/// One `TypedVar` per declared name: `int a, b;` gives `a` and `b` the same line.
+fn flatten_decls(decls: &[VarDecl]) -> Vec<TypedVar> {
+    decls
         .iter()
         .flat_map(|d| {
-            d.identifiers
-                .iter()
-                .map(move |n| (n.clone(), d.declared_type.clone()))
+            d.identifiers.iter().map(move |n| TypedVar {
+                name: n.clone(),
+                ty: d.declared_type.clone(),
+                line: d.line,
+            })
         })
         .collect()
 }
@@ -138,11 +153,7 @@ pub(super) fn check_bodies(
                     typed_methods.push(TypedMethodDecl {
                         method_name: method.method_name.clone(),
                         return_type: method.return_type.clone(),
-                        formals: method
-                            .formals
-                            .iter()
-                            .map(|f| (f.identifier.clone(), f.declared_type.clone()))
-                            .collect(),
+                        formals: typed_formals(&method.formals),
                         body: TypedMethodBody::Io(op.clone()),
                         line: method.line,
                     });
@@ -171,13 +182,9 @@ pub(super) fn check_bodies(
             typed_methods.push(TypedMethodDecl {
                 method_name: method.method_name.clone(),
                 return_type: method.return_type.clone(),
-                formals: method
-                    .formals
-                    .iter()
-                    .map(|f| (f.identifier.clone(), f.declared_type.clone()))
-                    .collect(),
+                formals: typed_formals(&method.formals),
                 body: TypedMethodBody::UserDefined {
-                    locals: flatten_locals(&body.locals),
+                    locals: flatten_decls(&body.locals),
                     stmts: typed_stmts,
                 },
                 line: method.line,
@@ -190,7 +197,11 @@ pub(super) fn check_bodies(
             let fields = info
                 .own_fields
                 .iter()
-                .map(|(n, t, _)| (n.clone(), t.clone()))
+                .map(|(name, ty, _)| TypedVar {
+                    name: name.clone(),
+                    ty: ty.clone(),
+                    line: GENERATED_LINE,
+                })
                 .collect();
             vec![TypedConstructor::Implicit { fields }]
         } else {
@@ -217,13 +228,9 @@ pub(super) fn check_bodies(
                     typed_stmts.push(check_stmt(stmt, &scope, &ctx, table)?);
                 }
                 typed_ctors.push(TypedConstructor::Explicit {
-                    formals: ctor
-                        .formals
-                        .iter()
-                        .map(|f| (f.identifier.clone(), f.declared_type.clone()))
-                        .collect(),
+                    formals: typed_formals(&ctor.formals),
                     delegation: typed_delegation,
-                    locals: flatten_locals(&ctor.body.locals),
+                    locals: flatten_decls(&ctor.body.locals),
                     stmts: typed_stmts,
                     line: ctor.line,
                 });
@@ -235,15 +242,7 @@ pub(super) fn check_bodies(
             class_name: class.class_name.clone(),
             kind: info.kind,
             extends: class.extends.clone(),
-            fields: class
-                .fields
-                .iter()
-                .flat_map(|d| {
-                    d.identifiers
-                        .iter()
-                        .map(move |n| (n.clone(), d.declared_type.clone()))
-                })
-                .collect(),
+            fields: flatten_decls(&class.fields),
             constructors: typed_constructors,
             methods: typed_methods,
             line: class.line,
@@ -378,4 +377,67 @@ fn check_stmt(
             TypedStmt::CallStmt(typed_call)
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{TypedClassDecl, TypedConstructor, TypedMethodBody};
+    use crate::{lexer, parser, type_checker};
+
+    fn lines(vars: &[super::TypedVar]) -> Vec<(&str, u32)> {
+        vars.iter().map(|v| (v.name.as_str(), v.line)).collect()
+    }
+
+    #[test]
+    fn formals_locals_and_fields_keep_their_declaration_lines() {
+        let source = "class Main () {\n\
+                      \x20   int main() { return 0; }\n\
+                      }\n\
+                      class Box ( int w; bool h; ) {\n\
+                      \x20   int f(int a,\n\
+                      \x20         bool b) {\n\
+                      \x20       int x, y;\n\
+                      \x20       String s;\n\
+                      \x20       return a;\n\
+                      \x20   }\n\
+                      }\n\
+                      class Pair ( int p; ) [\n\
+                      \x20   Pair(int q) {\n\
+                      \x20       int t;\n\
+                      \x20       p = q;\n\
+                      \x20   }\n\
+                      ] { }\n";
+        let tokens = lexer::tokenize(source).expect("lexes");
+        let program = parser::parse_program(&tokens).expect("parses");
+        let (typed, _) = type_checker::check_program(program).expect("type checks");
+        let class = |name: &str| -> &TypedClassDecl {
+            typed
+                .classes
+                .iter()
+                .find(|c| c.class_name == name)
+                .expect(name)
+        };
+
+        let f = &class("Box").methods[0];
+        assert_eq!(lines(&f.formals), [("a", 5), ("b", 6)]);
+        let TypedMethodBody::UserDefined { locals, .. } = &f.body else {
+            panic!("f has a user-defined body");
+        };
+        assert_eq!(lines(locals), [("x", 7), ("y", 7), ("s", 8)]);
+        assert_eq!(lines(&class("Box").fields), [("w", 4), ("h", 4)]);
+
+        let TypedConstructor::Implicit { fields } = &class("Box").constructors[0] else {
+            panic!("Box gets an implicit constructor");
+        };
+        assert_eq!(lines(fields), [("w", 0), ("h", 0)]);
+
+        let TypedConstructor::Explicit {
+            formals, locals, ..
+        } = &class("Pair").constructors[0]
+        else {
+            panic!("Pair declares its constructor");
+        };
+        assert_eq!(lines(formals), [("q", 13)]);
+        assert_eq!(lines(locals), [("t", 14)]);
+    }
 }
