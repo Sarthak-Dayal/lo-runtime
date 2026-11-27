@@ -12,6 +12,7 @@ use super::{
     TypedMethodBody, TypedMethodDecl, TypedProgram, TypedStmt, TypedVar,
 };
 use crate::ast::{Formal, MethodBody, Program, Stmt, Type, VarDecl};
+use crate::ir::GENERATED_LINE;
 use calls::{check_delegation, check_delegation_cycle, check_method_call};
 use expressions::{assignment_compatible, check_expr, expect_bool, typed_of};
 
@@ -196,10 +197,10 @@ pub(super) fn check_bodies(
             let fields = info
                 .own_fields
                 .iter()
-                .map(|(name, ty, line)| TypedVar {
+                .map(|(name, ty, _)| TypedVar {
                     name: name.clone(),
                     ty: ty.clone(),
-                    line: *line,
+                    line: GENERATED_LINE,
                 })
                 .collect();
             vec![TypedConstructor::Implicit { fields }]
@@ -428,7 +429,7 @@ mod tests {
         let TypedConstructor::Implicit { fields } = &class("Box").constructors[0] else {
             panic!("Box gets an implicit constructor");
         };
-        assert_eq!(lines(fields), [("w", 4), ("h", 4)]);
+        assert_eq!(lines(fields), [("w", 0), ("h", 0)]);
 
         let TypedConstructor::Explicit {
             formals, locals, ..
