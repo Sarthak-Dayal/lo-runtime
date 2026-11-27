@@ -1211,7 +1211,7 @@ class Calc () {
         let (typed, classes) = crate::type_checker::check_program(program).expect("type checks");
         let ir =
             lower::lower_program(&typed, &classes, crate::layout::NATIVE, debug).expect("lowers");
-        let mut program = gc_roots::insert_gc_roots(ir);
+        let mut program = gc_roots::insert_gc_roots(ir, debug);
         for function in &mut program.functions {
             liveness::remove_dead_copies(function, debug);
         }
@@ -1245,4 +1245,97 @@ class Calc () {
         )),
         "the default build still keeps some named values in registers"
     );
+}
+
+/// Lowered, rooted, cleaned and verified IR, as the driver builds it.
+fn checked_ir(source: &str, debug: DebugMode) -> CheckedIr {
+    let tokens = crate::lexer::tokenize(source).expect("lexes");
+    let program = crate::parser::parse_program(&tokens).expect("parses");
+    let (typed, classes) = crate::type_checker::check_program(program).expect("type checks");
+    let ir = lower::lower_program(&typed, &classes, crate::layout::NATIVE, debug).expect("lowers");
+    let mut program = gc_roots::insert_gc_roots(ir, debug);
+    for function in &mut program.functions {
+        liveness::remove_dead_copies(function, debug);
+    }
+    program.verify().expect("verifies")
+}
+
+/// `c` is read only as the receiver of `c.run(7)`, so it is never live across a
+/// call: the default build never roots it, and a collection during `c.run`
+/// would leave its home slot pointing at the old object.
+const NAMED_REFS_SOURCE: &str = "class Main () {
+    int main() {
+        Calc c;
+        int n;
+        c = new Calc();
+        n = c.run(7);
+        return n;
+    }
+}
+class Calc () {
+    int run(int x) { return x; }
+}
+";
+
+#[test]
+fn debug_build_saves_and_reloads_every_named_ref_around_every_call() {
+    // Around `c.run(7)`, the last call that sees `c`: whether `c` is saved into
+    // a root slot just before it, whether it is reloaded just after it, and
+    // whether any root slot holding `c` is ever set to null.
+    let around_last_call = |debug| {
+        let ir = checked_ir(NAMED_REFS_SOURCE, debug);
+        let main = function(ir.program(), "lo_method_4_Main_4_main");
+        let c = main
+            .register_names
+            .iter()
+            .position(|name| name.as_deref() == Some("c"))
+            .map(VirtualRegId)
+            .expect("c");
+        let block = main
+            .blocks
+            .iter()
+            .find(|block| {
+                block.instructions.iter().any(|i| {
+                    matches!(
+                        i.kind,
+                        InstructionKind::Call {
+                            target: CallTarget::Indirect(_),
+                            ..
+                        }
+                    )
+                })
+            })
+            .expect("the block calling c.run");
+        let call = block
+            .instructions
+            .iter()
+            .position(|i| matches!(i.kind, InstructionKind::Call { .. }))
+            .expect("c.run");
+        let saved_before = block.instructions[..call].iter().any(|i| {
+            matches!(i.kind, InstructionKind::RootStore { value: Operand::Value(v), .. } if v == c)
+        });
+        let reloaded_after = block.instructions[call + 1..]
+            .iter()
+            .any(|i| matches!(i.kind, InstructionKind::RootLoad { dst, .. } if dst == c));
+        let instructions = || main.blocks.iter().flat_map(|b| &b.instructions);
+        let slots_of_c: Vec<u32> = instructions()
+            .filter_map(|i| match i.kind {
+                InstructionKind::RootStore {
+                    slot,
+                    value: Operand::Value(v),
+                } if v == c => Some(slot),
+                _ => None,
+            })
+            .collect();
+        let c_slot_nulled = instructions().any(|i| {
+            matches!(i.kind, InstructionKind::RootStore { slot, value: Operand::Null }
+                if slots_of_c.contains(&slot))
+        });
+        (saved_before, reloaded_after, c_slot_nulled)
+    };
+
+    // The default build stops tracking `c` once the program is done with it.
+    assert_eq!(around_last_call(DebugMode::Off), (false, false, false));
+    // -g keeps `c` in its root slot across every call and never clears it.
+    assert_eq!(around_last_call(DebugMode::On), (true, true, false));
 }
