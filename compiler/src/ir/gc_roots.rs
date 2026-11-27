@@ -5,24 +5,37 @@
 //! the call (the collector updated the slot if the object moved). Every other
 //! slot is set to null, so an object the function no longer needs is not kept
 //! alive (`runtime-abi.md` §3.3). Each `Ref` gets one slot for the whole function.
+//!
+//! Under `-g`, named `Ref`s live in root slots `0..N` for the whole function
+//! (`FunctionIr::named_ref_roots`), so the collector updates them in place and a
+//! debugger never sees a stale pointer. They are not saved, reloaded or nulled
+//! around calls; temporaries take slots `N..`.
 
 use std::collections::{BTreeMap, HashMap};
 
 use super::liveness::live_across_calls;
 use super::*;
 
-pub fn insert_gc_roots(ir: CheckedIr) -> ProgramIr {
+pub fn insert_gc_roots(ir: CheckedIr, debug: DebugMode) -> ProgramIr {
     let mut program = ir.into_program();
     for function in &mut program.functions {
-        insert_function_roots(function);
+        insert_function_roots(function, debug);
     }
     program
 }
 
-fn insert_function_roots(function: &mut FunctionIr) {
-    let live_refs_at_call = refs_live_across_calls(function);
-    let slots = assign_root_slots(&live_refs_at_call);
-    let all_slots = 0..slots.len() as u32;
+fn insert_function_roots(function: &mut FunctionIr, debug: DebugMode) {
+    let named = match debug {
+        DebugMode::On => function.named_ref_roots(),
+        DebugMode::Off => vec![],
+    };
+    let mut live_refs_at_call = refs_live_across_calls(function);
+    for saved in live_refs_at_call.values_mut() {
+        saved.retain(|register| !named.contains(register));
+    }
+    let first_temporary_slot = named.len() as u32;
+    let slots = assign_root_slots(&live_refs_at_call, first_temporary_slot);
+    let all_slots = first_temporary_slot..first_temporary_slot + slots.len() as u32;
 
     for (block_index, block) in function.blocks.iter_mut().enumerate() {
         let mut instructions = Vec::with_capacity(block.instructions.len());
@@ -62,15 +75,16 @@ fn insert_function_roots(function: &mut FunctionIr) {
     function.root_slots = all_slots.end;
 }
 
-/// One slot per `Ref` that is live across some call, numbered in the order the
-/// calls appear.
+/// One slot per `Ref` that is live across some call, numbered from `first` in
+/// the order the calls appear.
 fn assign_root_slots(
     live_refs_at_call: &BTreeMap<(usize, usize), Vec<VirtualRegId>>,
+    first: u32,
 ) -> HashMap<VirtualRegId, u32> {
     let mut slots = HashMap::new();
     for saved in live_refs_at_call.values() {
         for &register in saved {
-            let next = slots.len() as u32;
+            let next = first + slots.len() as u32;
             slots.entry(register).or_insert(next);
         }
     }

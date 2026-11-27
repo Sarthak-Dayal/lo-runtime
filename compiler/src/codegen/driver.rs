@@ -41,7 +41,7 @@ const USAGE: &str = "usage: lo-compiler (--dump-ir FILE.lo | --emit-asm FILE.lo 
 pub fn build_ir(path: &OsStr, debug: DebugMode) -> Result<CheckedIr, String> {
     let (typed, classes) = crate::front_end(path)?;
     let ir = lower_program(&typed, &classes, NATIVE, debug)?;
-    let mut ir = gc_roots::insert_gc_roots(ir);
+    let mut ir = gc_roots::insert_gc_roots(ir, debug);
     for function in &mut ir.functions {
         crate::ir::remove_dead_copies(function, debug);
     }
@@ -59,7 +59,7 @@ pub fn compile_to_asm(
 ) -> Result<String, String> {
     let ir = build_ir(path, debug)?;
     let allocation = match strategy {
-        AllocStrategy::SpillAll => spill_everything_program(&ir),
+        AllocStrategy::SpillAll => spill_everything_program(&ir, debug),
         AllocStrategy::LinearScan => allocate_registers(&ir, &TargetConstraints::system_v(), debug),
     };
     emit_program(ir.program(), &allocation)

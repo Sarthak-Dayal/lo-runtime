@@ -14,9 +14,11 @@
 //!    registers; any other value takes caller-saved ones first.
 //! 4. target.rs: the register pool and the callee-saved set.
 //!
-//! Under `-g`, named values (`this`, formals, locals) first get stack slots of
+//! Under `-g`, named values (`this`, formals, locals) first get a stack home of
 //! their own and are left out of the scan, so each stays at one stack address
-//! for the whole function, which is what the debug info describes.
+//! for the whole function, which is what the debug info describes. A named
+//! `Ref` in a function with calls is homed in its shadow-frame root slot; every
+//! other named value gets a spill slot.
 //!
 //! Code generation (`codegen::frame`) turns the result into spill addresses and
 //! saves and restores the callee-saved registers the allocation used.
@@ -39,6 +41,8 @@ pub struct SpillSlotId(pub usize);
 pub enum PhysicalLocation {
     Register(PhysicalRegId),
     Spill(SpillSlotId),
+    /// Shadow-frame root slot `n` (only named `Ref`s under `-g`).
+    Root(u32),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -83,17 +87,26 @@ pub fn allocate_registers(
     }
 }
 
-/// Under `-g`, spill slots `0..K` for the function's K named values, in register
-/// order; otherwise none.
+/// Under `-g`, the home of each named value: root slot `i` for the `i`th of
+/// `FunctionIr::named_ref_roots`, and spill slots `0..K` for the other K, in
+/// register order. Without `-g`, none.
 fn stack_homes(function: &FunctionIr, debug: DebugMode) -> HashMap<VirtualRegId, PhysicalLocation> {
     if debug == DebugMode::Off {
         return HashMap::new();
     }
-    let named_registers = (0..function.register_names.len())
-        .filter(|&register| function.register_names[register].is_some())
-        .map(VirtualRegId);
-    named_registers
+    let roots = function.named_ref_roots();
+    let root_homes = roots
+        .iter()
         .enumerate()
-        .map(|(slot, register)| (register, PhysicalLocation::Spill(SpillSlotId(slot))))
-        .collect()
+        .map(|(slot, &register)| (register, PhysicalLocation::Root(slot as u32)));
+    let is_other_named = |register: &VirtualRegId| {
+        function.register_names[register.0].is_some() && !roots.contains(register)
+    };
+    let other_named_registers = (0..function.register_names.len())
+        .map(VirtualRegId)
+        .filter(is_other_named);
+    let spill_homes = other_named_registers
+        .enumerate()
+        .map(|(slot, register)| (register, PhysicalLocation::Spill(SpillSlotId(slot))));
+    root_homes.chain(spill_homes).collect()
 }

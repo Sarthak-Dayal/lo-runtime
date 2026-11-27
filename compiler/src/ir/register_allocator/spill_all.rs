@@ -7,29 +7,36 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{CheckedIr, FunctionIr, VirtualRegId};
+use crate::ir::{CheckedIr, DebugMode, FunctionIr, VirtualRegId};
 
 use super::{FunctionAllocation, PhysicalLocation, ProgramAllocation, SpillSlotId};
 
 /// Virtual register `n` gets spill slot `n`. No registers are used, so no
-/// callee-saved register needs preserving.
-pub fn spill_everything(function: &FunctionIr) -> FunctionAllocation {
+/// callee-saved register needs preserving. Under `-g`, named `Ref`s live in
+/// their root slots instead (`FunctionIr::named_ref_roots`), as in linear scan.
+pub fn spill_everything(function: &FunctionIr, debug: DebugMode) -> FunctionAllocation {
     let count = function.register_types.len();
+    let mut register_locations: HashMap<_, _> = (0..count)
+        .map(|n| (VirtualRegId(n), PhysicalLocation::Spill(SpillSlotId(n))))
+        .collect();
+    if debug == DebugMode::On {
+        for (slot, register) in function.named_ref_roots().into_iter().enumerate() {
+            register_locations.insert(register, PhysicalLocation::Root(slot as u32));
+        }
+    }
     FunctionAllocation {
-        register_locations: (0..count)
-            .map(|n| (VirtualRegId(n), PhysicalLocation::Spill(SpillSlotId(n))))
-            .collect(),
+        register_locations,
         spill_slot_count: count,
         used_callee_saved_registers: vec![],
     }
 }
 
-pub fn spill_everything_program(ir: &CheckedIr) -> ProgramAllocation {
+pub fn spill_everything_program(ir: &CheckedIr, debug: DebugMode) -> ProgramAllocation {
     let function_allocations: HashMap<_, _> = ir
         .program()
         .functions
         .iter()
-        .map(|function| (function.symbol, spill_everything(function)))
+        .map(|function| (function.symbol, spill_everything(function, debug)))
         .collect();
     ProgramAllocation {
         function_allocations,

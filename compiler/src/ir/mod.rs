@@ -156,6 +156,24 @@ impl FunctionIr {
             .any(|instruction| matches!(instruction.kind, InstructionKind::Call { .. }))
     }
 
+    /// The named `Ref`s (`this`, reference formals and locals) that live in
+    /// shadow-frame root slots `0..N` under `-g`, in register order, so the
+    /// collector updates them in place. Only a function with calls has a shadow
+    /// frame; a leaf function cannot collect, so its references need no root.
+    /// `gc_roots` and both allocators use this list, so they agree on the slots.
+    pub fn named_ref_roots(&self) -> Vec<VirtualRegId> {
+        if !self.has_calls() {
+            return vec![];
+        }
+        (0..self.register_types.len())
+            .filter(|&register| {
+                self.register_types[register] == IrType::Ref
+                    && self.register_names[register].is_some()
+            })
+            .map(VirtualRegId)
+            .collect()
+    }
+
     /// Adds a mutable virtual register, keeping its type and optional name together.
     /// The register is initially unassigned unless it is added to `params`.
     ///

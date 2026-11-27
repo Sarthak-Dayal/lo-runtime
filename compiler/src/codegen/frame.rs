@@ -78,6 +78,9 @@ pub struct Frame {
     spill_start: i32,
     spill_slots: usize,
     ret_save: Option<i32>,
+    /// A parameter lives in a root slot (a named `Ref` under `-g`), so the root
+    /// slots are nulled before the parameters are stored, not after.
+    params_in_roots: bool,
     /// Bytes subtracted from `rsp` after `push rbp ; mov rbp, rsp`. rsp is
     /// 16-aligned after `push rbp`, and this is a multiple of 16, so every call in
     /// the body starts aligned (System V §3.2.2).
@@ -127,12 +130,20 @@ impl Frame {
             -used
         });
 
+        let params_in_roots = function.params.iter().any(|param| {
+            matches!(
+                allocation.register_locations.get(param),
+                Some(PhysicalLocation::Root(_))
+            )
+        });
+
         Ok(Frame {
             saved,
             shadow,
             spill_start,
             spill_slots: allocation.spill_slot_count,
             ret_save,
+            params_in_roots,
             size: round_up(used, STACK_ALIGN),
         })
     }
@@ -170,11 +181,13 @@ impl Frame {
         Self::at(shadow.base + shadow.layout.root(slot) as i32)
     }
 
-    /// The operand for an allocation result: a register, or a spill slot in memory.
+    /// The operand for an allocation result: a register, or a spill or root slot
+    /// in memory.
     pub fn location(&self, location: PhysicalLocation, width: Width) -> Operand {
         match location {
             PhysicalLocation::Register(id) => Operand::Reg(x86_reg(id), width),
             PhysicalLocation::Spill(slot) => Operand::Mem(self.spill(slot), width),
+            PhysicalLocation::Root(slot) => Operand::Mem(self.root(slot), width),
         }
     }
 
@@ -184,7 +197,9 @@ impl Frame {
     /// is a call and may overwrite the argument registers. The allocator matches
     /// this by treating every parameter of a function with calls as surviving a
     /// call. Root slots start null so a collection never reads a stale pointer;
-    /// `parent` is filled in by `lo_push_frame`.
+    /// `parent` is filled in by `lo_push_frame`. When a parameter lives in a root
+    /// slot (`-g`), the shadow frame is initialized before the parameters move,
+    /// so nulling the slots cannot erase them.
     pub fn prologue(&self, params: &[Param]) -> Result<Vec<Inst>, String> {
         let mut out = vec![
             Inst::Push(Operand::r64(Reg::Rbp)),
@@ -203,21 +218,35 @@ impl Frame {
                 Operand::r64(*saved),
             ));
         }
-        self.move_params(params, &mut out)?;
+        if self.params_in_roots {
+            self.init_shadow_frame(&mut out);
+            self.move_params(params, &mut out)?;
+        } else {
+            self.move_params(params, &mut out)?;
+            self.init_shadow_frame(&mut out);
+        }
         if let Some(shadow) = &self.shadow {
-            let at = |offset: u32| Operand::Mem(Self::at(shadow.base + offset as i32), Width::W64);
-            out.push(Inst::Mov(at(shadow.layout.parent), Operand::imm(0)));
-            out.push(Inst::Mov(
-                at(shadow.layout.num_roots),
-                Operand::imm(i64::from(shadow.roots)),
-            ));
-            for slot in 0..shadow.roots {
-                out.push(Inst::Mov(at(shadow.layout.root(slot)), Operand::imm(0)));
-            }
             out.push(Inst::Lea(Reg::Rdi, Self::at(shadow.base)));
             out.push(Inst::Call("lo_push_frame".into()));
         }
         Ok(out)
+    }
+
+    /// Writes the shadow frame's `parent` and `num_roots` and nulls every root
+    /// slot, ahead of `lo_push_frame`. Nothing for a leaf function.
+    fn init_shadow_frame(&self, out: &mut Vec<Inst>) {
+        let Some(shadow) = &self.shadow else {
+            return;
+        };
+        let at = |offset: u32| Operand::Mem(Self::at(shadow.base + offset as i32), Width::W64);
+        out.push(Inst::Mov(at(shadow.layout.parent), Operand::imm(0)));
+        out.push(Inst::Mov(
+            at(shadow.layout.num_roots),
+            Operand::imm(i64::from(shadow.roots)),
+        ));
+        for slot in 0..shadow.roots {
+            out.push(Inst::Mov(at(shadow.layout.root(slot)), Operand::imm(0)));
+        }
     }
 
     /// Moves incoming parameters to their allocated locations, in three phases so

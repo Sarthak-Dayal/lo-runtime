@@ -1211,7 +1211,7 @@ class Calc () {
         let (typed, classes) = crate::type_checker::check_program(program).expect("type checks");
         let ir =
             lower::lower_program(&typed, &classes, crate::layout::NATIVE, debug).expect("lowers");
-        let mut program = gc_roots::insert_gc_roots(ir);
+        let mut program = gc_roots::insert_gc_roots(ir, debug);
         for function in &mut program.functions {
             liveness::remove_dead_copies(function, debug);
         }
@@ -1245,4 +1245,117 @@ class Calc () {
         )),
         "the default build still keeps some named values in registers"
     );
+}
+
+/// Lowered, rooted, cleaned and verified IR, as the driver builds it.
+fn checked_ir(source: &str, debug: DebugMode) -> CheckedIr {
+    let tokens = crate::lexer::tokenize(source).expect("lexes");
+    let program = crate::parser::parse_program(&tokens).expect("parses");
+    let (typed, classes) = crate::type_checker::check_program(program).expect("type checks");
+    let ir = lower::lower_program(&typed, &classes, crate::layout::NATIVE, debug).expect("lowers");
+    let mut program = gc_roots::insert_gc_roots(ir, debug);
+    for function in &mut program.functions {
+        liveness::remove_dead_copies(function, debug);
+    }
+    program.verify().expect("verifies")
+}
+
+/// True if `operand` is the register named `name` in `f`.
+fn holds_named(f: &FunctionIr, name: &str, operand: &Operand) -> bool {
+    match operand {
+        Operand::Value(v) => f.register_names[v.0].as_deref() == Some(name),
+        _ => false,
+    }
+}
+
+/// `c` is read only as the receiver of `c.run(7)`, so it is never live across a
+/// call: the default build never roots it, and a collection during `c.run`
+/// would leave its stack copy pointing at the old object.
+const NAMED_REFS_SOURCE: &str = "class Main () {
+    int main() {
+        Calc c;
+        int n;
+        c = new Calc();
+        n = c.run(7);
+        return n;
+    }
+}
+class Calc () {
+    int run(int x) { return x; }
+}
+";
+
+#[test]
+fn debug_build_keeps_named_refs_in_fixed_root_slots() {
+    use register_allocator::spill_all::spill_everything_program;
+    use register_allocator::{allocate_registers, PhysicalLocation, TargetConstraints};
+
+    let stores_c = |f: &FunctionIr| {
+        f.blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .any(|i| match &i.kind {
+                InstructionKind::RootStore { value, .. } => holds_named(f, "c", value),
+                _ => false,
+            })
+    };
+
+    let default = checked_ir(NAMED_REFS_SOURCE, DebugMode::Off);
+    let main = function(default.program(), "lo_method_4_Main_4_main");
+    assert!(!stores_c(main), "the default build never roots c");
+
+    let debug = checked_ir(NAMED_REFS_SOURCE, DebugMode::On);
+    let main = function(debug.program(), "lo_method_4_Main_4_main");
+    let roots = main.named_ref_roots();
+    let names: Vec<_> = roots
+        .iter()
+        .map(|r| main.register_names[r.0].as_deref().unwrap())
+        .collect();
+    assert_eq!(names, ["this", "c"]);
+    // Slots 0 and 1 belong to `this` and `c` for the whole function; the new
+    // Calc object, held across its constructor call, takes slot 2.
+    assert_eq!(main.root_slots, 3);
+    for instruction in main.blocks.iter().flat_map(|b| &b.instructions) {
+        if let InstructionKind::RootStore { slot, .. } | InstructionKind::RootLoad { slot, .. } =
+            instruction.kind
+        {
+            assert!(slot >= 2, "named roots are never saved, reloaded or nulled");
+        }
+    }
+
+    let system_v = TargetConstraints::system_v();
+    for allocation in [
+        allocate_registers(&debug, &system_v, DebugMode::On),
+        spill_everything_program(&debug, DebugMode::On),
+    ] {
+        let locations = &allocation.function_allocations[&main.symbol].register_locations;
+        assert_eq!(locations[&roots[0]], PhysicalLocation::Root(0));
+        assert_eq!(locations[&roots[1]], PhysicalLocation::Root(1));
+    }
+}
+
+#[test]
+fn debug_build_nulls_root_slots_before_storing_this() {
+    use register_allocator::{allocate_registers, TargetConstraints};
+    let ir = checked_ir(NAMED_REFS_SOURCE, DebugMode::On);
+    let allocation = allocate_registers(&ir, &TargetConstraints::system_v(), DebugMode::On);
+    let asm = crate::codegen::emit_program(ir.program(), &allocation).expect("emits");
+    let prologue: Vec<&str> = asm
+        .split("lo_method_4_Main_4_main:\n")
+        .nth(1)
+        .expect("Main.main")
+        .lines()
+        .take_while(|line| !line.contains("call lo_push_frame"))
+        .collect();
+    // `this` arrives in rdi and lives in root slot 0: its store must come after
+    // the shadow frame's slots are nulled, or the nulling would erase it.
+    let store_this = prologue
+        .iter()
+        .position(|line| line.trim_start().starts_with("mov qword ptr") && line.ends_with(", rdi"))
+        .expect("this is stored to its root slot");
+    let last_null = prologue
+        .iter()
+        .rposition(|line| line.trim_start().starts_with("mov qword ptr") && line.ends_with(", 0"))
+        .expect("root slots are nulled");
+    assert!(last_null < store_this, "{prologue:#?}");
 }
