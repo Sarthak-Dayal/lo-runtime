@@ -44,12 +44,12 @@ pub(super) fn allocate_function(
     homes: HashMap<VirtualRegId, PhysicalLocation>,
 ) -> FunctionAllocation {
     let surviving_calls = values_surviving_calls(function);
-    let spill_homes = homes
+    let named_stack_slots = homes
         .values()
         .filter(|location| matches!(location, PhysicalLocation::Spill(_)))
         .count();
     let mut function_allocation = FunctionAllocation {
-        spill_slot_count: spill_homes,
+        spill_slot_count: named_stack_slots,
         register_locations: homes,
         used_callee_saved_registers: Vec::new(),
     };

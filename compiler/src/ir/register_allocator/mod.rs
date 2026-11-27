@@ -94,19 +94,18 @@ fn stack_homes(function: &FunctionIr, debug: DebugMode) -> HashMap<VirtualRegId,
     if debug == DebugMode::Off {
         return HashMap::new();
     }
-    let roots = function.named_ref_roots();
-    let root_homes = roots
+    let named_refs = function.named_ref_roots();
+    let shadow_slot_homes = named_refs
         .iter()
         .enumerate()
         .map(|(slot, &register)| (register, PhysicalLocation::Root(slot as u32)));
-    let is_other_named = |register: &VirtualRegId| {
-        function.register_names[register.0].is_some() && !roots.contains(register)
+    let gets_stack_slot = |register: &VirtualRegId| {
+        function.register_names[register.0].is_some() && !named_refs.contains(register)
     };
-    let other_named_registers = (0..function.register_names.len())
+    let stack_slot_homes = (0..function.register_names.len())
         .map(VirtualRegId)
-        .filter(is_other_named);
-    let spill_homes = other_named_registers
+        .filter(gets_stack_slot)
         .enumerate()
         .map(|(slot, register)| (register, PhysicalLocation::Spill(SpillSlotId(slot))));
-    root_homes.chain(spill_homes).collect()
+    shadow_slot_homes.chain(stack_slot_homes).collect()
 }
