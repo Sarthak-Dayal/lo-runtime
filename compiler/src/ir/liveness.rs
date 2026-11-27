@@ -127,11 +127,12 @@ pub(crate) fn remove_dead_copies(function: &mut FunctionIr, debug: DebugMode) {
             let mut kept = Vec::with_capacity(block.instructions.len());
             for instruction in block.instructions.drain(..).rev() {
                 let destination = instruction.kind.destination();
-                let named = |dst: VirtualRegId| function.register_names[dst.0].is_some();
+                let is_register_unread = destination.is_some_and(|dst| !live.contains(&dst));
+                let keep_for_debugger = debug == DebugMode::On
+                    && destination.is_some_and(|dst| function.register_names[dst.0].is_some());
                 if matches!(instruction.kind, InstructionKind::Copy { .. })
-                    && destination.is_some_and(|dst| {
-                        !live.contains(&dst) && !(debug == DebugMode::On && named(dst))
-                    })
+                    && is_register_unread
+                    && !keep_for_debugger
                 {
                     changed = true;
                     continue;
