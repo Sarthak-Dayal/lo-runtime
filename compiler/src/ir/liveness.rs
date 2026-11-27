@@ -1,7 +1,7 @@
 //! Backward dataflow liveness per block, plus the one fact both the GC-root pass
 //! and the register allocator need: which values are live after each call.
 
-use crate::ir::{BasicBlock, FunctionIr, InstructionKind, VirtualRegId};
+use crate::ir::{BasicBlock, DebugMode, FunctionIr, InstructionKind, VirtualRegId};
 use std::collections::{BTreeMap, HashSet};
 
 pub struct LivenessInfo {
@@ -115,7 +115,9 @@ fn def_set(block: &BasicBlock) -> HashSet<VirtualRegId> {
 }
 
 /// Drop unread copies so dead local defaults do not extend live intervals.
-pub(crate) fn remove_dead_copies(function: &mut FunctionIr) {
+/// Under `-g`, copies into named values (`this`, formals, locals) are kept: a
+/// debugger reads those, and the statement would otherwise have no code.
+pub(crate) fn remove_dead_copies(function: &mut FunctionIr, debug: DebugMode) {
     loop {
         let liveness = compute_function_liveness(function);
         let mut changed = false;
@@ -125,8 +127,11 @@ pub(crate) fn remove_dead_copies(function: &mut FunctionIr) {
             let mut kept = Vec::with_capacity(block.instructions.len());
             for instruction in block.instructions.drain(..).rev() {
                 let destination = instruction.kind.destination();
+                let named = |dst: VirtualRegId| function.register_names[dst.0].is_some();
                 if matches!(instruction.kind, InstructionKind::Copy { .. })
-                    && destination.is_some_and(|dst| !live.contains(&dst))
+                    && destination.is_some_and(|dst| {
+                        !live.contains(&dst) && !(debug == DebugMode::On && named(dst))
+                    })
                 {
                     changed = true;
                     continue;
