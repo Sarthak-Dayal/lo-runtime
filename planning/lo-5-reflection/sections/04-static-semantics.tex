@@ -1,0 +1,123 @@
+%==========================================================================
+\section{Static semantics}
+\subsection*{New Type}
+ReflectInfo is a synthetic class, like Input and Output. It has these
+built-in methods, called with ordinary method-call syntax:
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{|*{5}{>{\raggedright\arraybackslash\ttfamily\footnotesize}X|}}
+\hline
+String class\_name() & String parent\_name() & int field\_count() &
+  String field\_name(int i) & String field\_type(int i) \\
+\hline
+int method\_count() & String method\_name(int i) & String method\_return(int i) &
+  int method\_arity(int i) & String method\_param\_type(int i, int j) \\
+\hline
+\end{tabularx}
+\end{center}
+
+ReflectInfo values can be stored, passed and returned like any class
+reference, including null. A program cannot declare a class named ReflectInfo
+(\code{E\_RESERVED\_CLASS\_NAME}), extend it, or construct it with new
+(\code{E\_REFLECT\_RESERVED\_CLASS}).
+
+\subsection*{Subtyping}
+No new subtype relations. ReflectInfo is unrelated to every user class, and
+null stays compatible with every class type, ReflectInfo included.
+
+\subsection*{Scoping and name resolution}
+No scoping changes. The new keywords are reserved. The member-name operand is
+an ordinary String expression. The type checker does not resolve it, so it
+never reports \code{E\_UNKNOWN\_METHOD} or \code{E\_UNKNOWN\_VARIABLE} for it,
+and lookup happens at runtime. For the same reason, invoke's and
+new\_instance's argument counts and types, and whether the requested type
+matches the member's declared type, are checked at runtime, not statically.
+
+\subsection*{Encapsulation}
+In LO-4, a field is reachable only by its bare name
+inside its own class's methods and constructors, i.e.\ only on
+\code{this}, whereas getfield and setfield reach any field of any object the caller
+holds a reference to, so reflection grants cross-object field access that
+LO-4 lacks. This weakens LO-4's encapsulation guarantee, but keeps the
+implementation simple, requiring no per-class reflectability flag and no extra
+runtime check. However, every such access is syntactically
+visible through the getfield or setfield keyword and remains type-checked.
+
+\subsection*{Type Rules}
+\begin{center}
+\renewcommand{\arraystretch}{2.6}
+\begin{tabular}{@{}l c@{}}
+\toprule
+(T-Reflect) &
+  $\infrule{\Gamma \vdash e : C \quad C \text{ is a user class}}
+           {\Gamma \vdash \tm{reflect}(e) : \tm{ReflectInfo}}$ \\
+(T-GetField) &
+  $\infrule{\Gamma \vdash e : C \quad C \text{ is a user class} \quad \Gamma \vdash n : \tm{String} \quad T \neq \tm{void}}
+           {\Gamma \vdash \tm{getfield}(T, e, n) : T}$ \\
+(T-SetField) &
+  $\infrule{\Gamma \vdash \tm{getfield}(T, e, n) : T \quad \Gamma \vdash v : S \quad S \le T}
+           {\Gamma \vdash \tm{setfield}(T, e, n, v)\ \text{ok}}$ \\
+(T-Invoke) &
+  $\infrule{\Gamma \vdash e : C \quad C \text{ is a user class} \quad \Gamma \vdash n : \tm{String} \quad \Gamma \vdash a_i : A_i \quad T \neq \tm{void}}
+           {\Gamma \vdash \tm{invoke}(T, e, n, a_1, \ldots, a_k) : T}$ \\
+(T-InvokeStmt) &
+  $\infrule{\Gamma \vdash e : C \quad C \text{ is a user class} \quad \Gamma \vdash n : \tm{String} \quad \Gamma \vdash a_i : A_i \quad T = \tm{void}}
+           {\Gamma \vdash \tm{invoke}(T, e, n, a_1, \ldots, a_k);\ \text{ok}}$ \\
+(T-NewInstance) &
+  $\infrule{\Gamma \vdash n : \tm{String} \quad \Gamma \vdash a_i : A_i \quad T \text{ is a user class}}
+           {\Gamma \vdash \tm{new\_instance}(T, n, a_1, \ldots, a_k) : T}$ \\
+(T-Allocate) &
+  $\infrule{\Gamma \vdash n : \tm{String} \quad T \text{ is a user class}}
+           {\Gamma \vdash \tm{allocate}(T, n) : T}$ \\[1ex]
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection*{Diagnostics}
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}l X@{}}
+\toprule
+\textbf{Error Code} & \textbf{Trigger Condition} \\
+\midrule
+\code{E\_REFLECT\_RECEIVER\_TYPE} & Receiver operand does not evaluate to a user class reference type. \\
+\code{E\_REFLECT\_TARGET\_TYPE} & getfield or setfield requests type void, or new\_instance's or allocate's T is not a user class. \\
+\code{E\_REFLECT\_VALUE\_TYPE} & The setfield value is not assignment-compatible with T. \\
+\code{E\_REFLECT\_RESERVED\_CLASS} & \code{new ReflectInfo(...)} or \code{extends ReflectInfo}. \\
+Existing codes & A non-String name (\code{E\_TYPE\_MISMATCH}), an unknown class in T
+  (\code{E\_UNKNOWN\_CLASS}), the wrong void/non-void form of invoke
+  (\code{E\_VOID\_CALL\_IN\_EXPRESSION} / \code{E\_NONVOID\_CALL\_AS\_STATEMENT}) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent
+\begin{minipage}[t]{0.49\linewidth}
+\textbf{Well-Formed}
+\begin{lstlisting}
+class Box (int count;) { }
+class Main () {
+  int main() {
+    Box b; b = new Box(2);
+    setfield(int, b, "count", 4);
+    return getfield(int, b, "count");
+  }
+}
+\end{lstlisting}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.49\linewidth}
+\textbf{Ill-Formed}
+\begin{lstlisting}
+class Box (int count;) { }
+class Main () {
+  int main() {
+    Box b; b = new Box(2);
+    setfield(int, b, "count", true);
+    return 0;
+  }
+}
+\end{lstlisting}
+\end{minipage}
+
+This program violates the setfield rule ($S \le T$). Diagnostic:
+\code{E\_REFLECT\_VALUE\_TYPE: setfield value has type bool, expected int}
+

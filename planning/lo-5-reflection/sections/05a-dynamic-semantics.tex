@@ -1,0 +1,109 @@
+%==========================================================================
+\section{Dynamic semantics}
+\subsection*{Operand Evaluation Order}
+All operands evaluate in strict left-to-right order before any dynamic
+validation occurs. The requested type T is not evaluated.
+\begin{enumerate}
+  \item \textbf{\code{getfield}(T, e, n):} Evaluate receiver e, then field name n.
+  \item \textbf{\code{setfield}(T, e, n, v):} Evaluate receiver e, field name n, then value v.
+  \item \textbf{\code{invoke}(T, e, n, $e_1, \ldots, e_k$):} Evaluate receiver
+    e, method name n, then positional arguments $e_1$ through $e_k$ sequentially.
+  \item \textbf{\code{new\_instance}(T, n, $e_1, \ldots, e_k$):} Evaluate class
+    name n, then positional arguments $e_1$ through $e_k$ sequentially.
+  \item \textbf{\code{allocate}(T, n):} Evaluate class name n.
+\end{enumerate}
+
+\subsection*{Dynamic Validation Sequence}
+After operand evaluation completes, the runtime validates in this order:
+\begin{enumerate}
+  \item \textbf{Receiver Null Check:} Verify receiver $o \neq \tm{null}$,
+    including the operand of reflect. Skipped for new\_instance and allocate,
+    which have no receiver.
+  \item \textbf{Member / Class Existence Check:} verify that the class C, field
+    f or method m exists in the dynamic metadata tables.
+  \item \textbf{Type Match Check:} verify that the requested type T matches
+    the target. A field's declared type must equal T, or, when T is a class,
+    be T or a subclass of T; this applies to both getfield and setfield. A
+    method's declared return type must equal T. For new\_instance and
+    allocate, verify that the named class is T or a subclass of T.
+  \item \textbf{Arity Check:} verify that the number of supplied arguments k
+    equals the target method's or constructor's declared parameter count.
+    Constructors are selected by arity, as with new.
+  \item \textbf{Parameter Type Compatibility Check:} verify that each
+    argument's static type $A_i$ (known at compile time and passed to the
+    runtime) satisfies $A_i \le P_i$ for every parameter.
+  \item \textbf{Value Check:} for setfield on a class-typed field, verify
+    that the value is null or that its runtime class is the field's declared
+    type or a subclass of it.
+\end{enumerate}
+If any validation step fails, execution aborts immediately with exit status
+140 and writes a diagnostic of the form \code{lo\_reflect: <reason>} to
+standard error. No field is written, no method body runs, and no object is
+allocated before validation passes. ReflectInfo query indices start at 0, and
+an out-of-range index also aborts with 140. Fields are listed inherited-first
+in declaration order; methods are listed in vtable order. Calling a query on a
+null ReflectInfo is an ordinary null method call (exit 102); allocation
+failure keeps exit 137.
+
+\subsection*{Memory Management, \code{ReflectInfo} Lifetimes, and Write Barriers}
+\begin{itemize}
+  \item \textbf{\code{ReflectInfo} Object Lifetime \& Receiver Reachability:}
+    \code{ReflectInfo} instance holds a raw pointer to static class metadata
+    stored in \code{.rodata}, not a managed reference to the receiver object.
+    Holding a ReflectInfo therefore does not keep the receiver alive during
+    garbage collection once all other references to the receiver are dropped.
+  \item \textbf{new\_instance Allocation:} after validation, new\_instance
+    behaves exactly like \code{new C($v_1, \ldots, v_k$)} with the
+    already-evaluated arguments. It allocates through \code{lo\_alloc}, sets
+    String fields to the empty string, and runs the chosen constructor,
+    including any \code{this(...)} or \code{super(...)} delegation.
+  \item \textbf{allocate Allocation:} after validation, allocate calls
+    \code{lo\_alloc} with the class's descriptor and stores the empty string
+    into each String field, including inherited ones. No constructor runs, so
+    int, bool and class-typed fields keep their defaults (0, false, null);
+    LO-4 already allows objects whose fields were never assigned (LO reference
+    \S4.4.2).
+  \item \textbf{GC Write Barrier Routing:} when setfield mutates a reference
+    field, the runtime helper routes the write through
+    \code{lo\_gc\_write\_barrier} after the field's value is validated.
+\end{itemize}
+
+\subsection*{Interaction with Control Flow}
+Reflective operations add no new control flow; each one either completes
+normally or aborts. A return inside an invoked method or a constructor returns
+from that method or constructor only, as in an ordinary call. Inside a loop,
+the lookup is repeated on each iteration. while and break are unchanged.
+
+\subsection*{Worked Example}
+This traces the program in Section 1 with
+\code{c = new\_instance(Counter, "Counter", 3);} in place of its new
+expression:
+\begin{enumerate}
+  \item \code{new\_instance(Counter, "Counter", 3)} evaluates
+    \code{"Counter"}, then \code{3}.
+    \begin{itemize}
+      \item[--] Class Counter exists and Counter $\le$ Counter.
+      \item[--] The implicit constructor has arity 1, and argument int $\le$ parameter int.
+      \item[--] The runtime allocates o and runs the constructor, so o.count = 3 and c = o.
+    \end{itemize}
+  \item \code{reflect(c)}: c evaluates to o, which is not null. The runtime
+    allocates q = ReflectInfo(Counter), and info = q.
+  \item \code{info.class\_name()} is an ordinary call. It allocates the string
+    \code{"Counter"}, which is printed.
+  \item \code{setfield(int, c, "count", 7)} evaluates c $\to$ o, then
+    \code{"count"}, then 7.
+    \begin{itemize}
+      \item[--] o is not null, and field count : int exists.
+      \item[--] The requested type int equals the declared type int.
+      \item[--] The runtime stores o.count = 7.
+    \end{itemize}
+  \item \code{invoke(int, c, "add", 5)} evaluates c $\to$ o, then
+    \code{"add"}, then 5.
+    \begin{itemize}
+      \item[--] o is not null, and add exists and returns int, matching the requested type.
+      \item[--] Arity is 1 = 1, and argument int $\le$ parameter int.
+      \item[--] add runs on o with k = 5 and returns (7 + 5) = 12.
+    \end{itemize}
+  \item main returns 12.
+\end{enumerate}
+

@@ -1,0 +1,46 @@
+%==========================================================================
+\section{Risk register}
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}>{\raggedright}p{5.2cm} l X@{}}
+\toprule
+\textbf{Technical \& Project Risk} & \textbf{Severity} & \textbf{Concrete Mitigation Strategy} \\
+\midrule
+1. Incorrect metadata or signature validation causes unsafe field access or
+  indirect calls. Runtime names may select an unexpected field, override, or
+  constructor; a wrong offset or calling signature can corrupt memory; a
+  missing or wrong setfield value check lets a wrong-class object into a
+  class-typed field, so later calls through it use the wrong vtable &
+  High &
+  Generate metadata from the checked class table and shared target-layout
+  helpers. Validate member existence, requested type, arity, and argument
+  compatibility before access or invocation. Reuse ordinary construction code
+  for new\_instance. Test inherited members, mixed argument types,
+  many-argument calls, and failed validation without mutation. The value
+  check (validation step 6) guards class-typed field writes; test 8
+  exercises it. \\
+\midrule
+2. GC rooting failure around reflective helper calls (a pointer held across an
+  allocation gets moved or freed) &
+  High &
+  Root all live pointers before every helper call, as the ABI already
+  requires. Helpers that allocate root their own pointers. Tests 4 and 11
+  exercise collection during reflective operations. \\
+\midrule
+3. new\_instance's constructor handling (arity selection, String field
+  defaults, this/super delegation) diverges from new; allocate runs no
+  constructor and does not share this risk &
+  Medium &
+  Generate the construct functions from the same codegen path
+  new uses, so construction logic exists in one place. Test 6 checks the
+  defaults. It is also the first feature cut. \\
+\midrule
+4. allocate creates objects that no constructor produced, skipping any
+  setup a constructor would do &
+  Low &
+  Documented in \S5. LO-4 already allows objects whose fields were never
+  assigned (LO reference \S4.4.2). Only the serializer path relies on
+  allocate, and test 11 checks the defaults. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+

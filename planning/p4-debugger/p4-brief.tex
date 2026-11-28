@@ -1,0 +1,346 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.65in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,array,tabularx}
+\usepackage{listings}
+\usepackage{xcolor}
+\PassOptionsToPackage{obeyspaces,spaces}{url}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{xltabular}
+\usepackage[most]{tcolorbox}
+
+\setlist{nosep,leftmargin=1.4em}
+\titlespacing*{\section}{0pt}{1.4ex}{0.6ex}
+\titlespacing*{\subsection}{0pt}{1.2ex}{0.3ex}
+\setlength{\parskip}{0.35em}
+\setlength{\parindent}{0pt}
+
+\lstdefinestyle{code}{
+  basicstyle=\ttfamily\footnotesize,
+  columns=fullflexible,
+  keepspaces=true,
+  frame=single,
+  rulecolor=\color{black!30},
+  backgroundcolor=\color{black!3},
+  xleftmargin=0.3em, xrightmargin=0.3em,
+  aboveskip=0.4em, belowskip=0.2em,
+  breaklines=true
+}
+\lstset{style=code}
+\newcommand{\code}[1]{\texttt{\small #1}}
+
+\DeclareUrlCommand\cd{\def\UrlFont{\ttfamily\small}}
+\makeatletter
+\g@addto@macro\UrlBreaks{\do\_\do\:\do\(\do\,\do\.}
+\makeatother
+\newcommand{\mV}{\textsf{\scriptsize[V]}}
+\newcommand{\mI}{\textsf{\scriptsize[I]}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\renewcommand{\arraystretch}{1.12}
+\DisableLigatures[-]{encoding=T1,family=tt*}
+
+% ---- decision layout ----
+\newcommand{\dec}[4]{%
+  \phantomsection\label{dec:#1}\subsection*{#1\quad #2}%
+  \vspace{-0.4ex}{\small\textit{Needed by: #3.\quad Depends on Chapter 9: #4.}}\par}
+\newcommand{\lbl}[1]{\textbf{#1}\enspace}
+
+\title{\vspace{-1.2em}\textbf{P4 Debugger: Project Brief}\vspace{-0.4em}}
+\author{Group 6, CS 378H, Fall 2026 \quad\textbullet\quad Team: Neha, Jay, Rahik, Sarthak}
+\date{Draft of Thu 11/26/2026}
+
+\begin{document}
+\maketitle
+\vspace{-1em}
+
+\textbf{What this is.} A quick way for anyone on the team to get up to speed on P4. It covers what we build, how a debugger works, what is settled, and the debugger-side design decisions still open. The compiler's \code{-g} work is specified step by step in Jay's \cd{planning/p4-g-mode.md} (branch \cd{docs/p4-g-plan}); this brief summarizes its decisions in \S\ref{sec:lo5} and does not repeat it. \mV{} means checked against code or the spec; \mI{} means inferred or recalled (mostly gdb behaviour).
+
+%==========================================================================
+\section{What P4 is}\label{sec:what}
+
+\begin{itemize}
+\item \textbf{What we build.} Two halves. (1) A \code{-g} mode in our compiler that emits debug information alongside the native code. (2) A command-line debugger, built on Linux's \code{ptrace}, that runs our \code{-g} binaries: breakpoints, stepping, backtraces, printing variables, and hardware watchpoints. It has an interactive prompt and a batch mode that runs a script and prints a transcript.
+\item \textbf{How it is graded.} Correctness 50\%: the instructor runs a hidden superset of published test \emph{triples} (program, command script, expected transcript) in batch mode and diffs our output \textbf{byte for byte}; the expected output is what real gdb does, rewritten into a fixed format. Plus a check that our debug info is valid. Code review 20\% (the process interface and whether the DWARF parsers are honest rather than guessing offsets). Viva 20\%: each of us drives the debugger live on an unseen program and explains what happens. Our own tests 10\% (at least eight triples).
+\item \textbf{When.} \textbf{Mon 11/30, 11:59pm Central}, tagged \code{p4-final}. LO-5 talk block~1 is in class that same day.
+\item \textbf{Where we are.} Nothing is built: no \code{-g} flag, no debug output, no debugger code \mV.
+\end{itemize}
+
+\textbf{Contracts we have:} the DWARF Subset Reference is \textbf{Chapter 9} of the LO language reference, and the ``architecture reference'' is \textbf{Chapter 8} (Native x86-64 Back End). Both are binding.
+
+\textbf{Still to request:}
+\begin{itemize}
+\item \textbf{Published conformance triples.} They fix exact spacing and edge cases, and show gdb's real behaviour on stepping and watchpoints.
+\item \textbf{P4 grading contract} and \textbf{course x86-64 host access}. How the grader invokes the debugger and builds binaries; the host is the only place the live debugger can run.
+\end{itemize}
+
+\begin{tcolorbox}[enhanced,breakable,colback=black!3,colframe=black!35,boxrule=0.5pt,arc=1pt,left=6pt,right=6pt,top=3pt,bottom=3pt,title={\textbf{Terms you'll see}},coltitle=black,colbacktitle=black!10,fonttitle=\normalsize]
+\small
+\begin{description}[leftmargin=0pt,labelsep=0.4em,itemsep=0.15em]
+\item[ptrace] The Linux system call a debugger uses to start, stop, read and write another process (the \emph{debuggee}).
+\item[SIGTRAP] The signal the debuggee receives whenever it stops for the debugger (breakpoint, single step, watchpoint).
+\item[int3] A one-byte x86 instruction (\code{0xCC}). A software breakpoint is that byte written over the first byte of an instruction.
+\item[Debug registers] Four x86 registers (dr0--dr3) that hold addresses for the CPU to watch, plus dr7 (which slots are on, watching what) and dr6 (which slot fired). Used for \textbf{watchpoints}: stop when memory is written.
+\item[DWARF] The standard debug-information format inside Linux binaries. P4 requires version~5.
+\item[DIE] ``Debugging information entry'': one record in DWARF, e.g.\ a function (a \emph{subprogram}), a parameter, a local, or a type.
+\item[Line table] A DWARF table mapping machine-code addresses to source lines. Rows can carry flags: \code{is\_stmt} (``a statement starts here'') and \code{prologue\_end}.
+\item[Prologue] The instructions at a function's start that set up its stack frame, before the body's first statement.
+\item[CFI / CFA] ``Call frame information'': tables saying how to find the caller's registers at any instruction. The CFA (canonical frame address) is the value they compute. Used to walk up the stack (\emph{unwinding}) for backtraces.
+\item[\code{DW\_OP\_fbreg} n] A DWARF variable location meaning ``frame base plus $n$'': the variable lives in a fixed stack slot.
+\item[Home slot / spill-all] A home slot is a variable's fixed stack location. Spill-all is our existing register-allocation mode that gives every value its own slot.
+\item[Triple / golden / oracle] A test (program, script, expected ``golden'' transcript). gdb is the oracle: its behaviour defines correct output.
+\item[DSR] The DWARF Subset Reference: Chapter 9 of the LO language reference.
+\end{description}
+\end{tcolorbox}
+
+%==========================================================================
+\section{How a debugger works, in plain terms}\label{sec:how}
+
+\begin{itemize}
+\item \textbf{Launching.} The debugger forks; the child asks to be traced (\code{PTRACE\_TRACEME}) and then executes the program. The child stops immediately and the debugger takes control. From then on, every stop arrives as a \code{SIGTRAP}, and the debugger asks the kernel \emph{why} it stopped. We also disable address randomization so runs are repeatable.
+\item \textbf{Breakpoints.} To stop at an address, write \code{int3} over its first byte. When the CPU executes it, the program stops one byte later; the debugger backs the program counter up. To continue, it puts the original byte back, executes one instruction, and writes \code{int3} again (``step over and replant'').
+\item \textbf{Source lines and stepping.} The line table says which addresses belong to which line. \code{break file:line} looks up that line's address. \code{step} and \code{next} execute one instruction at a time until execution reaches the start of a different line; \code{next} also runs a called function to completion instead of entering it.
+\item \textbf{Backtraces.} To list callers, the debugger uses CFI to find where the current function's caller saved its return address and registers, then repeats one level up. Function names come from DIEs.
+\item \textbf{Reading values.} A variable's DIE gives its location (a stack slot via \code{DW\_OP\_fbreg}) and its type. For an object, the debugger reads the object's header to find its runtime class descriptor, and so its \emph{dynamic} class; DWARF gives the field offsets.
+\item \textbf{Watchpoints.} The debugger writes the address into a free debug register and sets bits in dr7. The CPU stops the program \emph{just after} any write to it; dr6 says which slot fired. The debugger then compares old and new values.
+\item \textbf{Why gdb matters more than the textbook.} The expected transcripts come from gdb. Brand's book (the course text) teaches simpler rules than gdb's, so wherever they differ we must copy gdb. Several decisions below exist only because of that gap.
+\end{itemize}
+
+%==========================================================================
+\section{What is already decided}\label{sec:lo5}
+
+\textbf{Compiler \code{-g} mode} (Jay's \cd{p4-g-mode.md}, checked against Chapter~9 and tested in the course container):
+\begin{itemize}
+\item \textbf{Default build unchanged.} Everything is behind \code{-g}; a script diffs the default assembly and IR dump of every test program before each merge.
+\item \textbf{Toolchain.} \code{-g} output is assembled with \code{as --gdwarf-5} and linked with \code{-Wl,--eh-frame-hdr}; gas builds the line table from our \code{.loc} directives.
+\item \textbf{Line numbers.} Each basic block records the line of its final jump or return; structural jumps get none. The first instruction of each line is its one stopping point.
+\item \textbf{Fixed variable homes.} Every named variable gets one fixed stack slot; references in functions with calls use their GC root slot, so the moving collector keeps them correct. Assignments to named variables are never optimized away.
+\item \textbf{Generated functions} (program entry, \code{main} wrapper, implicit constructors, I/O methods) are emitted first with no line rows, so stepping and breakpoints never land in them. The \code{main} wrapper and \code{Main.main} are told apart by \code{DW\_AT\_external}.
+\item \textbf{Unwinding.} Exactly Chapter~9's three-state CFI in \code{.eh\_frame}; no epilogue CFI.
+\item \textbf{Debug info.} A hand-written \code{.debug\_info} per Chapter~9: \code{DW\_LANG\_C99}, inline strings, \code{bool} as 1 byte, classes as pointer-to-class types with their own fields.
+\item \textbf{Optional:} stripping the Rust runtime's debug info is not needed for correctness; decide when the grading contract is out.
+\end{itemize}
+
+\textbf{Team decisions (11/26):} LO-5 code is added only to programs that use reflection, so P4 test programs compile as before; LO-5 lives on \code{lo5/integration} until \code{p4-final}.
+
+\textbf{Still open and shared with LO-5:} where a watchpoint reports a write made inside a runtime helper (the GC write barrier now, LO-5's reflective setters later; see \hyperref[dec:D10]{D10}), and what we promise for \code{-g} on LO-5 programs (\hyperref[dec:L17]{L17}). LO-5's new generated functions must be recorded with the right kind in the \code{-g} side table so they get no line rows.
+
+%==========================================================================
+\clearpage
+\section{Open design decisions}\label{sec:decisions}
+
+Ordered by what blocks work first. Compiler-side items (D1 variable homes, D2 line table, D3 CFI, D7 generated functions, L16 runtime stripping) are now settled by \cd{p4-g-mode.md}; the rest are debugger-side and still open.
+
+\begin{xltabular}{\linewidth}{@{}L{0.7cm}Y L{5.0cm} L{1.3cm} L{1.1cm}@{}}
+\toprule
+\# & Question & Draft answer & Needed & DSR? \\
+\midrule
+\endfirsthead
+\toprule \# & Question & Draft answer & Needed & DSR? \\ \midrule
+\endhead
+D4 & Debugger language and libraries & Rust, own parsers & Thu & No \\
+D9 & Process-interface shape & Trait, live + mock & Thu & No \\
+D1 & How variables get stack slots & Reuse spill-all & Thu & No \\
+D7 & Hiding generated functions & Origin label (Dec.~5) & Thu & Partly \\
+D5 & Keeping program output out of transcript & Redirect child output & Fri & No \\
+D2 & How the line table is produced & Assembler builds it & Fri & Yes \\
+D3 & Unwind-table format & \code{.eh\_frame} & Fri & Yes \\
+D6 & Matching gdb's stopping rules & gdb's rules, calibrated & Fri & Partly \\
+L16 & Strip runtime debug info & Assign owner, ask & Fri & No \\
+D8 & Finding an object's real class & Header $\to$ class name & Sat & Yes \\
+D10 & What a watchpoint watches & Fixed address, changes only & Sun & No \\
+L17 & \code{-g} on LO-5 programs & Compile and verify only & Later & No \\
+\bottomrule
+\end{xltabular}
+
+%--------------------------------------------------------------------------
+\dec{D4}{Which language and libraries for the debugger?}{Thu}{no}
+\lbl{Why it matters.}
+\begin{itemize}
+\item Everything else is built in it. The spec recommends Rust with the \code{nix} library for ptrace.
+\item Code review grades whether the DWARF parsers are ``honest''. Off-the-shelf parsers (\code{gimli}, \code{object}) would hide the graded work.
+\item \code{nix} is not in our local package cache \mV; we do not know if the course host has network access.
+\end{itemize}
+\lbl{Options.}
+\begin{itemize}
+\item \textbf{Rust, new \cd{debugger/} crate, hand-written parsers.} Matches the spec and our skills; parsers are ours to explain at the viva.
+\item \textbf{C++ (Brand's language).} Closer to the book's code, but a second language for the team four days out.
+\end{itemize}
+\lbl{Draft recommendation.} Rust with hand-written ELF and DWARF parsers. Ask whether \code{gimli}/\code{object} may be used in tests only, as a cross-check. If \code{nix} cannot be fetched on the host, vendor it or call \code{libc::ptrace} directly.
+
+%--------------------------------------------------------------------------
+\dec{D9}{What does the boundary between the debugger and the traced process look like?}{Thu}{no}
+\lbl{Why it matters.}
+\begin{itemize}
+\item It is graded in code review, and it decides how much we can build on our Macs: the live process only works on the Linux host.
+\item With a clean boundary, the engine, script parser and transcript printer can be tested on a laptop against a scripted fake process.
+\end{itemize}
+\lbl{Draft recommendation.} One trait: read/write memory, get/set registers, read/write debug registers, continue, single-step, and wait. Wait returns a stop reason: breakpoint, single step, watchpoint hit (with dr6), exited (with code), or killed by a signal. Two implementations: the live one (Linux only) and a mock. The live one hides a kernel quirk: an \code{int3} stop is reported with an unexpected signal code, so classifying stops belongs inside \code{wait}, not in the engine. These details are good viva material.
+
+%--------------------------------------------------------------------------
+\dec{D1}{How does every named variable get a fixed stack slot under \code{-g}?}{Thu}{no}
+\lbl{Why it matters.}
+\begin{itemize}
+\item The spec requires every parameter and local to live in one fixed slot, so the debugger reads it with one \code{DW\_OP\_fbreg}.
+\item There is a hidden bug \mV: a cleanup pass can delete a local's initial value (\code{0}, \code{false}, \code{null}, empty string). The spec's own example prints \code{c = null} before construction; with the pass on, we would print stack garbage.
+\end{itemize}
+\lbl{Options.}
+\begin{itemize}
+\item \textbf{Reuse spill-all.} Already a supported mode; no allocator change. Code is slower, which does not matter for \code{-g}.
+\item \textbf{Change linear scan} to pin named values to the stack. Faster code, but a risky allocator change this week.
+\end{itemize}
+\lbl{Draft recommendation.} Spill-all under \code{-g}, and skip the dead-copy cleanup for named variables (or entirely) under \code{-g}. Take slot offsets from the existing frame code, never recompute them.
+
+%--------------------------------------------------------------------------
+\dec{D7}{How do we hide functions the programmer never wrote, and give every instruction a line?}{Thu (shared-prep PR)}{partly}
+\lbl{Why it matters.}
+\begin{itemize}
+\item Backtraces must list only LO methods and constructors; \code{step} must not stop in generated code.
+\item Today the only signal is ``line number 0'', which the code warns against relying on.
+\item Block-ending lines are already decided (Decision~4); this is about generated functions.
+\end{itemize}
+\lbl{Options.}
+\begin{itemize}
+\item \textbf{Explicit origin label} on each compiled function (user method, user constructor, implicit constructor, preamble method, generated). Small shared-PR change; nothing guessed.
+\item \textbf{Guess from line 0} or \textbf{from symbol names} in the debugger. No compiler change, but fragile; a new kind of helper silently breaks it.
+\end{itemize}
+\lbl{Draft recommendation.} The origin label (Decision~5). Emit debug entries and line rows only for user methods and constructors. Whether generated functions instead get entries marked ``artificial'' depends on the DSR. Also attribute each function's exit sequence to the \code{return} statement's line, so \code{next} on a \code{return} does not report a phantom line.
+
+%--------------------------------------------------------------------------
+\dec{D5}{How do we keep the program's own output out of the transcript?}{Fri}{no (needs the grading contract)}
+\lbl{Why it matters.} The transcript must contain only debugger output, but the debuggee prints too.\\
+\lbl{Draft recommendation.} Redirect the child's stdout and stderr (to \code{/dev/null} or a file) just before it starts, with a flag to choose, plus an optional stdin file for programs that read input. The exact interface must follow the grading contract once we have it.
+
+%--------------------------------------------------------------------------
+\dec{D2}{Who builds the line table, and what must our parser read?}{Fri}{yes}
+\lbl{Why it matters.}
+\begin{itemize}
+\item \code{break file:line}, \code{step}, \code{next} and every \code{FILE:L} in the transcript depend on it.
+\item \textbf{The book's parser will not port directly.} Brand's parsers accept only DWARF version~4 and reject others; P4 requires version~5, whose headers and file numbering differ. Budget extra parser work. The core line-table state machine does carry over.
+\end{itemize}
+\lbl{Options.}
+\begin{itemize}
+\item \textbf{Let the assembler build it} from \code{.loc} directives we emit. Small, and gdb-compatible. Version-5 output probably needs an assembler flag that depends on the host's tools \mI.
+\item \textbf{Encode it ourselves.} Full control and a clear review story, but several hundred lines.
+\end{itemize}
+\lbl{Draft recommendation.} Let the assembler build it, if the DSR allows; otherwise encode it. Emit a new line entry only when the source line changes (this matters for D6), and mark where the prologue ends.
+
+%--------------------------------------------------------------------------
+\dec{D3}{Which unwind-table format do we emit and parse?}{Fri}{yes}
+\lbl{Why it matters.}
+\begin{itemize}
+\item Backtraces must be done ``by CFI unwinding'' (graded); the shortcut of following saved frame pointers is not enough.
+\item The stack can include Rust runtime frames (e.g.\ during a reference-field write), and those only come with the \code{.eh\_frame} format \mI.
+\end{itemize}
+\lbl{Options.}
+\begin{itemize}
+\item \textbf{\code{.eh\_frame}}, the assembler's default from \code{.cfi} directives, and what Brand's parser handles. Needed for Rust frames anyway.
+\item \textbf{\code{.debug\_frame}} (or both). Only if the DSR requires it; a second parser.
+\end{itemize}
+\lbl{Draft recommendation.} \code{.eh\_frame}, with a few standard \code{.cfi} directives around every function's prologue and epilogue (including the synthesized \code{main}). When looking up a caller, use the return address minus one, because a return address can belong to the next line or even the next function.
+
+%--------------------------------------------------------------------------
+\dec{D6}{How exactly do we copy gdb's rules for where execution stops?}{Fri (first live session)}{partly}
+\lbl{Why it matters.}
+\begin{itemize}
+\item Every ``Hit breakpoint'' and ``Stopped:'' line depends on these rules, so this is most of the 50\%.
+\item Brand's stepping differs from gdb in four ways, and each would produce wrong transcript lines:
+  \begin{enumerate}[label=(\arabic*)]
+  \item It stops when the line-table \emph{row} changes, not the line \emph{number}, giving extra stops.
+  \item Stepping into a runtime call stops inside Rust; gdb steps back out.
+  \item \code{next} over a recursive call can stop early, because it does not check which stack frame it is in.
+  \item After returning to a caller it stops mid-line; gdb, as far as we recall, continues to the next line \mI.
+  \end{enumerate}
+\item Our prologue contains a call (frame setup for the GC), so parameter values are valid only after it; breakpoints on a function must land after the prologue.
+\end{itemize}
+\lbl{Options.}
+\begin{itemize}
+\item \textbf{Follow Brand.} Fastest to write; known to diverge from the goldens.
+\item \textbf{Implement gdb's rules explicitly} and check them against real gdb on the host early.
+\end{itemize}
+\lbl{Draft recommendation.} gdb's rules: compare line numbers; step back out of code without lines; check the frame on \code{next}; continue to the next line start after a return; skip the prologue for function breakpoints. In the compiler, make the prologue a single line entry and mark \code{prologue\_end}, so gdb and our debugger agree however gdb finds prologues. Calibrate on Friday, not Sunday: several of these rules are from memory.
+
+%--------------------------------------------------------------------------
+\dec{L16}{Do we strip the Rust runtime's debug info from \code{-g} binaries?}{Fri (assign an owner)}{no}
+\lbl{Why it matters.}
+\begin{itemize}
+\item If the runtime library carries DWARF (unverified; Rust libraries usually do), the graded validity check also checks Rust's units, and gdb's \code{step} may enter Rust source, making the goldens differ from us.
+\item Either way the runtime's \code{.eh\_frame} must stay, or we cannot unwind through it.
+\end{itemize}
+\lbl{Options.} Strip runtime \code{.debug\_*} sections in \code{-g} links (keep \code{.eh\_frame}); or leave them. The instructor may require one.\\
+\lbl{Draft recommendation.} Name one owner who asks the instructor (and which runtime the grader links), then decides. LO-5 accepts either outcome.
+
+%--------------------------------------------------------------------------
+\dec{D8}{How does the debugger find an object's real class and fields?}{Sat}{yes}
+\lbl{Why it matters.} \code{print c} must show the \emph{dynamic} class (a \code{Circle} held in a \code{Shape} variable prints as \code{Circle}) and its fields.\\
+\lbl{Options.}
+\begin{itemize}
+\item \textbf{Read the class name} through the object header's descriptor pointer and look up that class's DWARF type. This is what the spec describes.
+\item \textbf{Map the descriptor address} to a class via the symbol table. Good as a cross-check only.
+\item \textbf{Use LO-5's reflection tables.} Never: they exist only in LO-5 builds, and P4's contract is closed.
+\end{itemize}
+\lbl{Draft recommendation.} Read the class name from the header; take fields and offsets from DWARF. No runtime changes are needed: the debugger reads headers, descriptors and Strings directly from memory.
+
+%--------------------------------------------------------------------------
+\dec{D10}{What exactly does \code{watch obj.field} watch, and when is a hit reported?}{Sun}{no (needs architecture reference §2.6)}
+\lbl{Why it matters.}
+\begin{itemize}
+\item One required test is a watchpoint test, and watchpoints are viva material.
+\item \textbf{Same-value writes must be ignored.} gdb ignores writes that do not change the value \mI, while Brand reports every one. Our compiler also rewrites object references after every call (for the GC), so a watch on a reference would otherwise ``hit'' after every call.
+\item The CPU stops \emph{after} the writing instruction, possibly already on the next line, so the reported line needs calibration.
+\item Some writes happen inside Rust (Decision~15), where there is no LO line.
+\end{itemize}
+\lbl{Options.}
+\begin{itemize}
+\item \textbf{Fixed address:} evaluate \code{\&obj.field} once and watch it. One slot; simple.
+\item \textbf{gdb-style:} also watch \code{obj} and move the watch when it changes. Two slots per watch; more work.
+\item For writes inside the runtime: \textbf{(a)} walk up the stack to the nearest LO function and report its line, or \textbf{(b)} print whatever gdb prints. (Replacing the GC barrier with a plain store is ruled out: it breaks the runtime ABI.)
+\end{itemize}
+\lbl{Draft recommendation.} Fixed address, unless the published triples show gdb re-evaluating; report only real changes; for runtime writes pick (a) or (b) after checking gdb on the host. Our field and local sizes already meet the hardware's alignment rules \mV.
+
+%--------------------------------------------------------------------------
+\dec{L17}{What do we promise for \code{-g} on LO-5 (reflection) programs?}{after \code{p4-final}}{no}
+\lbl{Why it matters.} P4 grades only LO-4 programs, but the two features will meet once LO-5 merges.\\
+\lbl{Draft recommendation.} Compile-and-verify only: an LO-5 program built with \code{-g} must compile and pass the DWARF validity check; debugger behaviour on reflective calls is best effort. Sarthak adds one such test after both merge.
+
+%==========================================================================
+\section{Suggested order of work and tests}\label{sec:plan}
+
+A natural split is four tracks: (A) compiler \code{-g} and debug-info output; (B) process layer, breakpoints, stepping; (C) DWARF parsers, values, backtrace; (D) script/transcript, test triples, design note. Each day should end with something that runs.
+
+\begin{xltabular}{\linewidth}{@{}L{1.9cm}Y@{}}
+\toprule
+Day & Goal \\
+\midrule
+\endfirsthead
+\toprule Day & Goal \\ \midrule
+\endhead
+Thu 11/26 & Design session; name owners; request the missing documents. \code{-g} flag with spill-all. Debugger skeleton, mock process, script parser and transcript printer passing the spec's example. Log in to the host and run a trivial launch-and-wait. \\
+Fri 11/27 & Merge the shared-prep PR by noon. Line and unwind directives in the compiler. Live process: run, continue, exit codes, breakpoints, \code{stepi}; line-table parser; \code{step}/\code{next}. \textbf{First calibration against gdb.} \\
+Sat 11/28 & Full debug info (functions, variables, types), validity check clean. \code{info locals}, \code{print}, backtrace. \\
+Sun 11/29 & Watchpoints, \code{set var}, \code{x/1dw}, registers. Write triples; fix gdb disagreements. \\
+Mon 11/30 & Freeze, harden, README and 2--3 page design note; tag \code{p4-final} early. No LO-5 merges to \code{main}. \\
+\bottomrule
+\end{xltabular}
+If we slip, cut in this order: interactive-prompt polish, then raw-address breakpoint edge cases, then gdb-style watch re-evaluation. Never cut the triples or the design note.
+
+\textbf{Test triples (need at least 8; plan 10).} Make goldens by running real gdb on the host and rewriting its output into the grammar, then check each by hand. The plan covers: straight-line locals; method calls with \code{step}/\code{next}/backtrace; \textbf{recursion with a deep backtrace} (required); null-then-constructed objects and a subclass in a superclass variable; \textbf{a watchpoint on a loop variable} (required); a field watchpoint including a write inside the GC barrier; \code{set var}, \code{x/1dw} and registers; a runtime abort exit code; several breakpoints with \code{delete}; and Strings with quotes. No raw addresses may appear in any script or transcript.
+
+%==========================================================================
+\section{Questions to ask the instructor}\label{sec:ask}
+\begin{enumerate}
+\item When will the published triples and the P4 grading contract be available?
+\item Who builds the \code{-g} binary for grading, with which assembler flags? How is batch mode invoked, where does the transcript go, and how is stdin supplied?
+\item May or must the runtime's debug info be stripped? Which runtime does the grader link?
+\item What name do constructors get, and does \code{break} take \code{main} or \code{Main.main}?
+\item Does \code{watch obj.field} also track \code{obj}? Which line is reported for a write inside a runtime helper? Are same-value writes suppressed?
+\item May \code{gimli}/\code{object} be used as test-only cross-checks? Can crates be fetched on the host?
+\end{enumerate}
+
+
+\end{document}

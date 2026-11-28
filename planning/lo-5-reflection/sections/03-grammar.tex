@@ -1,0 +1,36 @@
+%==========================================================================
+\section{Grammar extensions}
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}l >{\raggedright}p{7.6cm} X@{}}
+\toprule
+\textbf{Id} & \textbf{Production} & \textbf{Comments} \\
+\midrule
+Added P54 & \nt{Expr} $\to$ \code{reflect} ( \nt{Expr} ) &
+  Returns a ReflectInfo for the object's runtime class. \\
+Added P55 & \nt{Expr} $\to$ \code{getfield} ( \nt{Type} , \nt{Expr} , \nt{Expr} ) &
+  Reads the field whose name is a String value. \\
+Added P56 & \nt{Expr} $\to$ \code{invoke} ( \nt{Type} , \nt{Expr} , \nt{Expr} (, \nt{Actuals})? ) &
+  Calls a \textbf{non-void} method by name. Parallels P23. \\
+Added P57 & \nt{Expr} $\to$ \code{new\_instance} ( \nt{Type} , \nt{Expr} (, \nt{Actuals})? ) &
+  Creates an object of the class named by a String value; the class must be T
+  or a subclass of T. \\
+Added P58 & \nt{Stmt} $\to$ \code{setfield} ( \nt{Type} , \nt{Expr} , \nt{Expr} , \nt{Expr} ) ; &
+  Writes the field whose name is a String value. \\
+Added P59 & \nt{Stmt} $\to$ \code{invoke} ( \nt{Type} , \nt{Expr} , \nt{Expr} (, \nt{Actuals})? ) ; &
+  Calls a \textbf{void} method by name. Parallels P19. \\
+Added P60 & \nt{Expr} $\to$ \code{allocate} ( \nt{Type} , \nt{Expr} ) &
+  Creates an object of the class named by a String value without running a
+  constructor; the class must be T or a subclass of T. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+No productions are modified or deleted. \code{reflect}, \code{getfield},
+\code{setfield}, \code{invoke}, \code{new\_instance} and \code{allocate} become reserved
+keywords; using one as an identifier is
+\code{E\_RESERVED\_KEYWORD\_AS\_IDENTIFIER}. A new production begins with its
+own keyword, and no LO-4 alternative of \nt{Expr} or \nt{Stmt} can begin with
+that keyword, so the parser picks each production with one token of
+lookahead. The grammar remains LL(2). As with P23 and P19, the parser doesn't
+distinguish void from non-void invoke; the type checker does.
+

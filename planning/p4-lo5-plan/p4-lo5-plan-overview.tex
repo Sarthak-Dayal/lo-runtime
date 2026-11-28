@@ -1,0 +1,852 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.65in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,array,tabularx}
+\usepackage{listings}
+\usepackage{xcolor}
+\PassOptionsToPackage{obeyspaces,spaces}{url}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{xltabular}
+\usepackage[most]{tcolorbox}
+\usepackage{needspace}
+
+\setlist{nosep,leftmargin=1.4em}
+\titlespacing*{\section}{0pt}{1.1ex}{0.5ex}
+\titlespacing*{\subsection}{0pt}{0.9ex}{0.3ex}
+\setlength{\parskip}{0.3em}
+\setlength{\parindent}{0pt}
+
+\lstdefinestyle{code}{
+  basicstyle=\ttfamily\footnotesize,
+  columns=fullflexible,
+  keepspaces=true,
+  frame=single,
+  rulecolor=\color{black!30},
+  backgroundcolor=\color{black!3},
+  xleftmargin=0.3em, xrightmargin=0.3em,
+  aboveskip=0.4em, belowskip=0.2em,
+  breaklines=true
+}
+\lstset{style=code}
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\nt}[1]{$\langle$#1$\rangle$}          % grammar nonterminal
+\newcommand{\tm}[1]{\mathtt{#1}}                   % monospace inside math
+% Inference rule: premises separated by \\ (stacked) or \quad (inline).
+\newcommand{\infrule}[2]{\dfrac{\begin{array}{c}#1\end{array}}{#2}}
+
+% ---- additions for this document ----
+\DeclareUrlCommand\cd{\def\UrlFont{\ttfamily\small}}
+\makeatletter
+\g@addto@macro\UrlBreaks{\do\_\do\:\do\(\do\,\do\.}
+\makeatother
+\newcommand{\mV}{\textsf{\scriptsize[V]}}
+\newcommand{\mI}{\textsf{\scriptsize[I]}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcommand{\field}[1]{\textbf{#1}\enspace}
+\renewcommand{\arraystretch}{1.12}
+\DisableLigatures[-]{encoding=T1,family=tt*}
+% Numbered item with a fixed number, so decisions keep their original numbers.
+\newcommand{\decided}[1]{Already decided (\S\ref{sec:decisions}, no.~#1)}
+\newcommand{\decitem}[1]{\needspace{6\baselineskip}\setcounter{enumi}{\numexpr#1-1\relax}\item}
+
+\title{\vspace{-1.2em}\textbf{P4 Debugger and LO-5 Reflection: Plan Overview and Collision Report}\vspace{-0.4em}}
+\author{Group 6, CS 378H, Fall 2026\\[0.2em]
+  \textbf{Team:} Neha, Jay, Rahik, Sarthak}
+\date{Draft of Thu 11/26/2026}
+
+\begin{document}
+\maketitle
+
+\textbf{How to read this.} \S\ref{sec:decisions} is the part that needs action: a box of decisions already settled, then the open decisions, most urgent first. \S\ref{sec:lo5}--\S\ref{sec:overlap} give the background for those decisions. Tags: \mV{} means the claim was checked against the cited code or document; \mI{} means it is inferred or proposed. File paths are relative to the repo root (\cd{compiler/src/...}, \cd{rust/src/...}). Sources are three planning reports, cited as \emph{agent1} (P4 debugger draft), \emph{agent2} (LO-5 implementation plan) and \emph{agent3} (overlap analysis).
+
+%==========================================================================
+\section{Summary}\label{sec:summary}
+\textbf{P4} is the course debugger project, due \textbf{Mon 11/30, 11:59pm Central}. It has two halves: a \code{-g} mode in our compiler that emits DWARF debug information, and a new ptrace-based debugger whose batch mode is graded by byte-for-byte comparison of transcripts against golden output. No P4 work exists in the repo yet, the two binding contracts it names (\cd{dwarf-subset-reference.md} and \cd{architecture-reference.md} §2.6) are not in the repo, and its design is still open: Neha finalizes it at the P4 design session, so every P4 item here is a \emph{draft input} to that session. \textbf{LO-5} (``P5'') is the reflection extension specified in our FSD: six new keywords, a synthetic \cd{ReflectInfo} class, read-only metadata tables, \cd{lo_reflect_*} runtime helpers and a new exit code 140. No LO-5 implementation deadline appears anywhere in the repo, so it is treated as following P4 \mV. The two efforts mostly touch different code: the front end and the Rust runtime are LO-5 only, the debugger and the code generator's debug output are P4 only. They meet in \textbf{five compiler files} (\cd{ir/lower.rs}, \cd{ir/mod.rs}, \cd{layout.rs}, \cd{ir/statics.rs}, \cd{codegen/data.rs}), in \textbf{one shared design question} (which functions get debug entries and appear in backtraces), and in \textbf{one project risk}: reflection code that is always injected, or half-finished LO-5 code on \code{main}, would change every program the P4 grader builds. The proposal is to gate reflection to programs that use it, land one small shared-prep PR to \code{main} on Thursday, write each effort's new code in new files, and keep LO-5 on its own branch until \code{p4-final} is tagged.
+
+\textbf{Terms used throughout.}
+\textbf{DWARF}: the standard debug-information format inside ELF binaries; P4 requires version 5.
+\textbf{DIE} (debugging information entry): one record in \code{.debug\_info}, e.g.\ one per function (a \emph{subprogram}), parameter, local or class type.
+\textbf{Line table} (\code{.debug\_line}): maps machine addresses to source lines; the assembler builds it from \code{.loc} directives.
+\textbf{CFI} (call frame information): tables that say how to find the caller's frame from any instruction, used to unwind for a backtrace; \textbf{CFA} is the canonical frame address those tables compute.
+\textbf{Spill-all}: our existing register-allocation mode that gives every virtual register its own stack slot, so each named variable has a fixed ``home'' address.
+\textbf{vtable}: a class's table of method pointers used for virtual dispatch.
+\textbf{ptrace}: the Linux interface a debugger uses to stop, read and write another process; \textbf{int3} is the one-byte breakpoint instruction; \textbf{dr0--dr3, dr6, dr7} are the x86 hardware debug registers (four watch addresses, a status register, a control register).
+\textbf{Triple}: a graded P4 test (program, command script, golden transcript).
+\textbf{Preamble class}: a class the compiler adds to every program (today \cd{Input} and \cd{Output}).
+\textbf{MDV}: the FSD's ``minimum demonstrable version'' of LO-5.
+
+%==========================================================================
+\section{Decisions needed}\label{sec:decisions}
+Decisions keep their original numbers, because other documents (the work breakdown, and the P4 brief for Neha with its companion agent file) cite them by number. Three are already settled and listed in the box below; the rest are ordered by how soon they block work. Decisions 3 and 5--7 should be settled before the shared-prep PR (\S\ref{sec:ov-prep}); 8--14 before LO-5 milestone M0 (contracts) closes; 15--17 belong to the P4 owner but affect LO-5. Each entry ends with its sources, so it can be traced back.
+
+\begin{tcolorbox}[colback=black!3,colframe=black!35,boxrule=0.5pt,arc=1pt,left=5pt,right=5pt,top=3pt,bottom=3pt,title={\textbf{Already decided (11/26)}},coltitle=black,colbacktitle=black!10,fonttitle=\normalsize]
+\begin{enumerate}[label=\textbf{\arabic*.},ref=\arabic*,leftmargin=1.8em,itemsep=0.3em]
+\decitem{1}\label{dec:gating}\textbf{Reflection is added only to programs that use it.} The compiler injects the \cd{ReflectInfo} class and emits reflection data only when a scan of the parsed program (one \cd{uses_reflection()} check, reused by lowering and by WASM rejection) finds reflective syntax or the \cd{ReflectInfo} type, while \cd{ReflectInfo} stays a reserved class name everywhere, so every LO-4 program, including every P4 test program, compiles exactly as before.
+\decitem{2}\label{dec:landing}\textbf{LO-5 lives on its own branch until P4 ships.} \code{main} takes only P4 work plus one small shared-prep PR until \code{p4-final} is tagged, while LO-5 lives on \code{lo5/integration} (rebased on \code{main} daily, merged after the tag), each effort writes new code in new files, edits to shared files follow the rules in \S\ref{sec:ov-branch}, and a separate P4-specific document is prepared for Neha.
+\decitem{4}\label{dec:termline}\textbf{Each basic block records the source line of its final jump or return.} A new \cd{BasicBlock.terminator_line} field, filled in by \cd{Builder::finish()} from the line of the current statement (about three edits, in the shared-prep PR), gives P4 a line for every instruction without touching LO-5's lowering code.
+\end{enumerate}
+\end{tcolorbox}
+
+\begin{enumerate}[label=\textbf{\arabic*.},ref=\arabic*,leftmargin=1.8em,itemsep=0.8em]
+
+%--------------------------------------------------------------------------
+\decitem{3}\label{dec:staffing}\textbf{Who works on P4 and who on LO-5 this week, and who prepares the LO-5 talk?}
+\begin{itemize}
+\item[] \field{In one sentence.} P4 is due Monday and nobody has started it, yet the LO-5 plan already books all four of us this week, so we have to choose how to split people.
+\item[] \field{Context.}
+\begin{itemize}
+\item P4 is due Mon 11/30, 11:59pm, and no P4 work exists yet \mV.
+\item The LO-5 plan assigns all four members to M0/M1 work this week (\S\ref{sec:lo5-people}).
+\item The P4 compiler-side owner is still ``TBD''. Two shared-prep items (block terminator lines, Decision~\ref{dec:termline}; function origin labels, Decision~\ref{dec:origin}) wait on that person.
+\item The P4 schedule puts LO-5 talk block~1 in class on the same Monday. Nothing we read says whether Group~6 is in block~1.
+\end{itemize}
+\item[] \field{Options.}
+\begin{itemize}
+\item \textbf{(a) Everyone splits time between both.} Everyone stays in the loop, but nobody is fully on the P4 critical path.
+\item \textbf{(b) Some members work only on P4; the others start LO-5 work that touches no shared file} (front end, Rust runtime). Clear ownership for P4; LO-5 keeps moving.
+\item \textbf{(c) LO-5 is limited to contracts and the shared-prep PR until \code{p4-final}.} Most people on P4; LO-5 implementation waits until after Monday.
+\end{itemize}
+\item[] \field{Recommendation.} The sources do not choose among (a)--(c); settle it at the P4 design session. Two things cannot wait: name the P4 compiler owner now, and, if we are in talk block~1, give talk prep to someone who is not on the P4 critical path.
+\item[] \field{Who is affected / who decides.} Everyone; decided by the team at the P4 design session. \emph{Sources:} agent3 §0.12, §3, §4.9; agent1 risk 2; agent2 §2.
+\end{itemize}
+
+%--------------------------------------------------------------------------
+\decitem{5}\label{dec:origin}\textbf{How does the compiler mark the functions it generates itself, so the debugger can hide them?}
+\begin{itemize}
+\item[] \field{In one sentence.} The debugger must hide functions the programmer never wrote, and today there is no reliable way to tell those functions apart from real LO methods.
+\item[] \field{Context.}
+\begin{itemize}
+\item The compiler emits functions the programmer never wrote: \cd{lo_entry}, the C \code{main} wrapper, implicit constructors, and the I/O wrappers behind \cd{Input}/\cd{Output}.
+\item LO-5 adds more: ten \cd{ReflectInfo} query wrappers, and the \cd{lo_construct_*} functions that \code{new\_instance} calls indirectly.
+\item P4 must keep these out of the debug info (no DIE), out of the line table (otherwise \code{step} stops inside them) and out of backtraces: the spec lists only LO methods and constructors \mV{} (spec p.4).
+\item Today the only signal is that such functions use line number 0 (\cd{GENERATED_LINE}). A comment in the code (\cd{add_io_classes.rs}) explicitly warns against inferring ``generated'' from line 0, and a compiled function (\cd{FunctionIr}, \cd{ir/mod.rs}) records nothing about where it came from.
+\end{itemize}
+\item[] \field{Options.}
+\begin{itemize}
+\item \textbf{(a) Infer from line 0.} No new code, but fragile (the code itself warns against it), and it cannot tell an implicit constructor from an I/O wrapper.
+\item \textbf{(b) Infer from symbol-name patterns in the debugger} (e.g.\ \cd{lo_construct_}, \cd{lo_method_*_ReflectInfo_}). No compiler change, but every new kind of generated function needs a new pattern, and a missed one breaks silently.
+\item \textbf{(c) An explicit origin label on each compiled function} (\cd{FunctionIr.origin}, with values such as user method, user constructor, implicit constructor, preamble method, generated). A small shared-prep change; whoever creates a function labels it. The most reliable option.
+\end{itemize}
+\item[] \field{Recommendation.} (c), in the shared-prep PR, because it is the only option that does not guess. P4 then emits debug entries and line rows only for user methods and user constructors. Whether generated functions instead get a DIE marked \code{DW\_AT\_artificial} depends on the DWARF subset reference, which we do not have yet.
+\item[] \field{What LO-5 does under (c).} Construct functions are labelled \emph{generated} and ReflectInfo wrappers \emph{preamble method} (like the I/O wrappers); both use line 0. Construct functions are built through \cd{Builder::new} (no receiver), so they pick up whatever debug fields P4 adds. Lowering of reflective syntax the user wrote passes that node's real source line, never line 0.
+\item[] \field{Who is affected / who decides.} Mainly the P4 compiler owner, who adds the field; Neha (wrappers) and Sarthak (construct functions) review it and label their new functions. \emph{Sources:} agent1 D7, §5 (Subprograms); agent2 §5 (coordination notes); agent3 §0.10, §1C.1, §1C.3, §2.4, §4.2.
+\end{itemize}
+
+%--------------------------------------------------------------------------
+\decitem{6}\label{dec:classmodel}\textbf{Do DWARF and reflection share one description of each class's fields, and does the debugger ever read the reflection tables?}
+\begin{itemize}
+\item[] \field{In one sentence.} The debug info and the reflection metadata both describe every class's fields; if two pieces of code compute that separately, the debugger and reflection can end up disagreeing about where a field lives.
+\item[] \field{Context.}
+\begin{itemize}
+\item Both need the same data per class: name, parent, and for each field its name, declared type and byte offset, with inherited fields first.
+\item The existing class layout (\cd{ClassLayout}, \cd{layout.rs}) already holds most of it: fields (name, owning class, type, offset), the hidden slot in \cd{Output}, the instance size, and the offsets the GC must trace \mV.
+\item Missing: each field's storage width (int and bool are stored as 4 bytes, references as 8). Today that is worked out in the code generator (\cd{codegen/frame.rs}) from IR types.
+\item LO-5 needs a hidden slot of its own (ReflectInfo's metadata pointer), like \cd{Output}'s.
+\end{itemize}
+\item[] \field{Options.}
+\begin{itemize}
+\item \textbf{(a) Each emitter computes its own.} No coordination now, but two copies of the same logic can drift apart.
+\item \textbf{(b) Extend \cd{ClassLayout} and have both emitters read it.} One small shared change now; one source of truth after.
+\item \textbf{(c) A new \cd{class_model.rs} module} (agent1's original idea). Same benefit as (b), but adds a new module next to \cd{ClassLayout}, which already holds most of the data.
+\end{itemize}
+\item[] \field{Recommendation.} (b), in the shared-prep PR:
+\begin{itemize}
+\item add a storage width to each field (\cd{FieldSlot.storage_bytes}), with a test that cross-checks it against the code generator's \cd{width_of};
+\item generalize the hidden slot (a \cd{hidden_slots} list, or a \cd{reflect_meta: Option<u32>} beside \cd{output_destination}), kept out of the field list and the GC offsets but counted in the instance size. DWARF members built from the field list then exclude hidden slots automatically \mI;
+\item whichever emitter lands second adds a test that DWARF member offsets equal reflection field offsets. LO-5's own \cd{ReflectLayout} stays separate and LO-5-only.
+\end{itemize}
+Separately, \textbf{the debugger reads DWARF, never the \cd{lo_reflect_*} tables} (agent1 D8): those tables exist only in LO-5 builds, the P4 DWARF contract is closed, and the FSD lists reflection features as cuttable. LO-5 keeps its symbol names stable anyway.
+\item[] \field{Who is affected / who decides.} Jay (owns \cd{ClassLayout} after the PR) and the P4 DWARF author agree on it. \emph{Sources:} agent1 D8, §4 (\cd{layout.rs} row), §5; agent2 fact 0.2, §1.4, §5; agent3 §0.1--0.2, §1B, §2.2, §4.4.
+\end{itemize}
+
+%--------------------------------------------------------------------------
+\decitem{7}\label{dec:word}\textbf{How do we write an 8-byte number into the compiler's static data?}
+\begin{itemize}
+\item[] \field{In one sentence.} Reflection metadata stores type tags as 8-byte words, but the compiler's static-data format cannot write an 8-byte number today.
+\item[] \field{Context.}
+\begin{itemize}
+\item A type tag is pointer-sized, because a class's tag is its descriptor address (Decision~\ref{dec:metaabi}).
+\item Static data is a list of items (\cd{DataItem}, \cd{ir/mod.rs}) that can only be a 4-byte integer, an address, raw bytes, or zero padding \mV.
+\item \cd{ir/mod.rs} is also where P4 edits the IR structs.
+\end{itemize}
+\item[] \field{Options.}
+\begin{itemize}
+\item \textbf{(a) Add an 8-byte item} (\cd{DataItem::Word(u64)}, written as \code{.quad N}). The proper fix; touches five files (\cd{ir/mod.rs}, \cd{statics.rs}, \cd{codegen/data.rs}, \cd{ir/dump.rs}, \cd{ir/verify.rs}).
+\item \textbf{(b) Write a 4-byte integer followed by 4 zero bytes.} No IR change and correct on little-endian x86-64, but a trick that is easy to break.
+\end{itemize}
+\item[] \field{Recommendation.} (a), in the shared-prep PR: it sits next to the IR structs P4 edits, so doing it once, now, avoids a merge conflict later.
+\item[] \field{Who is affected / who decides.} Sarthak owns it; P4 only shares the file. \emph{Sources:} agent2 fact 0.6, §1.4; agent3 §1C.2, §2.3.
+\end{itemize}
+
+%--------------------------------------------------------------------------
+\decitem{8}\label{dec:metaabi}\textbf{What exact byte layout do the compiler and the Rust runtime agree on for reflection metadata?} (FSD gaps G2, G3, G9)
+\begin{itemize}
+\item[] \field{In one sentence.} Compiled code writes the metadata tables into read-only data and the Rust helpers read them, so both sides must agree on every byte; the FSD says what the metadata contains but not how it is laid out \mV.
+\item[] \field{Context: the open questions, each with a proposal.}
+\begin{itemize}
+\item \textbf{Type tag numbers (G2).} The FSD says only ``small integers'' for void, int, bool, String and null. They must be non-zero and below 8: a class's tag is its descriptor address, and descriptors are 8-byte aligned, so 1--7 can never clash with a class. \emph{Proposal:} 1 void, 2 int, 3 bool, 4 String, 5 null.
+\item \textbf{How the runtime finds the class table (G9).} If the runtime referred to a global symbol, every test harness that links \cd{liblo_runtime.a} without that symbol could fail to link (unverified; the grader's link step is in \cd{p3-grading-contract.sh}). \emph{Proposal:} compiled code passes the table pointer as the first argument of every helper.
+\item \textbf{Who allocates the ReflectInfo object (G9).} The FSD's §5a example has the runtime allocate it, but then the runtime would need to know a descriptor that the compiler generates. \emph{Proposal:} compiled code allocates it and stores the metadata pointer in its hidden slot.
+\item \textbf{The constructor's function pointer (G3).} FSD §6 says the \code{new\_instance} helper ``returns a validated function pointer'', but the FSD's constructor record lists only arity and parameter tags, and the IR verifier forbids runtime functions from returning code pointers \mV. \emph{Proposal:} add a \code{construct} word (holding the function pointer) to the constructor record; the helper returns a pointer to that word, and compiled code loads the function pointer from it. \cd{lo_reflect_method} likewise returns a pointer to the receiver's own vtable entry.
+\item \textbf{How \code{invoke} passes the requested return type.} Either a pointer to a one-word tag, or element~0 of the call site's argument-tag array (the IR cannot hold a pointer-sized constant). \emph{No proposal yet.}
+\end{itemize}
+\item[] \field{Options.} Accept each proposal above, or replace it; the \code{invoke} return-type encoding still needs a pick.
+\item[] \field{Recommendation.} Adopt agent2's layout (\S\ref{sec:lo5-metadata}) as M0 contract~1, accept the proposals above, and lock the layout with paired compiler and Rust layout tests. The G3 proposal departs mechanically from §6's wording, so record it in the FSD (Table~\ref{tab:fsdfixes}).
+\item[] \field{Who is affected / who decides.} Jay, Rahik and Sarthak co-sign the layouts; Neha's query helpers read them. LO-5 only. \emph{Sources:} agent2 facts 0.5--0.6, §1.6, §2 contracts 1, 2, 5, §5, G2, G3, G9.
+\end{itemize}
+
+%--------------------------------------------------------------------------
+\decitem{9}\label{dec:abort}\textbf{What exact message does each reflection failure print at run time?} (G4)
+\begin{itemize}
+\item[] \field{In one sentence.} A failed reflection operation prints \code{lo\_reflect: <reason>} and exits with code 140, and test~8 checks the reason text, but the FSD never gives the wording.
+\item[] \field{Context.}
+\begin{itemize}
+\item The format and exit code are fixed by the FSD; FSD test~8 expects ``the matching'' reason, with no wording given \mV.
+\item The failure cases are known: null receiver; no such field, method or class; type mismatch; wrong arity; wrong argument type; wrong value class; index out of range.
+\end{itemize}
+\item[] \field{Options.} The cases are not in question; only the exact wording is the team's call.
+\item[] \field{Recommendation.} Fix one list of reason strings in M0 (contract~6), and print them from a single \cd{reflect_abort(reason)} that calls \cd{runtime_abort(..., 140)}, so every helper prints them the same way.
+\item[] \field{Who is affected / who decides.} All runtime-helper owners; Sarthak (test~8 expected outputs). \emph{Sources:} agent2 §1.6 (aborts), §2 contract 6, G4.
+\end{itemize}
+
+%--------------------------------------------------------------------------
+\decitem{10}\label{dec:nullprec}\textbf{Does \code{reflect(null)} compile, and which compile error wins when several apply?} (G5, G13)
+\begin{itemize}
+\item[] \field{In one sentence.} The FSD's test~9 and its own typing rule disagree about \code{reflect(null)}, and the FSD never says which error to report when a program breaks two rules at once.
+\item[] \field{Context.}
+\begin{itemize}
+\item Test~9 runs \code{reflect(null)} and expects exit 140 at run time.
+\item But the typing rule (T-Reflect) requires an operand of a user class type, and a literal \code{null} has no class type, so it would be rejected at compile time. LO-4 likewise rejects a literal-null receiver (\cd{E_NULL_LITERAL_RECEIVER}) \mV.
+\item Cases with no stated order: \code{new\_instance(Foo, ...)} with an unknown \code{Foo} could be \cd{E_UNKNOWN_CLASS} or \cd{E_REFLECT_TARGET_TYPE}; the \code{setfield} value check versus an unknown class in its type argument~T is also unordered.
+\item \code{extends ReflectInfo} and \code{new ReflectInfo(...)} currently give \cd{E_INHERITANCE_CHECK_OTHER} and \cd{E_TYPE_CHECK_OTHER}; the FSD wants \cd{E_REFLECT_RESERVED_CLASS} \mV.
+\end{itemize}
+\item[] \field{Options for \code{reflect(null)}.}
+\begin{itemize}
+\item \textbf{(a) Read test~9 as a variable that holds null.} No rule change; agent2's test table already plans a separate \code{reflect(<null var>)} run.
+\item \textbf{(b) Add a null exemption to T-Reflect,} so the literal compiles and fails at run time; one more special case in the type checker.
+\end{itemize}
+\item[] \field{Recommendation.} The sources flag this but do not resolve it. Pick (a) or (b), write one precedence rule for the type checker, and keep the planned special cases for \cd{ReflectInfo}.
+\item[] \field{Who is affected / who decides.} Neha (type checker); Sarthak (tests 7 and 9). \emph{Sources:} agent2 §1.3, G5, G13.
+\end{itemize}
+
+%--------------------------------------------------------------------------
+\decitem{11}\label{dec:visible}\textbf{Which classes can reflection see, and what exact strings do the type queries return?} (G6, G7)
+\begin{itemize}
+\item[] \field{In one sentence.} The FSD does not say whether reflection can reach the built-in classes or \code{Main}, or spell out the strings the queries return, and tests compare those strings exactly.
+\item[] \field{Context: what the FSD leaves open.}
+\begin{itemize}
+\item Whether \code{new\_instance}/\code{allocate} may name \cd{Input}, \cd{Output}, \cd{ReflectInfo} or \code{Main}.
+\item Whether the metadata includes the preamble classes.
+\item What \code{parent\_name()} returns for a class with no parent: \code{""}, an abort, or something else.
+\item The exact strings returned by \code{field\_type}, \code{method\_return} and \code{method\_param\_type}.
+\end{itemize}
+\item[] \field{What agent2's plan already assumes.} The class table holds user classes only (the type checker requires a user class, else \cd{E_REFLECT_TARGET_TYPE}); preamble type names come from their descriptors; the type strings are \code{"int"}, \code{"bool"}, \code{"String"}, the class name, and \code{"void"} for \code{method\_return}.
+\item[] \field{Recommendation.} Confirm those assumptions, then decide two things the sources leave open: whether \code{Main} is reachable, and what \code{parent\_name()} does for a root class.
+\item[] \field{Who is affected / who decides.} Neha (queries); Sarthak (class table). \emph{Sources:} agent2 §1.3, §1.6, §5 (class table), G6, G7.
+\end{itemize}
+
+%--------------------------------------------------------------------------
+\decitem{12}\label{dec:cuts}\textbf{If we run short of time, which reflection features get cut, and in what order?} (G12)
+\begin{itemize}
+\item[] \field{In one sentence.} The FSD's minimum demonstrable version (MDV) and its cut stages do not line up, and our build order follows the cut order in reverse.
+\item[] \field{Context.}
+\begin{itemize}
+\item The MDV is ``\code{reflect} with the metadata queries, plus \code{getfield} and \code{allocate}''. It leaves out \code{invoke}, yet no cut stage removes zero-argument \code{invoke}.
+\item Cut Stage~4 keeps the ``basic'' queries (\code{class\_name}, \code{field\_count}, \code{method\_name}, \code{method\_arity}); it is unclear whether the other queries survive.
+\item Test~2 needs \code{method\_param\_type} (lost at Stage~4) and test~12 needs \code{setfield} (lost at Stage~3) \mV.
+\item The build order in \S\ref{sec:lo5-milestones} is the cut list in reverse.
+\end{itemize}
+\item[] \field{What needs deciding.} Whether zero-argument \code{invoke} is part of the MDV, and which queries each stage keeps.
+\item[] \field{Recommendation.} Write the cut ladder out explicitly: for each stage, which queries it keeps, whether zero-argument \code{invoke} is in the MDV, and which tests drop.
+\item[] \field{Who is affected / who decides.} Everyone; Sarthak (test suite). \emph{Sources:} agent2 §2 (priority), G12.
+\end{itemize}
+
+%--------------------------------------------------------------------------
+\decitem{13}\label{dec:interp}\textbf{What does the interpreter (\code{--run}) do with programs that use reflection?} (G11)
+\begin{itemize}
+\item[] \field{In one sentence.} The FSD does not mention the interpreter, but it must at least compile once the new syntax exists, and implementing reflection there would let us generate expected test outputs without the Linux toolchain.
+\item[] \field{Context.}
+\begin{itemize}
+\item FSD §6 is silent on the interpreter, but it is a pipeline mode and needs new match arms for the new nodes \mV{} (\cd{interpreter/eval.rs}).
+\item The interpreter already has what reflection needs: its class table has effective fields, vtables and constructors, and its heap stores each object's class and fields \mV.
+\item Native end-to-end tests need the x86-64 Linux container; team laptops are macOS.
+\end{itemize}
+\item[] \field{Options.}
+\begin{itemize}
+\item \textbf{(i) Reject reflective programs with a clear error.} Cheap; the interpreter is no help for testing.
+\item \textbf{(ii) Implement reflection in the interpreter.} More work, plus a new reflection abort kind with exit code 140; in return it serves as a reference (``oracle'') that produces expected outputs for tests 1--12 on any laptop.
+\end{itemize}
+\item[] \field{Recommendation.} Agent2 considers (ii) worth the work \mI. Either way it needs an owner, and none is assigned.
+\item[] \field{Who is affected / who decides.} Whoever takes it (unassigned); Sarthak (tests). \emph{Sources:} agent2 §1.8, G11.
+\end{itemize}
+
+%--------------------------------------------------------------------------
+\decitem{14}\label{dec:wasm}\textbf{How exactly does the WASM back end reject programs that use reflection?} (G10)
+\begin{itemize}
+\item[] \field{In one sentence.} Reflection is unsupported on WASM, but the FSD gives no error code or message and does not say what counts as ``using reflection''.
+\item[] \field{Context.}
+\begin{itemize}
+\item The FSD gives no error code or text, and does not say whether \code{--check} should pass.
+\item It does not say whether merely declaring a \cd{ReflectInfo} variable counts as use.
+\item If \cd{ReflectInfo} were always injected, the WASM back end would emit its wrappers into every LO-4 program \mV. Decision~\ref{dec:gating} (already decided) means it is now injected only when used.
+\end{itemize}
+\item[] \field{Options} (combinable).
+\begin{itemize}
+\item \textbf{(a) Inject \cd{ReflectInfo} only when referenced.} This now happens anyway, by Decision~\ref{dec:gating}.
+\item \textbf{(b) The WASM module skips the \cd{ReflectInfo} class, with an ``unreachable'' arm for reflective method bodies.} A safety net if anything slips past the gate.
+\item \textbf{(c) Any use of the \cd{ReflectInfo} type counts as reflection use and is rejected.}
+\end{itemize}
+\item[] \field{Recommendation.} Agent2 recommends (b) plus (c): reject in \cd{main.rs} after the front end, and keep \code{--check} the same on every target. We still need to choose the diagnostic text.
+\item[] \field{Who is affected / who decides.} Neha (the shared predicate); the WASM owner (unassigned). \emph{Sources:} agent2 §1.7, G10; agent3 §1D.5, §2.5.
+\end{itemize}
+
+%--------------------------------------------------------------------------
+\decitem{15}\label{dec:watch}\textbf{When a watched field is changed inside a runtime helper, which source line does the debugger report?} (P4 owner decides; G16)
+\begin{itemize}
+\item[] \field{In one sentence.} A watchpoint hit must report where the write happened as \code{file:line}, but some writes happen inside Rust runtime code, which has no LO line, and LO-5 adds more of them.
+\item[] \field{Context.}
+\begin{itemize}
+\item Writes to reference fields already happen inside Rust, in the GC write barrier \cd{lo_gc_write_barrier} \mV{} (\cd{operations.rs}, \cd{rust/src/gc.rs}).
+\item LO-5 adds int and bool field writes inside \cd{lo_reflect_set_*} (\code{setfield}).
+\item The hardware trap fires while the program counter is in Rust code.
+\item FSD §6 says ``Debugger Frontend: None'', which may be optimistic.
+\end{itemize}
+\item[] \field{Options.}
+\begin{itemize}
+\item \textbf{(a) Walk up the stack} (using the unwind tables, CFI) to the nearest LO function and report its line. One general rule that covers both cases.
+\item \textbf{(b) Print whatever gdb prints,} since gdb is the reference P4 is graded against. Needs calibration on the course host.
+\item \textbf{(c) Under \code{-g}, replace the barrier call with a plain store.} Departs from the barrier that runtime-ABI §3.4 requires, and does not help \cd{lo_reflect_set_*}.
+\end{itemize}
+\item[] \field{Recommendation.} A general P4 rule, (a) or (b), calibrated against gdb on the course host; it covers both cases with no LO-5 work.
+\item[] \field{What LO-5 needs from the answer.} Only a rule that does not depend on which helper did the write. LO-5 commits to never inlining reflective stores, and the FSD's debugger row gets a footnote (Table~\ref{tab:fsdfixes}, G16).
+\item[] \field{Who is affected / who decides.} The P4 debugger owner decides; Jay (\code{setfield}) is affected. \emph{Sources:} agent1 risks 3 and 9; agent2 G16, §5; agent3 §0.8, §1D.3, §2.6, §4.6.
+\end{itemize}
+
+%--------------------------------------------------------------------------
+\decitem{16}\label{dec:rtdebug}\textbf{Is the Rust runtime's debug info stripped when we link a \code{-g} program?} (P4 owner decides)
+\begin{itemize}
+\item[] \field{In one sentence.} If the runtime library carries its own debug info, it could affect the graded DWARF check and let \code{step} wander into Rust source, so one person has to own this build setting.
+\item[] \field{Context.}
+\begin{itemize}
+\item Unverified whether \cd{liblo_runtime.a} carries DWARF; precompiled Rust \code{std} usually has line tables \mI.
+\item If it does, \code{llvm-dwarfdump --verify} also checks the Rust compile units, and gdb's \code{step} may enter Rust source and diverge from our debugger. \code{step} could also enter \cd{lo_reflect_*} helpers.
+\item Either way, the debugger must unwind through Rust frames, which relies on their CFI (\code{.eh\_frame}), so that must be kept \mI.
+\end{itemize}
+\item[] \field{Options.} Strip the runtime's debug info in \code{-g} links (keeping \code{.eh\_frame}), or leave it in; the instructor may require one or the other.
+\item[] \field{Recommendation.} The P4 design session picks one owner, who asks the instructor whether runtime units may or must be stripped, and which runtime the grader links.
+\item[] \field{What LO-5 needs from the answer.} Nothing to build; LO-5 accepts the outcome. It only changes whether \code{step} can enter \cd{lo_reflect_*} helpers.
+\item[] \field{Who is affected / who decides.} The P4 owner decides; LO-5 only indirectly. \emph{Sources:} agent1 D3, risk 4; agent3 §1A (\cd{Cargo.toml} row), §1C.4, §1D.7, §4.7.
+\end{itemize}
+
+%--------------------------------------------------------------------------
+\decitem{17}\label{dec:gplus}\textbf{Do we support compiling an LO-5 program with \code{-g}?} (P4 owner decides)
+\begin{itemize}
+\item[] \field{In one sentence.} P4 is graded only on LO-4 programs, but we should say what is promised when debug info and reflection meet.
+\item[] \field{Context.}
+\begin{itemize}
+\item P4's graded triples are LO-4 programs, so this is not a P4 grading risk \mI.
+\item Spill-all (one stack slot per variable) and LO-5's indirect calls do not conflict \mV{} (\S\ref{sec:ov-assume}).
+\end{itemize}
+\item[] \field{Options.} Full support (debugger behaviour on reflective calls golden-tested), compile-and-verify only, or not supported.
+\item[] \field{Recommendation.} Compile-and-verify: an LO-5 program built with \code{-g} must compile and pass \code{llvm-dwarfdump --verify}; debugger behaviour on reflective calls is best effort, not golden-tested. Add one LO-5 test built with \code{-g} after both efforts merge.
+\item[] \field{What LO-5 needs from the answer.} Only that one test, owned by Sarthak.
+\item[] \field{Who is affected / who decides.} The P4 owner decides; Sarthak (LO-5 tests). \emph{Sources:} agent3 §1C.4, §2.7, §4.8.
+\end{itemize}
+\end{enumerate}
+
+\subsection*{FSD fixes that need no team debate}
+Small corrections to the LO-5 FSD. Some just write down the outcome of a decision above.
+
+\begin{xltabular}{\linewidth}{@{}L{1.1cm}Y L{2.6cm}@{}}
+\caption{Small FSD fixes.}\label{tab:fsdfixes}\\
+\toprule
+Gap & Fix & Depends on \\
+\midrule
+\endfirsthead
+\toprule Gap & Fix & Depends on \\ \midrule
+\endhead
+G1 & Fix the counts in §6. §6's lexer row lists five keywords and leaves out \code{allocate}, but §3 reserves six. §6's parser row says ``six keyword-led productions'', but §3 defines seven (P54--P60, because \code{invoke} has two). §6 should say six keywords, seven productions \mV. & -- \\
+G3 & Add the \code{construct} word (the constructor's function pointer) to the constructor record, and reword §6 to ``returns a pointer to the validated function-pointer word''. & Decision~\ref{dec:metaabi} \\
+G8 & Write the gating policy (reflection only in programs that use it) into §6. & Decision~\ref{dec:gating} (already decided) \\
+G10 & Add the WASM error code and message, and say what \code{--check} does. & Decision~\ref{dec:wasm} \\
+G11 & Add an Interpreter row to §6. & Decision~\ref{dec:interp} \\
+G14 & Tell users that argument checks use \emph{static} types: a \code{Serial}-typed variable that holds a \code{Node}, passed to a \code{Node} parameter, aborts with 140, even though an explicit cast would pass. & -- \\
+G15 & Register exit code 140 in three places: \cd{error-codes.md} (which lives in the \code{lo-testing} repo, not this one), the exit-code table in \cd{runtime-abi.md} §3.8, and \code{EXIT\_REFLECT = 140} in \cd{rust/src/exit_codes.rs}. 140 is currently unused \mV. & -- \\
+G16 & Footnote §6's ``Debugger Frontend: None'' row with the watchpoint caveat. & Decision~\ref{dec:watch} \\
+Others & Write the outcomes of G2, G4--G7, G9, G12 and G13 into the FSD. & Decisions \ref{dec:metaabi}--\ref{dec:cuts} \\
+\bottomrule
+\end{xltabular}
+
+
+%==========================================================================
+\section{LO-5 reflection implementation plan}\label{sec:lo5}
+Source: agent2, built from the FSD and the code. The FSD decision record (\cd{proposals.tex}) was not in the working tree, so ``intent'' judgments come from the FSD text alone. Everything here is a plan \mI{} unless tagged \mV.
+
+\subsection{Facts about today's code that shape the design}\label{sec:lo5-facts}
+\begin{itemize}
+\item \textbf{Preamble classes.} \cd{Input}/\cd{Output} are prepended by \cd{check_program} after the reserved-name check; their methods have I/O bodies that lower to wrapper functions forwarding to runtime calls \mV. ReflectInfo reuses this route.
+\item \textbf{Hidden slot precedent.} \cd{Output} has a compiler-private word appended to its layout, not in \cd{pointer_offsets}, loaded by its wrappers \mV{} (\cd{layout.rs:136-137}). ReflectInfo's metadata pointer copies this.
+\item \textbf{Indirect calls exist} (virtual dispatch loads a code pointer from the vtable), with any argument count \mV. The IR verifier forbids code pointers in function signatures, so a helper returns a \emph{pointer to} a word holding one, and compiled code loads it \mV.
+\item \textbf{No pointer-sized immediates} in IR operands or static data \mV{} (hence Decision~\ref{dec:word}).
+\item \textbf{GC.} Every non-static reference store goes through \cd{lo_gc_write_barrier}; every reference live across a call is rooted automatically; the collector is a moving mark-compact (Lisp-2) \mV.
+\item \textbf{Fields} sit at \code{16 + 8i}; int and bool are read and written as 32-bit, references as 64-bit \mV. \cd{TypedExpr::ty()} is \code{None} for \code{null}, which gives the ``null'' argument tag \mV. Aborts use \cd{runtime_abort(msg, code)}; 140 is unused \mV.
+\end{itemize}
+
+\subsection{Changes per component}\label{sec:lo5-components}
+\begin{xltabular}{\linewidth}{@{}L{2.2cm}L{4.3cm}Y@{}}
+\toprule
+Component & Files & Change \\
+\midrule
+\endfirsthead
+\toprule Component & Files & Change \\ \midrule
+\endhead
+Lexer & \cd{token.rs}, \cd{lexer.rs:171-191} & Six keywords: \code{reflect}, \code{getfield}, \code{setfield}, \code{invoke}, \code{new\_instance}, \code{allocate}. \cd{ReflectInfo} stays an identifier. Update the keyword test. \\
+Parser & \cd{parser.rs}, \cd{ast.rs} & Expression forms P54--P57, P60; statement forms P58 (\code{setfield}) and P59 (\code{invoke(...);} as a statement, unambiguous since LO has no expression statements). Add the keywords to \cd{is_keyword} (else wrong error code) and \cd{is_start_of_expr} (else casts like \code{((Node) getfield(...))} fail). New AST nodes; a \cd{MethodBody::Reflect(ReflectOp)} with the ten query ops. Calling a query needs parentheses: \code{(reflect(c)).class\_name()}. \\
+Type checker & \cd{add_io_classes.rs}, \cd{type_checker/*}, \cd{typed_ast.rs} & ReflectInfo as a preamble class with ten query methods; reserved-name error and preamble kind come for free. Queries resolve as ordinary virtual calls, so a query on a null ReflectInfo is an ordinary null-call abort (exit 102), as the FSD requires. New rules: receiver must be a user class (\cd{E_REFLECT_RECEIVER_TYPE}); name must be String; \code{T $\neq$ void} for get/set (\cd{E_REFLECT_TARGET_TYPE}); setfield value assignment-compatible (\cd{E_REFLECT_VALUE_TYPE}); invoke reuses the existing void/non-void call errors; new\_instance/allocate need a user class. Arity, argument types and member existence are checked at run time. Typed nodes record each argument's static type (\cd{arg_types}). Special-case \code{extends}/\code{new ReflectInfo}. \\
+IR / lowering & \cd{ir/runtime.rs}, new \cd{ir/lower/reflect.rs}, \cd{ir/lower/program.rs}, \cd{ir/statics.rs} (one-line call into a new emitter file), \cd{ir/mod.rs}, \cd{layout.rs}, \cd{symbols.rs} & No new instruction kinds: everything lowers to direct calls, or a load plus an indirect call. New runtime entries, gated emission, construct functions, \cd{DataItem::Word}, the hidden slot and \cd{ReflectLayout}, new length-prefixed symbols (\cd{lo_reflect_classes}, \cd{lo_class_N_C_reflect}, \ldots, \cd{lo_construct_N_C_k}). Agent3 moves the builder methods out of \cd{operations.rs} into the new \cd{reflect.rs}. \\
+Native codegen & \cd{codegen/data.rs} & Only the \code{.quad N} emission for \cd{DataItem::Word}. \\
+Runtime (Rust) & new \cd{rust/src/reflect.rs}, \cd{lib.rs}, \cd{exit_codes.rs} & Helpers in \S\ref{sec:lo5-runtime}; \code{EXIT\_REFLECT = 140}; no collector changes. Must also compile for \code{wasm32} (the runtime is built for it by \cd{tests/run-collector.sh:9}) or be excluded there \mV. Zig/C++ skeletons untouched. \\
+WASM & \cd{main.rs:95-115}, \cd{wasm/*} & Reject reflective programs (Decision~\ref{dec:wasm}); new match arms must exist. \\
+Interpreter & \cd{interpreter/eval.rs} & New arms required; reject or implement (Decision~\ref{dec:interp}). \\
+DWARF / debugger & -- & None required by the FSD; interactions in \S\ref{sec:overlap}. \\
+\bottomrule
+\end{xltabular}
+
+\subsection{Lowering recipes}\label{sec:lo5-lowering}
+Operands are evaluated left to right first; then a runtime helper validates. \code{TABLE} is the class table pointer, passed explicitly (Decision~\ref{dec:metaabi}).
+\begin{itemize}
+\item \textbf{Query wrapper}: load the metadata pointer from \code{this}'s hidden slot, call \cd{lo_reflect_<op>(meta, i[, j])}, return. Same shape as the I/O wrappers.
+\item \textbf{\code{reflect(e)}}: \cd{meta = lo_reflect_class(TABLE, o)} (aborts 140 on null or missing metadata); allocate a ReflectInfo in compiled code; store \code{meta} in its hidden slot (pointer store, no barrier).
+\item \textbf{\code{getfield}/\code{setfield}}: call the typed helper \cd{lo_reflect_get_/set_{int,bool,string,object}}; class-typed forms also pass the wanted descriptor. Reference writes go through the barrier inside the runtime.
+\item \textbf{\code{invoke}}: \cd{lo_reflect_method} validates name, return tag and argument tags and returns a pointer to the receiver's own vtable entry (so overrides are honoured); compiled code loads the code pointer and calls it. This is sound because a runtime-accepted argument type has the same IR type as the parameter.
+\item \textbf{\code{new\_instance}}: \cd{lo_reflect_constructor} returns a pointer to the selected constructor's \code{construct} word; compiled code calls \cd{lo_construct_N_C_k}, whose body reuses the same allocation path as \code{new}.
+\item \textbf{\code{allocate}}: one direct call, \cd{lo_reflect_allocate}, which also sets String fields to the empty string.
+\item \textbf{GC}: nothing new to root. Pointers into \code{.rodata}/\code{.text} are not reference-typed and are never rooted; the hidden slot stays out of \cd{pointer_offsets}. No helper holds a heap pointer across an allocation in this design, so ``helpers root their own pointers'' needs no work; tests 4 and 11 check it.
+\end{itemize}
+
+\subsection{Runtime helpers}\label{sec:lo5-runtime}
+All \code{\#[no\_mangle] extern "C"} in \cd{rust/src/reflect.rs} (proposal; signatures must match the \cd{ir/runtime.rs} entries).
+\begin{xltabular}{\linewidth}{@{}L{2.6cm}L{6.2cm}Y@{}}
+\toprule
+Group (owner) & Helpers & Notes \\
+\midrule
+\endfirsthead
+\toprule Group (owner) & Helpers & Notes \\ \midrule
+\endhead
+Metadata and queries (Neha) & \cd{lo_reflect_class}, \cd{lo_reflect_class_name}, \cd{parent_name}, \cd{field_count}, \cd{field_name}, \cd{field_type}, \cd{method_count}, \cd{method_name}, \cd{method_return}, \cd{method_arity}, \cd{method_param_type} & Out-of-range index aborts 140. Strings built with \cd{lo_string_new} from rodata bytes. \\
+Checked access (Jay) & \cd{lo_reflect_get_int/bool/string/object}, \cd{lo_reflect_set_int/bool/string/object} & Validation order: null receiver, field exists, type match (class fields: declared type $\le$ T via a parent-chain walk), value check; only then the write. \\
+Invocation, construction (Rahik, Sarthak) & \cd{lo_reflect_method}, \cd{lo_reflect_constructor}, \cd{lo_reflect_allocate} & Return pointers to code-pointer words, never code pointers. \\
+Aborts (shared) & internal \cd{reflect_abort(reason)} & Optional exported \cd{lo_reflect_abort}, not needed by this plan. \\
+\bottomrule
+\end{xltabular}
+
+\subsection{Metadata layout (proposal for contract 1)}\label{sec:lo5-metadata}
+All \code{.rodata}, 8-aligned, little-endian, 64-bit pointers. Object header and class descriptor are unchanged. A type tag is one word: 1--5 for void/int/bool/String/null, otherwise a descriptor address. \code{A $\le$ P} holds if equal, if A is null and P a class, or if P is on A's parent chain.
+
+\begin{xltabular}{\linewidth}{@{}L{3.3cm}Y L{1.1cm}@{}}
+\toprule
+Record & Fields (offset) & Size \\
+\midrule
+\endfirsthead
+\toprule Record & Fields (offset) & Size \\ \midrule
+\endhead
+Class table \cd{lo_reflect_classes} & count u32 @0, pad @4, entries @8; entry = descriptor @0, meta @8. User classes only, in class-table order; lookup is a linear scan. & 8+16n \\
+Per class \cd{LoClassMeta} & descriptor @0 (parent, name, vtable reached through it), field\_count @8, method\_count @12, fields @16, methods @24, ctor\_count @32, ctors @40 & 48 B \\
+Field \cd{LoFieldMeta} & name @0, name\_len @8, offset @12, type\_tag @16; inherited first, declaration order & 24 B \\
+Method \cd{LoMethodMeta} & name @0, name\_len @8, vtable\_slot @12, return\_tag @16, param\_count @24, param\_tags @32; one per vtable slot, no function pointer, no \code{this} & 40 B \\
+Constructor \cd{LoCtorMeta} & arity @0, param\_tags @8, construct @16; own constructors only, selected by arity & 24 B \\
+Call-site data & \cd{lo_reflect_sig_<n>} (argument-tag arrays, interned), \cd{lo_reflect_tag_<T>} (single tag), class \code{want} = \cd{lo_class_N_T} & -- \\
+ReflectInfo object & 16-byte header + hidden metadata pointer @16, not traced by GC; descriptor \cd{lo_class_11_ReflectInfo} with ten wrappers & 24 B \\
+\bottomrule
+\end{xltabular}
+
+\subsection{Milestones and interface contracts}\label{sec:lo5-milestones}
+Build order is the scope-cut list in reverse (last-cut first): MDV, then \code{method\_param\_type}, \code{setfield}, n-argument \code{invoke}, \code{new\_instance}.
+
+\begin{xltabular}{\linewidth}{@{}L{2.4cm}Y L{3.4cm}@{}}
+\toprule
+Milestone & Content & Owners / parallelism \\
+\midrule
+\endfirsthead
+\toprule Milestone & Content & Owners / parallelism \\ \midrule
+\endhead
+M0 Contracts & Tokens; AST and typed-AST variants, stubbed in every back end; ReflectInfo preamble class; error codes; \cd{DataItem::Word}; \cd{ReflectLayout} + Rust structs + layout lock tests; runtime entries; \cd{reflect.rs} skeleton with 140; gating predicate & All; Neha leads front end, Jay/Rahik/Sarthak co-sign layout. Serial, short. \\
+M1 Front end + tables & Full parser/checker rules and diagnostics (test 7); class table and per-class records; field arrays; method arrays and parameter tags; \cd{lo_reflect_class} and all queries & Neha (front end, queries), Sarthak (class table), Jay (fields), Rahik (methods); parallel after M0. \\
+M2 MDV & \code{reflect} lowering + wrappers; \code{getfield} + \cd{get_*}; \code{allocate} & Neha, Jay, Sarthak; Rahik starts M3. \\
+M3 Mutation + invoke & \code{setfield} + value check + barrier; \cd{lo_reflect_method} + indirect call (zero-arg first) & Jay, Rahik; parallel. \\
+M4 new\_instance & Constructor arrays, construct functions, \cd{lo_reflect_constructor} & Sarthak (+Rahik's indirect-call helper). \\
+M5 Hardening & Tests 4, 11, 12 under a small \code{LO\_HEAP\_SIZE}; WASM rejection test; interpreter; ABI and error-code docs & Sarthak leads; all. \\
+\bottomrule
+\end{xltabular}
+
+\textbf{Contracts frozen in M0}: (1) metadata layout with paired tests; (2) tag values; (3) helper names and signatures; (4) typed-AST node shapes including \cd{arg_types}; (5) class table passed explicitly; (6) abort reason strings; (7) the gating predicate. \textbf{Hand-offs}: Neha's queries read Jay's field arrays and Rahik's method arrays; Sarthak's \code{allocate} reads Jay's field tags; Rahik and Sarthak share the ``validate, return pointer, load code pointer, call'' lowering helper.
+
+\subsection{Per person}\label{sec:lo5-people}
+\begin{xltabular}{\linewidth}{@{}L{1.5cm}Y@{}}
+\toprule
+Person & Work (FSD role; agent2 milestones; agent3 week plan) \\
+\midrule
+\endfirsthead
+\toprule Person & Work \\ \midrule
+\endhead
+Neha & Front end and type checker, ReflectInfo and queries. Starts now on lexer, parser, AST, type checker; gating predicate (Fri); M2 \code{reflect} lowering and wrappers. \\
+Jay & Checked field access and GC safety, field tables. \cd{reflect.rs} field records (Wed); shared-prep \cd{ClassLayout} change (Thu), then sole editor of \cd{ClassLayout}; M2 \code{getfield}, M3 \code{setfield}. \\
+Rahik & Dynamic invocation, method tables. \cd{reflect.rs} method records (Wed); \cd{ir/runtime.rs} entries (Thu); M3 \cd{lo_reflect_method} and indirect calls; helps M4. \\
+Sarthak & Reflective construction, class lookup table, test suite. \cd{reflect.rs} class table and constructor records (Wed); shared-prep \cd{DataItem::Word} (Thu); M2 \code{allocate}, M4 \code{new\_instance}; M5 test lead. \\
+\bottomrule
+\end{xltabular}
+
+\subsection{Test mapping (FSD tests 1--12)}\label{sec:lo5-tests}
+Proposed home: \cd{tests/lo5-reflection/ValidPrograms/} and \cd{InvalidPrograms/}, each \code{.lo} with a \code{.expected.out}, plus a native-only \cd{run.sh} that also checks exit code and a stderr substring. Harness conventions follow \cd{tests/gc-stress} \mV.
+
+\begin{xltabular}{\linewidth}{@{}L{0.4cm}L{3.6cm}Y@{}}
+\toprule
+\# & Test & Where / what it needs \\
+\midrule
+\endfirsthead
+\toprule \# & Test & Where / what it needs \\ \midrule
+\endhead
+1 & Subclass, parent introspection & LO program; interpreter test if Decision~\ref{dec:interp} picks (ii) \\
+2 & Inherited fields, overridden methods & LO program + \cd{ir/statics.rs} unit test (inherited-first, vtable order); needs \code{method\_param\_type} (Stage 4) \\
+3 & Scalar round-trip & LO program + Rust test that neighbouring slots are untouched (32-bit width) \\
+4 & Reference field + GC & LO program at default and small \code{LO\_HEAP\_SIZE} + Rust test with \cd{lo_gc_collect}; LO cannot force GC, so use allocation pressure \\
+5 & Multi-arg invoke & LO program + IR test that the indirect-call signature equals the callee's \\
+6 & \code{new\_instance} & LO program (Stage 1) \\
+7 & Static negative & \code{lo-compiler --check} and new type-checker unit tests for every \cd{E_REFLECT_*}; runs anywhere with \code{cargo test} \\
+8 & Dynamic failures & Several LO programs expecting 140 + reason (Decision~\ref{dec:abort}); Rust subprocess tests asserting nothing was written or run \\
+9 & Null receiver side effects & Arguments print, then exit 140; depends on Decision~\ref{dec:nullprec} \\
+10 & Supertype field access & LO program \\
+11 & \code{allocate} under GC & Allocation loop, small heap; Rust test for String defaults \\
+12 & Serializer round-trip & Largest LO program; linked lists in place of arrays/maps; needs \code{setfield} (Stage 3) \\
+\bottomrule
+\end{xltabular}
+Native end-to-end tests need an x86-64 Linux toolchain (the course container); team laptops are macOS, so only test 7 and the unit tests run locally \mV/\mI.
+
+%==========================================================================
+\section{P4 debugger (draft input to the P4 design session)}\label{sec:p4}
+Source: agent1. Requirements are \mV{} from \cd{p4-debugger.pdf}; every design choice is a draft \mI. No build was run, and the DWARF subset reference was not available: anything about DIE kinds, attributes, frame base or CFI format is \textbf{conditional} on it.
+
+\subsection{Requirements highlights}\label{sec:p4-req}
+\textbf{Grading}: correctness 50\% (batch transcripts diffed against golden output on the course x86-64 host, over a held-out superset of the published triples, plus ``\code{-g} DWARF validity''), code review 20\%, viva 20\%, contributed tests 10\%.
+\begin{itemize}
+\item \textbf{Batch mode}: reads a gdb-syntax script with a fixed command set (\code{run}, \code{continue}, \code{break} by function, \code{file:line} or address, \code{delete}, \code{stepi}, \code{step}, \code{next}, \code{backtrace}, \code{info locals}, \code{print}, \code{x/1dw}, \code{set var}, \code{watch}) and prints an exact output grammar (\code{Breakpoint N at FILE:L (FN)}, \code{Hit watchpoint N: ...}, \code{Old value}/\code{New value}, \code{Stopped: FILE:L}, \code{\#K FN (ARGS) at FILE:L}, \code{EXPR = V}, \code{Debuggee exited with code D}). Breakpoints and watchpoints share one numbering. FILE is a base name; FN is the subprogram's DWARF name (\code{Main.main} prints as \code{main}).
+\item \textbf{Rendering}: signed decimal ints, \code{true}/\code{false}, quoted strings, \code{null}, objects as \code{Class@<heap> (f = V, ...)} by dynamic class, references inside fields as \code{Class@<heap>}. Backtraces list only LO methods and constructors and omit \code{this}. No raw addresses; ASLR off via \code{personality(ADDR\_NO\_RANDOMIZE)}. Exit codes reported, including runtime aborts.
+\item \textbf{\code{-g} mode}: \code{rbp} is a true frame pointer; every named parameter and local has one fixed home slot; DWARF~5 line table, a DIE subset (compile unit, subprograms, parameters, locals, LO type table) and the required CFI; ``emit what it names and nothing it excludes''; \code{llvm-dwarfdump --verify} clean. The default build stays unchanged.
+\item \textbf{Debugger}: launch-only via ptrace, software breakpoints (int3), \code{stepi}/\code{step}/\code{next} from the line table, backtrace by CFI unwinding, typed \code{print}, hardware watchpoints in dr0--dr3 reporting old value, new value and write site. Interactive and batch front ends over one engine. Must run on the course host (Rosetta containers lack hardware watchpoints and faithful ptrace).
+\item \textbf{Deliverables}: at least 8 team-authored triples covering every feature, including a watchpoint test and a recursion backtrace test; tag \code{p4-final}; README naming the debugger's language (Rust with the \code{nix} crate recommended); a 2--3 page design note. Code review grades a clean process interface and ``honest'' (non-offset-guessing) DWARF parsers.
+\end{itemize}
+
+\subsection{Architecture sketch}\label{sec:p4-arch}
+\begin{itemize}
+\item \textbf{Compiler \code{-g}}: force spill-all for home slots; under \code{-g}, skip \cd{remove_dead_copies} for named variables (otherwise the golden \code{c = null} before construction prints garbage, since frames are not zeroed \mV); emit \code{.loc} rows, \code{.cfi\_*} directives and function labels in \cd{select.rs}/\cd{frame.rs}; hand-emit \code{.debug\_info}/\code{.debug\_abbrev}/\code{.debug\_str} in a new \cd{codegen/dwarf.rs} through verbatim directives \mV; reuse the existing \code{as} + \code{gcc} link.
+\item \textbf{Debugger crate} (new \cd{debugger/}, Rust): \code{elf} (headers, symbols), \code{dwarf} (abbrev, info, line program, CFI), a \code{process} trait with a live ptrace implementation (Linux only) and a scripted mock (laptops), an \code{engine} (breakpoints, watchpoints, stepping, unwinder, expression evaluator, value renderer), script parser and transcript printer, and a REPL.
+\item \textbf{Launch}: fork; in the child disable ASLR, \code{PTRACE\_TRACEME}, redirect stdout/stderr, exec; the parent waits for the exec stop and plants breakpoints. Prefer non-PIE links so ELF addresses equal run-time addresses.
+\item \textbf{Runtime hooks}: none; the debugger reads object header, descriptor and String layout from memory (runtime ABI §2). WASM and the interpreter are out of scope.
+\end{itemize}
+
+\subsection{Draft decisions D1--D10}\label{sec:p4-decisions}
+\begin{xltabular}{\linewidth}{@{}L{0.6cm}L{3.5cm}Y L{1.3cm}@{}}
+\toprule
+ID & Question & Draft recommendation (agent1) & DWARF ref? \\
+\midrule
+\endfirsthead
+\toprule ID & Question & Draft recommendation & DWARF ref? \\ \midrule
+\endhead
+D1 & Home slots under \code{-g} & Reuse spill-all (already supported and tested); skip \cd{remove_dead_copies} for named variables. Alternative: linear scan with named values pinned. & No \\
+D2 & Producing \code{.debug\_line} & \code{.file}/\code{.loc} directives with the assembler flag pinned, if the reference allows assembler-built tables; else hand-encode. Whether gas emits a DWARF-5 header unflagged is \mI. Ask whether the grader assembles our \code{.s}. & Yes \\
+D3 & CFI format & \code{.cfi\_*} directives (giving \code{.eh\_frame}); parser reads \code{.eh\_frame} and \code{.debug\_frame} if required; must unwind through Rust runtime frames; synthesized \code{main} needs CFI too. & Yes \\
+D4 & Language, crate & Rust, new \cd{debugger/} crate, \code{nix}; hand-rolled ELF/DWARF parsers; \code{gimli} only as a dev-time oracle, if allowed. & No \\
+D5 & Debuggee output vs transcript & Redirect the child's stdout/stderr; optional stdin file; CLI must match the (missing) grading contract. & No \\
+D6 & gdb semantics & Implement gdb's rules explicitly and calibrate on the host: prologue skip, line-range stepping, \code{next} over recursion via return-address breakpoint + CFA check, suppress same-value watch hits; emit \code{prologue\_end}. & Partly \\
+D7 & Line attribution & Terminator lines; no DIEs for generated functions. \emph{Superseded in mechanism by Decisions~\ref{dec:termline}, \ref{dec:origin}.} & Partly \\
+D8 & Dynamic class to fields & Read the class name through the object header, look up the DWARF class DIE; symbol table as cross-check; never the reflection tables (Decision~\ref{dec:classmodel}). & Yes \\
+D9 & Process interface & Trait: read/write memory and registers, debug registers, continue, single-step, wait returning a stop reason; mock for batch tests. & No \\
+D10 & Watching \code{obj.field} & Watch only the field address, evaluated once; not gdb's two-slot re-evaluation, unless triples show it. & No \\
+\bottomrule
+\end{xltabular}
+
+\subsection{Code areas}\label{sec:p4-code}
+\begin{xltabular}{\linewidth}{@{}L{4.2cm}Y L{1.7cm}@{}}
+\toprule
+Area & Change & Scale \\
+\midrule
+\endfirsthead
+\toprule Area & Change & Scale \\ \midrule
+\endhead
+\cd{codegen/driver.rs} & \code{-g} flag; force spill-all; skip dead-copy removal; call DWARF emission; assembler flag; default path byte-identical & Moderate \\
+\cd{ir/mod.rs}, \cd{ir/lower.rs} & Debug side table (LO type per named variable, param/local/this, class and method name, source file); terminator lines; generated-function marking & Moderate \\
+\cd{gc_roots.rs}, \cd{liveness.rs}, \cd{verify.rs}, \cd{dump.rs}, \cd{ir/tests.rs} & Carry the terminator line through (small under Decision~\ref{dec:termline}) & Minor \\
+\cd{codegen/frame.rs} & Expose \code{home\_offset(vreg)} and prologue end; CFI around push/mov & Minor--Mod. \\
+\cd{codegen/select.rs} & \code{.loc} on line change, labels, \code{.cfi\_startproc}/\code{endproc}, \code{prologue\_end}; return per-function debug data & Moderate \\
+\cd{codegen/mod.rs} & Append DWARF sections; CFI for \code{main} & Minor \\
+new \cd{codegen/dwarf.rs} & Abbrev table, compile unit, subprogram, parameter and variable DIEs, LO type DIEs, string table & Substantial \\
+\cd{layout.rs} & Shared class model (Decision~\ref{dec:classmodel}) & Minor \\
+\cd{main.rs}; \cd{rust/} & Usage text; maybe strip runtime debug info (Decision~\ref{dec:rtdebug}) & Minor \\
+new \cd{debugger/}, \cd{tests/debugger/} & Debugger crate; triples, README, design note & Substantial \\
+Front end, WASM, interpreter & None expected & None \\
+\bottomrule
+\end{xltabular}
+
+\subsection{What the debugger needs to know}\label{sec:p4-needs}
+\begin{itemize}
+\item \textbf{Classes}: exact LO name (matches the descriptor's name bytes, read via \code{obj+0} $\to$ descriptor, name at \code{+0}, length at \code{+8}); parent (descriptor \code{+16}); byte size \code{16 + 8$\times$fields} (+1 slot for \cd{Output}); fields in inherited-first order with name, LO type, offset \code{16 + 8i} and storage width (4 bytes for int/bool, which sets watch length and \code{set var} width; 8 for references); \cd{Output}'s hidden slot excluded. Methods are not needed beyond subprogram DIEs. Strings: length u32 at \code{+16}, bytes at \code{+20}. Null is 0. \mV{} for offsets.
+\item \textbf{Subprograms}: name (\code{main} in the example; constructor naming unknown), linkage symbol, address range, prologue end, frame base; formals with \code{this} first and marked artificial; locals in declaration order, each with a frame-relative location.
+\item \textbf{Frames under spill-all}: CFA = \code{rbp + 16}; variable \emph{n} at \code{rbp - (spill\_start + 8(n+1))}, where \code{spill\_start} depends on GC root slots known only after root insertion, so offsets must come from the frame object, not be recomputed \mV. Values are valid only after the prologue's parameter moves.
+\item \textbf{GC caveat}: a moving collector updates only root slots; home slots are refreshed after each call. Frame \#0 is correct at statement boundaries; a field watch stays on the old address if the object moves. With the 16~MiB default heap, GC is unlikely in debug tests \mV{} mechanism, \mI{} impact.
+\end{itemize}
+
+%==========================================================================
+\section{Overlaps and coordination}\label{sec:overlap}
+Source: agent3, which spot-checked both reports against the code.
+
+\subsection{Shared files}\label{sec:ov-hotspots}
+\begin{xltabular}{\linewidth}{@{}L{2.6cm}L{3.6cm}L{3.6cm}Y@{}}
+\toprule
+File & P4 (draft) & LO-5 & Collision and mitigation \\
+\midrule
+\endfirsthead
+\toprule File & P4 (draft) & LO-5 & Collision and mitigation \\ \midrule
+\endhead
+\cd{ir/lower.rs} & Debug side table in \cd{Builder::new}; owner/method names; statement lines; terminator line in \cd{finish}/\cd{complete} & New arms in \cd{lower_method}, \cd{statements()}, \cd{expression()} & \textbf{Yes, textual}: same match blocks. LO-5 adds one-line arms into a new \cd{ir/lower/reflect.rs}; P4 owns \cd{Builder::new/finish/complete} \mV{} sites. \\
+\cd{ir/mod.rs} & Terminator/block line; \cd{FunctionIr} debug table and origin & \cd{DataItem::Word} & Same file, different structs. Do both in the shared PR, then freeze. \\
+\cd{layout.rs} & Read class layout; storage width & Hidden slot; \cd{ReflectLayout}; lock tests & \textbf{Yes}: both extend \cd{ClassLayout}. Agree once (Decision~\ref{dec:classmodel}). \\
+\cd{ir/statics.rs} & None (DWARF in new file) & Call metadata emitter; \code{width()} & Low; LO-5 adds a one-line call to a new emitter file. \\
+\cd{ir/lower/operations.rs} & Only if \cd{finish}'s signature changes & Builder methods, unless moved & Avoidable: keep \cd{finish}'s signature; LO-5 code goes in \cd{reflect.rs}. \\
+\cd{ir/lower/program.rs} & Maybe pass file name and class kind & Gating, construct functions, slot accessor & Low to medium. \\
+\cd{codegen/data.rs} & Maybe none & \code{.quad N} & Low. \\
+\cd{codegen/mod.rs}, \cd{driver.rs}, \cd{select.rs}, \cd{frame.rs} & DWARF sections, CFI, \code{-g}, \code{.loc} & None & None (agent1 listed \cd{driver.rs}/\cd{mod.rs} as shared; agent2 never edits them \mV). \\
+\cd{verify.rs}, \cd{dump.rs}, \cd{ir/tests.rs} & Line plumbing & \cd{DataItem::Word} & Low, if done in one PR. \\
+\cd{rust/Cargo.toml} & Maybe strip runtime debug info & None & Indirect: changes what \code{step} sees in \cd{lo_reflect_*} (Decision~\ref{dec:rtdebug}). \\
+\cd{rust/src/*}, \cd{runtime-abi.md}, front end, \cd{wasm/*}, \cd{interpreter/*}, \cd{main.rs} & None & All & None; LO-5 can start here now. \\
+\bottomrule
+\end{xltabular}
+
+\subsection{Shared data: reflection metadata vs DWARF class entries}\label{sec:ov-data}
+Overlap: per-class name, parent, and field name, type, offset and order. No overlap: reflection's method, vtable, signature and constructor records (the debugger needs none), and the debugger's locals, frames, lines and CFI (reflection has none). Both reports agree to generate both from \cd{ClassTable.effective_fields} + \cd{layout::class_layout}, and that the debugger reads DWARF only (Decision~\ref{dec:classmodel}).
+
+\subsection{Shared infrastructure}\label{sec:ov-infra}
+\begin{itemize}
+\item \textbf{Line info} is one-way: LO-5 benefits from P4's terminator lines and only has to pass real node lines (Decision~\ref{dec:origin}). Then reflective call sites get correct \code{.loc} rows for free \mI.
+\item \textbf{Generated functions}: new \cd{lo_construct_*} and ReflectInfo wrappers must be kept out of backtraces (Decision~\ref{dec:origin}).
+\item \textbf{Stepping into reflective calls} (conditional on gdb behaviour, from memory \mI): gdb's \code{step} treats a callee without line info like \code{next}. So \code{step} over \code{invoke(...)} would land in the user method, but \code{step} over \code{new\_instance(...)} would skip the user constructor, which is reached through a construct function with no line rows. Plain \code{new} calls the constructor directly. \code{step} into a \cd{lo_reflect_*} helper enters Rust source only if the runtime carries line tables. Matters only when debugging LO-5 programs, not for P4 grading.
+\item \textbf{ReflectInfo's hidden slot} holds a \code{.rodata} pointer: excluded from GC pointers and DWARF members. A ReflectInfo local under \code{info locals} would render \code{ReflectInfo@<heap> ()}, if preamble classes get class DIEs (open DWARF-subset question) \mI.
+\end{itemize}
+
+\subsection{Assumptions checked for conflict}\label{sec:ov-assume}
+\begin{itemize}
+\item \textbf{``Byte-identical'' means two things}: P4's default (non-\code{-g}) build unchanged, and LO-5's LO-4 programs unchanged. Independent, but ungated injection breaks both (Decision~\ref{dec:gating}).
+\item \textbf{Spill-all vs indirect calls}: no conflict. The call sequence loads an indirect target into r11 before argument setup, and spill-all gives code-pointer temporaries their own slots; virtual dispatch already uses this path \mV.
+\item \textbf{Watchpoints on runtime writes}: already true for LO-4 reference fields; LO-5 extends it to int/bool (Decision~\ref{dec:watch}).
+\item \textbf{Exit code 140}: no conflict; P4 reports exit codes generically. LO-5 registers it (G15).
+\item \textbf{WASM and interpreter}: P4 leaves both untouched; LO-5 changes are LO-5 only.
+\item \textbf{\cd{remove_dead_copies} under \code{-g}}: P4 only; no effect on LO-5 \mV.
+\item \textbf{Runtime debug info}: a P4 build-config decision with a small LO-5 effect; needs one owner (Decision~\ref{dec:rtdebug}).
+\end{itemize}
+
+\subsection{Shared-prep PR (to \code{main}, Thursday 11/26)}\label{sec:ov-prep}
+Small, reviewed by one person from each side; merge by Friday noon, then \code{lo5/integration} rebases onto it.
+\begin{xltabular}{\linewidth}{@{}L{0.4cm}L{4.8cm}Y L{3.3cm}@{}}
+\toprule
+\# & Item & Files & Owner (reviewer) \\
+\midrule
+\endfirsthead
+\toprule \# & Item & Files & Owner (reviewer) \\ \midrule
+\endhead
+1 & \cd{BasicBlock.terminator_line} + \cd{Builder.current_line} (Dec.~\ref{dec:termline}) & \cd{ir/mod.rs}, \cd{ir/lower.rs} & P4 compiler owner (TBD) \\
+2 & \cd{FunctionIr.origin} (Dec.~\ref{dec:origin}) & \cd{ir/mod.rs}, \cd{ir/lower.rs}; struct literals at \cd{lower.rs:201}, \cd{ir/tests.rs:24} & P4 compiler owner (Neha, Sarthak) \\
+3 & \cd{DataItem::Word} (Dec.~\ref{dec:word}) & \cd{ir/mod.rs}, \cd{statics.rs}, \cd{codegen/data.rs}, \cd{dump.rs}, \cd{verify.rs} & Sarthak \\
+4 & \cd{FieldSlot.storage_bytes} + hidden-slot generalization + cross-check test (Dec.~\ref{dec:classmodel}) & \cd{layout.rs} & Jay \\
+-- & Optional: \cd{FunctionIr.lo_types} parallel to \cd{register_names} & \cd{ir/mod.rs} & P4 compiler owner \\
+\bottomrule
+\end{xltabular}
+
+\subsection{Branch rules for shared files}\label{sec:ov-branch}
+\begin{itemize}
+\item \cd{ir/lower.rs}: LO-5 adds only one-line match arms; P4 owns \cd{Builder::new}, \cd{finish}, \cd{complete}.
+\item \cd{layout.rs}: after the shared PR, only Jay edits \cd{ClassLayout}; \cd{ReflectLayout} lives in a separate block.
+\item \cd{ir/mod.rs}: frozen after the shared PR; any change goes through a mini-PR to \code{main} with a heads-up.
+\item \cd{ir/statics.rs}: LO-5 adds only a one-line call.
+\item \cd{codegen/*}, \cd{driver.rs}: P4 only. Front end, \cd{rust/src}, \cd{wasm/*}, \cd{interpreter/*}: LO-5 only.
+\item Any hotspot edit outside these rules gets a heads-up in team chat.
+\end{itemize}
+
+\subsection{Day-by-day (proposal)}\label{sec:ov-schedule}
+P4 owners are left as ``P4'' because roles are set at the P4 design session (Decision~\ref{dec:staffing}).
+\begin{xltabular}{\linewidth}{@{}L{1.5cm}Y Y Y@{}}
+\toprule
+Day & Shared / collision avoidance & P4 (draft) & LO-5 (parallel) \\
+\midrule
+\endfirsthead
+\toprule Day & Shared & P4 & LO-5 \\ \midrule
+\endhead
+Wed 11/25 & 20-minute team call on Decisions 1--7. & -- & Conflict-free start: front end (Neha); \cd{reflect.rs} skeleton, 140, \code{repr(C)} structs (Jay fields, Rahik methods, Sarthak class table and constructors). \\
+Thu 11/26 & Shared-prep PR (\S\ref{sec:ov-prep}). & Design finalized; debugger crate skeleton and process trait (no overlap). & Freeze M0 contracts; \cd{ir/runtime.rs} entries (Rahik). \\
+Fri 11/27 & Merge shared PR by noon; rebase \code{lo5/integration}. & \code{-g} flag; \code{.loc}/CFI; new \cd{codegen/dwarf.rs}. & Lowering in \cd{ir/lower/reflect.rs}; metadata emitter in a new file (Jay, Rahik, Sarthak); gating (Neha). \\
+Sat--Sun 11/28--29 & Daily rebase; heads-up on hotspot edits. & DWARF info, backtrace, watchpoints, triples, design note. & M1/M2; interpreter and Rust unit tests. \\
+Mon 11/30 & Freeze \code{main}; tag \code{p4-final}; no LO-5 lands that day. & Submit by 11:59pm. & Talk block 1 if ours; merge LO-5 after the tag. \\
+\bottomrule
+\end{xltabular}
+
+%==========================================================================
+\section{Risks and open questions}\label{sec:risks}
+
+\subsection{Missing course documents}\label{sec:risk-docs}
+\begin{xltabular}{\linewidth}{@{}L{4.4cm}Y@{}}
+\toprule
+Document & What depends on it \\
+\midrule
+\endfirsthead
+\toprule Document & What depends on it \\ \midrule
+\endhead
+\cd{dwarf-subset-reference.md} & Every DIE, attribute, form, frame-base and CFI choice (D2, D3, D6--D8; Decisions \ref{dec:origin}, \ref{dec:rtdebug}); whether preamble classes get DIEs; whether \code{prologue\_end} and \code{DW\_AT\_artificial} are allowed. \textbf{Blocking for P4.} \\
+\cd{architecture-reference.md} §2.6 & Named by the P4 spec as binding; content unknown. \\
+P4 grading contract (\cd{p4-grading-contract.sh}) & Debugger CLI, stdin/stdout handling, who builds the \code{-g} binary and with which flags. \\
+Published conformance triples & Exact whitespace, address forms in \code{break *}, rendering edge cases, gdb watch behaviour. \\
+\cd{error-codes.md} (\code{lo-testing}) & Registering exit 140; also the \code{lo-testing} header format for abort tests. \\
+\cd{proposals.tex} (LO-5 decision record) & Absent from the working tree; FSD intent judged from the FSD text only. \\
+Brand's book (cited by P4) & Background; not available. \\
+\bottomrule
+\end{xltabular}
+
+\subsection{P4 risks and questions for the instructor (agent1 §6)}\label{sec:risk-p4}
+\begin{enumerate}[label=R\arabic*.,leftmargin=2.2em]
+\item Missing contracts (above): blocking.
+\item Schedule: 5 days over a holiday, nothing started. Suggested priority: mock engine and transcript; \code{-g} with \code{.loc}/CFI and spill-all; ELF and line-table parsing with breakpoints and stepping; \code{.debug\_info} with locals and print; backtrace; watchpoints; triples and design note.
+\item Watchpoints on reference fields fire inside \cd{lo_gc_write_barrier}: is the write site the LO call site? (Decision~\ref{dec:watch}.)
+\item Runtime debug info: may or must runtime units be stripped; which runtime does the grader link? (Decision~\ref{dec:rtdebug}.)
+\item FN naming: constructor names; \code{break main} vs the C \code{main} symbol; same-name methods in several classes.
+\item Which \code{break *<address>} forms appear in graded scripts.
+\item Stepping details: prologue skip for one-line methods, returning mid-line, stepping into I/O wrappers or implicit constructors, stepping over abort paths, whether \code{prologue\_end} is in the subset.
+\item Rendering details: String args in backtraces, String fields in objects, escaping, \code{print this}, \code{\$rax} width and sign, \code{x/1dw} operand form, \code{set var} value forms, exact whitespace.
+\item Watchpoint semantics: same-value suppression (our root reloads rewrite home slots), whether \code{obj} is also watched, hit location (trap PC is after the write), more than four slots, inherited and bool widths.
+\item GC during debugging can invalidate a field watch: are graded programs GC-free, or should we pass a large \code{LO\_HEAP\_SIZE}?
+\item Who builds the \code{-g} binary, with which linker flags (\code{-no-pie} vs \code{-static}), \code{as} version and DWARF flag.
+\item Debuggee stdin/stdout handling and which stream carries the transcript.
+\item Dependencies: can \code{nix} be fetched or vendored on the course host; are \code{gimli}/\code{object} allowed?
+\item \code{-g} and LO-5 edit the same codegen files; guard every \code{-g} change behind the flag (\S\ref{sec:overlap}).
+\end{enumerate}
+
+\subsection{LO-5 risks}\label{sec:risk-lo5}
+\begin{itemize}
+\item The runtime is also built for \code{wasm32}; \cd{reflect.rs} must compile at 32-bit width or be excluded \mV{} script, \mI{} requirement.
+\item Whether an unused extern reference in the static runtime library breaks harness links is unverified; passing the table explicitly avoids the question (Decision~\ref{dec:metaabi}).
+\item GC tests cannot call the collector from LO; they rely on allocation pressure and a small heap.
+\item Native tests need the Linux container; laptops are macOS.
+\item People are double-booked across P4 and LO-5 this week (Decision~\ref{dec:staffing}).
+\end{itemize}
+
+\subsection{Not verified by any report}\label{sec:risk-unverified}
+\begin{itemize}
+\item No builds or tests were run (\code{cargo}, \code{as}, \code{gcc}, \code{llvm-dwarfdump}, \code{gdb}). Unconfirmed: gas emitting DWARF-5 line tables from \code{.loc} without flags; whether \cd{liblo_runtime.a} contains \code{.debug\_*}/\code{.eh\_frame}; whether spill-all passes the full corpus; every ``compiles''/``fits'' claim in the LO-5 plan.
+\item gdb behaviour (prologue skipping, step/next landing, watch suppression, base-pointer watching, step into functions without line info) is from memory; calibrate on the course host.
+\item \code{nix} availability offline; access to the course host.
+\item Whether Group~6 is in LO-5 talk block~1.
+\item Partially read or unread files: agent1 read \cd{design_doc/p3/p3-design.tex} only in outline, not \cd{planning/p3-foundation.md}, interpreter/WASM beyond confirming no change, or the Zig/C++ skeletons. Agent2 did not open \cd{type_checker/entry_point.rs}, \cd{ir/liveness.rs}, the register allocators, \cd{codegen/frame.rs} beyond \cd{width_of}, \cd{x86.rs}/\cd{print.rs}, most of \cd{interpreter/eval.rs}, \cd{rust/src/io.rs}, \cd{string_ops.rs}, \cd{shadow_stack.rs}, \cd{compaction.rs}, and skimmed \cd{p4-debugger.pdf}. Agent3 did not check agent2's front-end line ranges (\cd{interpreter/eval.rs}, \cd{wasm/*}, \cd{type_checker/bodies/*}, \cd{parser.rs}) and checked agent1 only where it bears on overlaps.
+\item The working tree has uncommitted and untracked files (a modified \cd{design_doc/p3/p3-design.pdf}, untracked PDFs, \cd{compiler/codegen-review-notes.md}, \cd{tests/gc-stress/lisp2-only/}); not inspected.
+\end{itemize}
+
+%==========================================================================
+\appendix
+\section{Traceability}\label{sec:trace}
+Every distinct item in the three source reports and where it appears here. ``Dec.'' = Decision in \S\ref{sec:decisions}; ``Already decided'' = the settled-decisions box at the top of \S\ref{sec:decisions}, with the decision's number.
+
+\begin{xltabular}{\linewidth}{@{}L{2.3cm}Y L{3.6cm}@{}}
+\toprule
+Source item & Content & Where here \\
+\midrule
+\endfirsthead
+\toprule Source item & Content & Where here \\ \midrule
+\endhead
+\multicolumn{3}{@{}l}{\textbf{agent1 (P4 debugger draft)}}\\
+State of play & No P4 work; due 11/30; contracts and triples missing & \S\ref{sec:summary}, \S\ref{sec:risk-docs} \\
+§1 A--F & Requirements checklist (batch, \code{-g}, features, tests, review/viva, docs) & \S\ref{sec:p4-req} \\
+§2 & Architecture, launch, target scope, macOS/mock & \S\ref{sec:p4-arch} \\
+D1 & Home slots / spill-all, dead-copy caveat & \S\ref{sec:p4-decisions}, \S\ref{sec:p4-arch} \\
+D2 & \code{.debug\_line} production & \S\ref{sec:p4-decisions} \\
+D3 & CFI format; unwind through Rust & \S\ref{sec:p4-decisions}; Dec.~\ref{dec:rtdebug} \\
+D4 & Rust crate, \code{nix}, hand-rolled parsers & \S\ref{sec:p4-decisions} \\
+D5 & Debuggee output separation & \S\ref{sec:p4-decisions} \\
+D6 & gdb semantics emulation & \S\ref{sec:p4-decisions} \\
+D7 & Terminator lines; generated functions & \S\ref{sec:p4-decisions}; Dec.~\ref{dec:origin}; \decided{\ref{dec:termline}} \\
+D8 & Dynamic class to fields via DWARF & \S\ref{sec:p4-decisions}; Dec.~\ref{dec:classmodel} \\
+D9 & Process interface trait & \S\ref{sec:p4-decisions} \\
+D10 & Watching \code{obj.field} & \S\ref{sec:p4-decisions} \\
+§4 & Code areas table & \S\ref{sec:p4-code} \\
+§5 Classes, subprograms, frames, lines, heap & What the debugger needs & \S\ref{sec:p4-needs} \\
+§5 Overlap & Shared class model; DWARF not reflection; hotspots & Dec.~\ref{dec:classmodel}; \S\ref{sec:ov-hotspots}, \S\ref{sec:ov-data} \\
+§6 R1--R14 & Risks and instructor questions & \S\ref{sec:risk-p4} (R1--R14); R3 Dec.~\ref{dec:watch}; R4 Dec.~\ref{dec:rtdebug}; R14 \decided{\ref{dec:landing}} \\
+§7 & Not verified & \S\ref{sec:risk-unverified} \\
+\midrule
+\multicolumn{3}{@{}l}{\textbf{agent2 (LO-5 implementation plan)}}\\
+Orchestrator note & \cd{proposals.tex} missing & \S\ref{sec:lo5}, \S\ref{sec:risk-docs} \\
+Facts 0.1--0.10 & Preamble, hidden slot, every class emitted, indirect calls, verifier, no immediates, barrier/GC, widths, null type, aborts/140 & \S\ref{sec:lo5-facts}; 0.3 in \decided{\ref{dec:gating}}; 0.6 in Dec.~\ref{dec:word} \\
+§1.1--1.3 & Lexer, parser, type checker & \S\ref{sec:lo5-components} \\
+§1.4 & IR/lowering, symbols, recipes, gating, GC touch points & \S\ref{sec:lo5-components}, \S\ref{sec:lo5-lowering}; Dec.~\ref{dec:word}; \decided{\ref{dec:gating}} \\
+§1.5 & Native codegen (data.rs only) & \S\ref{sec:lo5-components} \\
+§1.6 & Runtime helpers, aborts, wasm32 build, Zig/C++ & \S\ref{sec:lo5-runtime}, \S\ref{sec:risk-lo5}; Dec.~\ref{dec:abort} \\
+§1.7 & WASM rejection options & Dec.~\ref{dec:wasm} \\
+§1.8 & Interpreter options & Dec.~\ref{dec:interp} \\
+§1.9 & DWARF/debugger: none & \S\ref{sec:lo5-components} \\
+§2 order & Reverse cut order & \S\ref{sec:lo5-milestones}; Dec.~\ref{dec:cuts} \\
+§2 contracts 1--7 & M0 contracts & \S\ref{sec:lo5-milestones}; Dec.~\ref{dec:metaabi}, \ref{dec:abort}; \decided{\ref{dec:gating}} \\
+M0--M5 & Milestones & \S\ref{sec:lo5-milestones}, \S\ref{sec:lo5-people} \\
+Hand-offs & Cross-person interfaces & \S\ref{sec:lo5-milestones} \\
+§3 tests 1--12 & Test mapping; toolchain needs & \S\ref{sec:lo5-tests} \\
+G1 & Keyword/production counts & Table~\ref{tab:fsdfixes} \\
+G2 & Tag values & Dec.~\ref{dec:metaabi} \\
+G3 & Constructor function pointer & Dec.~\ref{dec:metaabi}; Table~\ref{tab:fsdfixes} \\
+G4 & Abort strings & Dec.~\ref{dec:abort} \\
+G5 & \code{reflect(null)} & Dec.~\ref{dec:nullprec} \\
+G6 & Query result strings & Dec.~\ref{dec:visible} \\
+G7 & Visible classes & Dec.~\ref{dec:visible} \\
+G8 & LO-4 output unchanged / gating & \decided{\ref{dec:gating}}; Table~\ref{tab:fsdfixes} \\
+G9 & Class table access; who allocates ReflectInfo & Dec.~\ref{dec:metaabi} \\
+G10 & WASM rejection details & Dec.~\ref{dec:wasm}; Table~\ref{tab:fsdfixes} \\
+G11 & Interpreter not in FSD & Dec.~\ref{dec:interp}; Table~\ref{tab:fsdfixes} \\
+G12 & Cuts vs MDV & Dec.~\ref{dec:cuts} \\
+G13 & Diagnostic precedence & Dec.~\ref{dec:nullprec} \\
+G14 & Static-type argument checks & Table~\ref{tab:fsdfixes} \\
+G15 & 140 registration target & Table~\ref{tab:fsdfixes} \\
+G16 & Watchpoints vs runtime writes & Dec.~\ref{dec:watch}; Table~\ref{tab:fsdfixes} \\
+§5 & Metadata layout, ReflectInfo object, P4 notes & \S\ref{sec:lo5-metadata}; Dec.~\ref{dec:classmodel}, \ref{dec:origin} \\
+§6 & Not verified & \S\ref{sec:risk-unverified}, \S\ref{sec:risk-lo5} \\
+\midrule
+\multicolumn{3}{@{}l}{\textbf{agent3 (overlap analysis)}}\\
+Intro & Five files, one question, one risk; three-part proposal & \S\ref{sec:summary} \\
+§0.1--0.2 & \cd{ClassLayout} already the model; hidden slot outside fields & Dec.~\ref{dec:classmodel} \\
+§0.3--0.4 & Terminator without line; instructions carry lines & \decided{\ref{dec:termline}}; \S\ref{sec:ov-infra} \\
+§0.5 & Spill-all + indirect calls OK & \S\ref{sec:ov-assume}; Dec.~\ref{dec:gplus} \\
+§0.6--0.7 & Declarations emit nothing; \cd{CLASS_NAMES} source of truth & \decided{\ref{dec:gating}} \\
+§0.8 & Reference writes already in runtime & Dec.~\ref{dec:watch} \\
+§0.9 & 140 free & Table~\ref{tab:fsdfixes} (G15) \\
+§0.10 & \cd{GENERATED_LINE}, no origin marker & Dec.~\ref{dec:origin} \\
+§0.11 & \cd{remove_dead_copies} & \S\ref{sec:ov-assume}, \S\ref{sec:p4-arch} \\
+§0.12 & Deadline / talk evidence & Dec.~\ref{dec:staffing}; \S\ref{sec:summary} \\
+§1A & Shared-files table (all rows) & \S\ref{sec:ov-hotspots} \\
+§1B & Shared data & \S\ref{sec:ov-data}; Dec.~\ref{dec:classmodel} \\
+§1C.1--1C.5 & Line info, Word, generated fns, stepping, hidden slot & \S\ref{sec:ov-infra}; Dec.~\ref{dec:word}, \ref{dec:origin} \\
+§1D.1--1D.7 & Byte-identical, spill-all, watchpoints, 140, WASM/interp, dead copies, runtime debug info & \S\ref{sec:ov-assume}; Dec.~\ref{dec:watch}, \ref{dec:rtdebug}; \decided{\ref{dec:gating}} \\
+§2.1 & Textual hotspots & \decided{\ref{dec:landing}, \ref{dec:termline}}; \S\ref{sec:ov-branch} \\
+§2.2 & Shared class model & Dec.~\ref{dec:classmodel} \\
+§2.3 & IR additions in one PR & \S\ref{sec:ov-prep}; Dec.~\ref{dec:word} \\
+§2.4 & Generated functions & Dec.~\ref{dec:origin} \\
+§2.5 & Gating & \decided{\ref{dec:gating}} \\
+§2.6 & Watchpoint write site & Dec.~\ref{dec:watch} \\
+§2.7 & \code{-g} + LO-5 & Dec.~\ref{dec:gplus} \\
+§2.8 & Code landing before deadline & \decided{\ref{dec:landing}} \\
+§3 & Day-by-day; branch rules; shared-PR owners & \S\ref{sec:ov-schedule}, \S\ref{sec:ov-branch}, \S\ref{sec:ov-prep} \\
+§4.1--4.9 & Team decisions & Dec.~\ref{dec:origin}, \ref{dec:classmodel}, \ref{dec:watch}, \ref{dec:rtdebug}, \ref{dec:gplus}, \ref{dec:staffing}; \decided{\ref{dec:gating}, \ref{dec:termline}, \ref{dec:landing}} \\
+§5 & Not verified & \S\ref{sec:risk-unverified}, \S\ref{sec:risk-docs} \\
+\bottomrule
+\end{xltabular}
+
+\section{Process notes}\label{sec:process}
+This document was written from the three reports alone, plus the FSD's preamble, scope-cut and roles sections (to expand ``MDV'' and confirm owners). Nothing in the repo was modified, no build or test was run, and no step needed a permission that was skipped. Items no report verified are listed in \S\ref{sec:risk-unverified}.
+
+\end{document}

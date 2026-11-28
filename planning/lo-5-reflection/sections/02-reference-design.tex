@@ -1,0 +1,34 @@
+%==========================================================================
+\section{Reference design}
+Java's reflection (\code{java.lang.reflect}) is the closest analogue and the
+design we follow most closely. We chose it because LO's object model is
+essentially Java's: statically typed classes, single inheritance, vtable
+dispatch and checked casts. Like Java, we split reflection into runtime class
+metadata (\code{Class}), field access (\code{Field}) and method invocation
+(\code{Method}). C\#'s reflection is nearly the same design.
+
+We diverge from Java in six ways. \textbf{Return typing:} Java's
+\code{Field.get} and \code{Method.invoke} return a boxed
+\code{java.lang.Object} that the caller must cast (\code{Field} also has typed
+accessors such as \code{getInt} and \code{getBoolean}); LO-5 names the
+expected type T at the call site, as in \textit{getfield(T, e, n)} and
+\textit{invoke(T, e, n, \ldots)}. \textbf{Type matching:} where Java applies
+boxing, unboxing and widening primitive conversions, LO-5 requires an exact
+match for primitive fields (int, bool, String); for a class-typed field, a
+read accepts a field declared T or a subclass of T, and a write checks the
+value's runtime class against the field's declared type, like Java's
+array-store check. \textbf{Metadata queries:} Java returns heap-allocated
+arrays (e.g.\ \code{Class.getFields()}); LO-5 uses the indexed ReflectInfo
+queries (\S4) that return ints or Strings, such as \textit{field\_name(int i)}. \textbf{Overloading:}
+Java's method lookup accounts for parameter signatures; LO has no
+overloading, so methods are looked up by their unique names.
+\textbf{Construction:} like Java's \code{Constructor.newInstance},
+\textit{new\_instance(T, name, args\ldots)} creates an object reflectively,
+from a class named by a String that must be T or a subclass of T, checked at
+runtime; \textit{allocate(T, name)} creates an instance without running a
+constructor, its fields taking their defaults, the closest analogue to how
+Java serialization creates objects. \textbf{Field access:} Java's
+\code{Class.getField(name)} finds only public fields, and private ones need
+\code{getDeclaredField} plus \code{setAccessible(true)}; LO has no access
+modifiers, so every user-declared field, inherited ones included, is
+reachable by name.
