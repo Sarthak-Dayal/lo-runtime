@@ -178,18 +178,16 @@ impl Frame {
         }
     }
 
-    /// `push rbp ; mov rbp, rsp ; sub rsp, N`, then saves the callee-saved
-    /// registers, then moves parameters to their locations, then builds and
+    /// After `codegen::frame_setup` (`push rbp ; mov rbp, rsp`): `sub rsp, N`,
+    /// then saves the callee-saved registers, then moves parameters to their
+    /// locations, then builds and
     /// registers the shadow frame. Parameters move first because `lo_push_frame`
     /// is a call and may overwrite the argument registers. The allocator matches
     /// this by treating every parameter of a function with calls as surviving a
     /// call. Root slots start null so a collection never reads a stale pointer;
     /// `parent` is filled in by `lo_push_frame`.
     pub fn prologue(&self, params: &[Param]) -> Result<Vec<Inst>, String> {
-        let mut out = vec![
-            Inst::Push(Operand::r64(Reg::Rbp)),
-            Inst::Mov(Operand::r64(Reg::Rbp), Operand::r64(Reg::Rsp)),
-        ];
+        let mut out = vec![];
         if self.size > 0 {
             out.push(Inst::Alu(
                 Alu::Sub,

@@ -30,12 +30,18 @@ pub fn emit_program(
                     program.symbols[function.symbol.0].name
                 )
             })?;
-        let function_items = select::select_function(program, function, function_allocation)?;
-        items.extend(with_frame_info(function_items, debug)?);
+        items.extend(select::select_function(
+            program,
+            function,
+            function_allocation,
+            debug,
+        )?);
+        items.extend(frame_end(debug));
     }
-    let wrapper = main_wrapper(program)?;
+    let wrapper = main_wrapper(program, debug)?;
     x86::check_instructions("main", &wrapper)?;
-    items.extend(with_frame_info(wrapper, debug)?);
+    items.extend(wrapper);
+    items.extend(frame_end(debug));
     items.extend(data::emit_data(program)?);
     // Without this note the linker assumes an executable stack.
     items.push(Item::Blank);
@@ -49,70 +55,66 @@ pub fn emit_program(
 /// passes its `eax` to `exit`, so `Main.main`'s result becomes the exit status.
 /// The runtime is initialized here, before `lo_entry` registers its shadow frame
 /// (`runtime-abi.md` §3.6), so `lo_entry` needs no special prologue.
-fn main_wrapper(program: &ProgramIr) -> Result<Vec<Item>, String> {
+fn main_wrapper(program: &ProgramIr, debug: DebugMode) -> Result<Vec<Item>, String> {
     let startup = program
         .startup
         .ok_or("program has no startup function (lo_entry)")?;
     let entry = program.symbols[startup.0].name.clone();
     // `main` is entered with rsp = 8 (mod 16); push rbp makes it 0 for the calls.
-    Ok(vec![
+    let mut items = vec![
         Item::Blank,
         Item::Directive(".globl main".into()),
         Item::Label("main".into()),
-        Item::Inst(Inst::Push(Operand::r64(Reg::Rbp))),
-        Item::Inst(Inst::Mov(Operand::r64(Reg::Rbp), Operand::r64(Reg::Rsp))),
+    ];
+    items.extend(frame_setup(debug));
+    items.extend([
         Item::Inst(Inst::Call("lo_runtime_init".into())),
         Item::Inst(Inst::Call(entry)),
         Item::Inst(Inst::Pop(Operand::r64(Reg::Rbp))),
         Item::Inst(Inst::Ret),
-    ])
+    ]);
+    Ok(items)
 }
 
-/// Under `-g`, adds the call-frame information a debugger needs to walk the
-/// stack (DWARF Subset Reference §9.6): where the return address and the
-/// caller's `rbp` are, at each instruction. Every function starts with
-/// `push rbp ; mov rbp, rsp`, which gives three states:
+/// `push rbp ; mov rbp, rsp`, the first two instructions of every function.
+/// Under `-g`, each is followed by the call-frame note that tells a debugger
+/// how to find this call's CFA: the stack address just above its return address,
+/// so the return address is always at CFA - 8 (DWARF Subset Reference §9.6).
 ///
 /// ```text
-/// .cfi_startproc               entry: return address just above rsp
+/// .cfi_startproc               on entry: CFA = rsp + 8
 /// push rbp
-/// .cfi_def_cfa_offset 16       return address 16 above rsp, caller's rbp 16 below
-/// .cfi_offset 6, -16           (6 is rbp's DWARF register number)
+/// .cfi_def_cfa_offset 16       rsp moved down 8, so CFA = rsp + 16
+/// .cfi_offset 6, -16           the caller's rbp (register 6) is saved at CFA - 16
 /// mov rbp, rsp
-/// .cfi_def_cfa_register 6      from here on, both are found relative to rbp
-/// ...
-/// .cfi_endproc
+/// .cfi_def_cfa_register 6      CFA = rbp + 16 for the rest of the function
 /// ```
 ///
-/// §9.6 asks for nothing at the epilogue: the debugger only stops at statement
-/// boundaries, never between `leave` and `ret`.
-fn with_frame_info(items: Vec<Item>, debug: DebugMode) -> Result<Vec<Item>, String> {
-    if debug == DebugMode::Off {
-        return Ok(items);
+/// `emit_program` closes each function with `.cfi_endproc`. §9.6 asks for
+/// nothing at the epilogue: the debugger only stops at statement boundaries,
+/// never between `leave` and `ret`.
+pub fn frame_setup(debug: DebugMode) -> Vec<Item> {
+    let push_rbp = Item::Inst(Inst::Push(Operand::r64(Reg::Rbp)));
+    let mov_rbp_rsp = Item::Inst(Inst::Mov(Operand::r64(Reg::Rbp), Operand::r64(Reg::Rsp)));
+    match debug {
+        DebugMode::Off => vec![push_rbp, mov_rbp_rsp],
+        DebugMode::On => vec![
+            cfi_directive(".cfi_startproc"),
+            push_rbp,
+            cfi_directive(".cfi_def_cfa_offset 16"),
+            cfi_directive(".cfi_offset 6, -16"),
+            mov_rbp_rsp,
+            cfi_directive(".cfi_def_cfa_register 6"),
+        ],
     }
-    let is = |item: &Item, inst: &Inst| matches!(item, Item::Inst(i) if i == inst);
-    let push_rbp = Inst::Push(Operand::r64(Reg::Rbp));
-    let set_rbp = Inst::Mov(Operand::r64(Reg::Rbp), Operand::r64(Reg::Rsp));
-    let push = items.iter().position(|item| is(item, &push_rbp));
-    let set = items.iter().position(|item| is(item, &set_rbp));
-    let (Some(push), Some(set)) = (push, set) else {
-        return Err("function does not start with push rbp ; mov rbp, rsp".into());
-    };
-    let directive = |text: &str| Item::Directive(format!("    {text}"));
-    let mut out = Vec::with_capacity(items.len() + 5);
-    for (index, item) in items.into_iter().enumerate() {
-        if index == push {
-            out.push(directive(".cfi_startproc"));
-        }
-        out.push(item);
-        if index == push {
-            out.push(directive(".cfi_def_cfa_offset 16"));
-            out.push(directive(".cfi_offset 6, -16"));
-        }
-        if index == set {
-            out.push(directive(".cfi_def_cfa_register 6"));
-        }
-    }
-    out.push(directive(".cfi_endproc"));
-    Ok(out)
+}
+
+/// Under `-g`, the `.cfi_endproc` that closes a function's call-frame notes.
+fn frame_end(debug: DebugMode) -> Option<Item> {
+    (debug == DebugMode::On).then(|| cfi_directive(".cfi_endproc"))
+}
+
+/// A call-frame note for the assembler, indented like an instruction.
+fn cfi_directive(text: &str) -> Item {
+    Item::Directive(format!("    {text}"))
 }
