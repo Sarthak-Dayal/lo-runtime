@@ -1339,3 +1339,46 @@ fn debug_build_saves_and_reloads_every_named_ref_around_every_call() {
     // -g keeps `c` in its root slot across every call and never clears it.
     assert_eq!(around_last_call(DebugMode::On), (true, true, false));
 }
+
+#[test]
+fn debug_build_gives_every_function_its_frame_info() {
+    use register_allocator::{allocate_registers, TargetConstraints};
+    let assembly = |debug| {
+        let ir = checked_ir(NAMED_REFS_SOURCE, debug);
+        let allocation = allocate_registers(&ir, &TargetConstraints::system_v(), debug);
+        crate::codegen::emit_program(ir.program(), &allocation, debug).expect("emits")
+    };
+
+    assert!(!assembly(DebugMode::Off).contains(".cfi"));
+
+    let asm = assembly(DebugMode::On);
+    let lines: Vec<&str> = asm.lines().map(str::trim).collect();
+    let starts: Vec<usize> = (0..lines.len())
+        .filter(|&i| lines[i] == ".cfi_startproc")
+        .collect();
+    // Every function the program defines, plus the C `main` wrapper.
+    let functions = asm
+        .lines()
+        .filter(|line| line.starts_with(".globl "))
+        .count();
+    assert_eq!(starts.len(), functions);
+    assert_eq!(
+        lines.iter().filter(|line| **line == ".cfi_endproc").count(),
+        functions
+    );
+    for &start in &starts {
+        assert_eq!(
+            lines[start..start + 6],
+            [
+                ".cfi_startproc",
+                "push rbp",
+                ".cfi_def_cfa_offset 16",
+                ".cfi_offset 6, -16",
+                "mov rbp, rsp",
+                ".cfi_def_cfa_register 6",
+            ],
+            "the three frame-info states follow {}",
+            lines[start - 1]
+        );
+    }
+}

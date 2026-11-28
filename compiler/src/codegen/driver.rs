@@ -62,7 +62,7 @@ pub fn compile_to_asm(
         AllocStrategy::SpillAll => spill_everything_program(&ir),
         AllocStrategy::LinearScan => allocate_registers(&ir, &TargetConstraints::system_v(), debug),
     };
-    emit_program(ir.program(), &allocation)
+    emit_program(ir.program(), &allocation, debug)
 }
 
 /// A scratch directory for the intermediate `.s` and `.o`, removed on drop so the
@@ -85,7 +85,14 @@ impl Drop for ScratchDir {
 
 /// `as` then `gcc -static`, the same two steps as the grading harness. The Rust
 /// runtime's standard library needs `-lm -lpthread -ldl` after the archive.
-pub fn assemble_and_link(asm: &str, runtime_lib: &Path, output: &Path) -> Result<(), String> {
+/// Under `-g`, `--eh-frame-hdr` keeps the index a debugger uses to find each
+/// function's call-frame information; `gcc -static` leaves it out otherwise.
+pub fn assemble_and_link(
+    asm: &str,
+    runtime_lib: &Path,
+    output: &Path,
+    debug: DebugMode,
+) -> Result<(), String> {
     let scratch = ScratchDir::new()?;
     let asm_path = scratch.0.join("program.s");
     let object_path = scratch.0.join("program.o");
@@ -94,7 +101,11 @@ pub fn assemble_and_link(asm: &str, runtime_lib: &Path, output: &Path) -> Result
         .arg("-o")
         .arg(&object_path)
         .arg(&asm_path))?;
-    run(Command::new("gcc")
+    let mut link = Command::new("gcc");
+    if debug == DebugMode::On {
+        link.arg("-Wl,--eh-frame-hdr");
+    }
+    run(link
         .arg("-static")
         .arg("-o")
         .arg(output)
@@ -168,7 +179,7 @@ fn run_cli(mode: &str, args: &[OsString]) -> Result<String, String> {
                 .runtime
                 .ok_or("--native needs --runtime LIB.a (or $LO_RUNTIME)")?;
             let asm = compile_to_asm(file, strategy, debug)?;
-            assemble_and_link(&asm, Path::new(&runtime), Path::new(out))?;
+            assemble_and_link(&asm, Path::new(&runtime), Path::new(out), debug)?;
             Ok(String::new())
         }
         _ => Err(USAGE.into()),
