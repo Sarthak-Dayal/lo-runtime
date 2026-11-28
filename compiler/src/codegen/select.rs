@@ -16,8 +16,8 @@
 
 use crate::ir::register_allocator::{FunctionAllocation, PhysicalLocation};
 use crate::ir::{
-    BinaryOp, BlockId, CallTarget, FunctionIr, InstructionKind, IrType, Operand as IrOperand,
-    ProgramIr, SymbolId, Terminator, UnaryOp, VirtualRegId,
+    BinaryOp, BlockId, CallTarget, DebugMode, FunctionIr, InstructionKind, IrType,
+    Operand as IrOperand, ProgramIr, SymbolId, Terminator, UnaryOp, VirtualRegId,
 };
 
 use super::frame::{width_of, Frame, Param, ARGUMENT_REGISTERS};
@@ -37,6 +37,7 @@ pub fn select_function(
     program: &ProgramIr,
     function: &FunctionIr,
     allocation: &FunctionAllocation,
+    debug: DebugMode,
 ) -> Result<Vec<Item>, String> {
     let name = program.symbols[function.symbol.0].name.clone();
     let frame = Frame::new(function, allocation)?;
@@ -45,6 +46,7 @@ pub fn select_function(
         function,
         allocation,
         frame,
+        debug,
         name: name.clone(),
         next_block: None,
         out: vec![],
@@ -61,6 +63,7 @@ struct Selector<'a> {
     function: &'a FunctionIr,
     allocation: &'a FunctionAllocation,
     frame: Frame,
+    debug: DebugMode,
     name: String,
     /// The block emitted next, so jumps to it can be omitted.
     next_block: Option<BlockId>,
@@ -122,9 +125,7 @@ impl Selector<'_> {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        for inst in self.frame.prologue(&params)? {
-            self.emit(inst);
-        }
+        self.out.extend(self.frame.prologue(&params, self.debug)?);
         // The prologue falls through into block 0, so jump if the entry block is elsewhere.
         if self.function.entry != BlockId(0) {
             self.emit(Inst::Jmp(self.label(self.function.entry)));
