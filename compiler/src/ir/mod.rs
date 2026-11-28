@@ -144,6 +144,10 @@ pub struct FunctionIr {
     pub root_slots: u32,
     pub blocks: Vec<BasicBlock>,
     pub entry: BlockId,
+    /// The line the method or constructor is declared on; `GENERATED_LINE` for
+    /// functions the compiler writes (`lo_entry`, implicit constructors, the
+    /// preamble's IO methods).
+    pub decl_line: u32,
 }
 
 impl FunctionIr {

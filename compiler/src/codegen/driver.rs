@@ -62,7 +62,7 @@ pub fn compile_to_asm(
         AllocStrategy::SpillAll => spill_everything_program(&ir),
         AllocStrategy::LinearScan => allocate_registers(&ir, &TargetConstraints::system_v(), debug),
     };
-    emit_program(ir.program(), &allocation, debug)
+    emit_program(ir.program(), &allocation, debug, Path::new(path))
 }
 
 /// A scratch directory for the intermediate `.s` and `.o`, removed on drop so the
@@ -85,8 +85,9 @@ impl Drop for ScratchDir {
 
 /// `as` then `gcc -static`, the same two steps as the grading harness. The Rust
 /// runtime's standard library needs `-lm -lpthread -ldl` after the archive.
-/// Under `-g`, `--eh-frame-hdr` keeps the index a debugger uses to find each
-/// function's call-frame information; `gcc -static` leaves it out otherwise.
+/// Under `-g`, `as --gdwarf-5` writes the line table as DWARF 5 (DWARF Subset
+/// Reference §9.1), and `--eh-frame-hdr` keeps the index a debugger uses to find
+/// each function's call-frame information; `gcc -static` leaves it out otherwise.
 pub fn assemble_and_link(
     asm: &str,
     runtime_lib: &Path,
@@ -97,10 +98,11 @@ pub fn assemble_and_link(
     let asm_path = scratch.0.join("program.s");
     let object_path = scratch.0.join("program.o");
     std::fs::write(&asm_path, asm).map_err(|e| format!("write {}: {e}", asm_path.display()))?;
-    run(Command::new("as")
-        .arg("-o")
-        .arg(&object_path)
-        .arg(&asm_path))?;
+    let mut assemble = Command::new("as");
+    if debug == DebugMode::On {
+        assemble.arg("--gdwarf-5");
+    }
+    run(assemble.arg("-o").arg(&object_path).arg(&asm_path))?;
     let mut link = Command::new("gcc");
     if debug == DebugMode::On {
         link.arg("-Wl,--eh-frame-hdr");

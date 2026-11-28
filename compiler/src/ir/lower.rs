@@ -209,6 +209,7 @@ impl<'ctx, 'ast> Builder<'ctx, 'ast> {
                 root_slots: 0,
                 blocks: vec![],
                 entry: BlockId(0),
+                decl_line: line,
             },
             blocks: vec![],
             current: None,
