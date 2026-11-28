@@ -13,11 +13,15 @@
 //! hands out rax (accumulator and return value), rdx (`cdq`/`idiv` overwrite
 //! it), or r10 and r11 (scratch). Widths come from IR types: Int32 and Bool are
 //! 32-bit, everything else 64-bit.
+//!
+//! Under `-g`, `emit` also writes the line table (`.loc`): see `LineMarks`.
+
+use std::collections::HashSet;
 
 use crate::ir::register_allocator::{FunctionAllocation, PhysicalLocation};
 use crate::ir::{
     BinaryOp, BlockId, CallTarget, DebugMode, FunctionIr, InstructionKind, IrType,
-    Operand as IrOperand, ProgramIr, SymbolId, Terminator, UnaryOp, VirtualRegId,
+    Operand as IrOperand, ProgramIr, SymbolId, Terminator, UnaryOp, VirtualRegId, GENERATED_LINE,
 };
 
 use super::frame::{width_of, Frame, Param, ARGUMENT_REGISTERS};
@@ -50,6 +54,7 @@ pub fn select_function(
         name: name.clone(),
         next_block: None,
         out: vec![],
+        lines: LineMarks::default(),
     };
     selector
         .function_body()
@@ -68,11 +73,87 @@ struct Selector<'a> {
     /// The block emitted next, so jumps to it can be omitted.
     next_block: Option<BlockId>,
     out: Vec<Item>,
+    lines: LineMarks,
+}
+
+/// The `-g` line table for one function, written as `.loc` marks. Each IR
+/// instruction and block terminator sets `pending` to its source line; `emit`
+/// writes the mark just before the first machine instruction that follows, so
+/// an IR instruction that emits nothing leaves no mark behind.
+///
+/// - The first mark for a line in this function is where the debugger stops
+///   for that line (`is_stmt 1`). Blocks are laid out in creation order, and a
+///   statement's own block is created before any block its expression adds,
+///   so the first mark is where the line's code begins. Later marks for the
+///   same line (code laid out further down) get `is_stmt 0`: they map
+///   addresses to the line but are never a stopping point.
+/// - The first mark in the body also carries `prologue_end`, so a breakpoint
+///   on the function stops after its setup code.
+/// - Line 0 (setup code, compiler-written functions) gets no mark.
+#[derive(Default)]
+struct LineMarks {
+    pending: Option<u32>,
+    /// The line of the last mark written, reset at every block label.
+    last: Option<u32>,
+    seen: HashSet<u32>,
+    prologue_end_written: bool,
+}
+
+impl LineMarks {
+    /// The mark to write before an instruction on `line`, if one is needed.
+    fn mark(&mut self, line: u32) -> Option<Item> {
+        let continues_last_mark = self.last == Some(line) && self.prologue_end_written;
+        if line == GENERATED_LINE || continues_last_mark {
+            return None;
+        }
+        self.last = Some(line);
+        let is_stmt = self.seen.insert(line);
+        let prologue_end = !std::mem::replace(&mut self.prologue_end_written, true);
+        Some(loc(line, is_stmt, prologue_end))
+    }
+
+    /// The mark at a function's first instruction: its declaration line.
+    fn entry(&mut self, line: u32) -> Item {
+        self.last = Some(line);
+        self.seen.insert(line);
+        loc(line, true, false)
+    }
+}
+
+/// `.loc 1 LINE 0 is_stmt N [prologue_end]`: file 1, no column.
+fn loc(line: u32, is_stmt: bool, prologue_end: bool) -> Item {
+    let prologue_end = if prologue_end { " prologue_end" } else { "" };
+    Item::Directive(format!(
+        "    .loc 1 {line} 0 is_stmt {}{prologue_end}",
+        u8::from(is_stmt)
+    ))
 }
 
 impl Selector<'_> {
     fn emit(&mut self, inst: Inst) {
+        if let Some(line) = self.lines.pending.take() {
+            self.out.extend(self.lines.mark(line));
+        }
         self.out.push(Item::Inst(inst));
+    }
+
+    /// Under `-g`, the line `emit` marks the next machine instruction with.
+    fn set_line(&mut self, line: Option<u32>) {
+        if self.debug == DebugMode::On {
+            self.lines.pending = line;
+        }
+    }
+
+    /// The first source line in `block`, for a mark that points into it.
+    fn first_line(&self, block: BlockId) -> u32 {
+        let block = &self.function.blocks[block.0];
+        block
+            .instructions
+            .iter()
+            .map(|instruction| instruction.line)
+            .find(|&line| line != GENERATED_LINE)
+            .or(block.terminator_line)
+            .unwrap_or(self.function.decl_line)
     }
 
     fn label(&self, block: BlockId) -> String {
@@ -112,6 +193,10 @@ impl Selector<'_> {
         self.out
             .push(Item::Directive(format!(".globl {}", self.name)));
         self.out.push(Item::Label(self.name.clone()));
+        if self.debug == DebugMode::On && self.function.decl_line != GENERATED_LINE {
+            let entry = self.lines.entry(self.function.decl_line);
+            self.out.push(entry);
+        }
 
         let params = self
             .function
@@ -135,10 +220,16 @@ impl Selector<'_> {
             let id = BlockId(index);
             self.next_block = (index + 1 < self.function.blocks.len()).then(|| BlockId(index + 1));
             self.out.push(Item::Label(self.label(id)));
+            if index > 0 {
+                // Blocks are not laid out in source order: each states its line.
+                self.lines.last = None;
+            }
             for instruction in &block.instructions {
+                self.set_line(Some(instruction.line));
                 self.instruction(&instruction.kind)
                     .map_err(|e| format!("line {}: {e}", instruction.line))?;
             }
+            self.set_line(block.terminator_line);
             self.terminator(&block.terminator)?;
         }
         Ok(())
@@ -481,7 +572,24 @@ impl Selector<'_> {
     fn terminator(&mut self, terminator: &Terminator) -> Result<(), String> {
         match terminator {
             Terminator::Jump(target) => {
-                if self.next_block != Some(*target) {
+                let falls_through = self.next_block == Some(*target);
+                let debug = self.debug == DebugMode::On;
+                if debug
+                    && !self.lines.prologue_end_written
+                    && self.function.decl_line != GENERATED_LINE
+                {
+                    // The body's first code is the jump into a loop's test, so
+                    // the test would carry `prologue_end` and a breakpoint on the
+                    // function would stop on every pass. Mark this jump instead,
+                    // which runs once; the test keeps its own stopping point.
+                    let line = self.first_line(*target);
+                    self.out.push(loc(line, false, true));
+                    self.lines.prologue_end_written = true;
+                    self.lines.pending = None;
+                    self.emit(Inst::Jmp(self.label(*target)));
+                } else if !falls_through || (debug && self.lines.pending.is_some()) {
+                    // Under -g a `break` keeps its jump even when it falls
+                    // through, so its line has code to stop on.
                     self.emit(Inst::Jmp(self.label(*target)));
                 }
             }

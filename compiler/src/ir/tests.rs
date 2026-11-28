@@ -28,6 +28,7 @@ fn example() -> ProgramIr {
             register_names: vec![],
             root_slots: 0,
             entry: BlockId(0),
+            decl_line: 1,
             blocks: vec![
                 BasicBlock {
                     instructions: vec![],
@@ -1346,7 +1347,13 @@ fn debug_build_gives_every_function_its_frame_info() {
     let assembly = |debug| {
         let ir = checked_ir(NAMED_REFS_SOURCE, debug);
         let allocation = allocate_registers(&ir, &TargetConstraints::system_v(), debug);
-        crate::codegen::emit_program(ir.program(), &allocation, debug).expect("emits")
+        crate::codegen::emit_program(
+            ir.program(),
+            &allocation,
+            debug,
+            std::path::Path::new("test.lo"),
+        )
+        .expect("emits")
     };
 
     assert!(!assembly(DebugMode::Off).contains(".cfi"));
@@ -1381,4 +1388,164 @@ fn debug_build_gives_every_function_its_frame_info() {
             lines[start - 1]
         );
     }
+}
+
+const LINE_TABLE_SOURCE: &str = "class Main () {
+    int main() {
+        Calc c;
+        c = new Calc();
+        c.skip();
+        return c.count(3);
+    }
+}
+class Calc () {
+    int count(int n) {
+        while ((n > 0)) {
+            n = (n - 1);
+        }
+        if ((n = 0)) {
+            return 1;
+        } else {
+            return 0;
+        }
+    }
+    void skip() {
+        while (true) {
+            break;
+        }
+    }
+}
+";
+
+/// One function of `-g` assembly: its label and its lines, label excluded,
+/// up to and including `.cfi_endproc`.
+fn asm_functions(asm: &str) -> Vec<(String, Vec<String>)> {
+    let mut functions: Vec<(String, Vec<String>)> = vec![];
+    let mut open = false;
+    for line in asm.lines() {
+        let text = line.trim();
+        if !line.starts_with(' ') && !line.starts_with('.') && text.ends_with(':') {
+            functions.push((text.trim_end_matches(':').to_string(), vec![]));
+            open = true;
+        } else if open {
+            functions.last_mut().unwrap().1.push(text.to_string());
+            open = text != ".cfi_endproc";
+        }
+    }
+    // Data labels (descriptors, strings) are not functions.
+    functions.retain(|(_, lines)| lines.iter().any(|line| line == ".cfi_startproc"));
+    functions
+}
+
+/// The `.loc` marks in a function: (line, is_stmt, prologue_end).
+fn line_marks(lines: &[String]) -> Vec<(u32, bool, bool)> {
+    lines
+        .iter()
+        .filter_map(|line| line.strip_prefix(".loc 1 "))
+        .map(|mark| {
+            let line = mark.split(' ').next().unwrap().parse().unwrap();
+            (
+                line,
+                mark.contains("is_stmt 1"),
+                mark.ends_with("prologue_end"),
+            )
+        })
+        .collect()
+}
+
+fn line_table_asm(debug: DebugMode) -> String {
+    use register_allocator::{allocate_registers, TargetConstraints};
+    let ir = checked_ir(LINE_TABLE_SOURCE, debug);
+    let allocation = allocate_registers(&ir, &TargetConstraints::system_v(), debug);
+    let source = std::path::Path::new("test.lo");
+    crate::codegen::emit_program(ir.program(), &allocation, debug, source).expect("emits")
+}
+
+#[test]
+fn default_build_has_no_line_table() {
+    let asm = line_table_asm(DebugMode::Off);
+    assert!(!asm.contains(".loc") && !asm.contains(".file"));
+}
+
+#[test]
+fn debug_build_line_table_follows_the_rules() {
+    let asm = line_table_asm(DebugMode::On);
+    assert!(asm.contains(".file 1 \"test.lo\"\n"));
+    assert!(asm.contains(".section .debug_line,\"\",@progbits\n.Ldebug_line0:\n"));
+    let functions = asm_functions(&asm);
+    let is_user =
+        |name: &str| name.starts_with("lo_method_4_Calc") || name == "lo_method_4_Main_4_main";
+
+    // Compiler-written functions come first and have no marks.
+    let first_user = functions
+        .iter()
+        .position(|(name, _)| is_user(name))
+        .unwrap();
+    assert!(functions[first_user..]
+        .iter()
+        .all(|(name, _)| is_user(name)));
+    for (name, lines) in &functions[..first_user] {
+        assert!(line_marks(lines).is_empty(), "{name} has no line marks");
+    }
+
+    let declared = [
+        ("lo_method_4_Main_4_main", 2),
+        ("lo_method_4_Calc_5_count", 10),
+        ("lo_method_4_Calc_4_skip", 20),
+    ];
+    for (name, decl_line) in declared {
+        let lines = &functions.iter().find(|(n, _)| n == name).expect(name).1;
+        let marks = line_marks(lines);
+        assert_eq!(
+            marks[0],
+            (decl_line, true, false),
+            "{name} starts at its declaration"
+        );
+        assert_eq!(
+            marks.iter().filter(|(_, _, end)| *end).count(),
+            1,
+            "{name} has one prologue_end"
+        );
+        let mut stopping_lines: Vec<u32> = marks
+            .iter()
+            .filter(|(_, is_stmt, _)| *is_stmt)
+            .map(|(line, _, _)| *line)
+            .collect();
+        let count = stopping_lines.len();
+        stopping_lines.sort();
+        stopping_lines.dedup();
+        assert_eq!(
+            stopping_lines.len(),
+            count,
+            "{name}: one stopping point per line"
+        );
+    }
+
+    // count's first statement is a while: prologue_end sits on the jump into the
+    // loop test (runs once), and the test itself is line 11's stopping point.
+    let count = &functions
+        .iter()
+        .find(|(n, _)| n == "lo_method_4_Calc_5_count")
+        .unwrap()
+        .1;
+    let end = count
+        .iter()
+        .position(|l| l.ends_with("prologue_end"))
+        .unwrap();
+    assert_eq!(count[end], ".loc 1 11 0 is_stmt 0 prologue_end");
+    assert!(count[end + 1].starts_with("jmp "));
+    assert!(line_marks(count).contains(&(11, true, false)));
+
+    // skip's `break` would fall through to the loop exit: it keeps a jump so
+    // line 22 has code to stop on.
+    let skip = &functions
+        .iter()
+        .find(|(n, _)| n == "lo_method_4_Calc_4_skip")
+        .unwrap()
+        .1;
+    let brk = skip
+        .iter()
+        .position(|l| l.starts_with(".loc 1 22 "))
+        .unwrap();
+    assert!(skip[brk + 1].starts_with("jmp "), "{skip:#?}");
 }
