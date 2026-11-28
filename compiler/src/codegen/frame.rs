@@ -19,11 +19,11 @@
 use crate::ir::register_allocator::{
     FunctionAllocation, PhysicalLocation, PhysicalRegId, SpillSlotId,
 };
-use crate::ir::{FunctionIr, IrType};
+use crate::ir::{DebugMode, FunctionIr, IrType};
 use crate::layout::{FrameLayout as ShadowLayout, NATIVE};
 
 use super::moves::{parallel_move, Move};
-use super::x86::{Alu, Inst, Mem, Operand, Reg, Width};
+use super::x86::{Alu, Inst, Item, Mem, Operand, Reg, Width};
 
 /// System V AMD64 integer argument registers, in order.
 pub const ARGUMENT_REGISTERS: [Reg; 6] = [Reg::Rdi, Reg::Rsi, Reg::Rdx, Reg::Rcx, Reg::R8, Reg::R9];
@@ -178,15 +178,15 @@ impl Frame {
         }
     }
 
-    /// After `codegen::frame_setup` (`push rbp ; mov rbp, rsp`): `sub rsp, N`,
-    /// then saves the callee-saved registers, then moves parameters to their
-    /// locations, then builds and
-    /// registers the shadow frame. Parameters move first because `lo_push_frame`
+    /// `frame_setup` (`push rbp ; mov rbp, rsp`, with the `-g` call-frame
+    /// notes), then `sub rsp, N`, then saves the callee-saved registers, then
+    /// moves parameters to their locations, then builds and registers the
+    /// shadow frame. Parameters move first because `lo_push_frame`
     /// is a call and may overwrite the argument registers. The allocator matches
     /// this by treating every parameter of a function with calls as surviving a
     /// call. Root slots start null so a collection never reads a stale pointer;
     /// `parent` is filled in by `lo_push_frame`.
-    pub fn prologue(&self, params: &[Param]) -> Result<Vec<Inst>, String> {
+    pub fn prologue(&self, params: &[Param], debug: DebugMode) -> Result<Vec<Item>, String> {
         let mut out = vec![];
         if self.size > 0 {
             out.push(Inst::Alu(
@@ -215,7 +215,9 @@ impl Frame {
             out.push(Inst::Lea(Reg::Rdi, Self::at(shadow.base)));
             out.push(Inst::Call("lo_push_frame".into()));
         }
-        Ok(out)
+        let mut items = frame_setup(debug);
+        items.extend(out.into_iter().map(Item::Inst));
+        Ok(items)
     }
 
     /// Moves incoming parameters to their allocated locations, in three phases so
@@ -293,4 +295,47 @@ impl Frame {
 
 fn round_up(value: i32, multiple: i32) -> i32 {
     (value + multiple - 1) / multiple * multiple
+}
+
+/// `push rbp ; mov rbp, rsp`, the first two instructions of every function.
+/// Under `-g`, each is followed by the call-frame note that tells a debugger
+/// how to find this call's CFA: the stack address just above its return address,
+/// so the return address is always at CFA - 8 (DWARF Subset Reference §9.6).
+///
+/// ```text
+/// .cfi_startproc               on entry: CFA = rsp + 8
+/// push rbp
+/// .cfi_def_cfa_offset 16       rsp moved down 8, so CFA = rsp + 16
+/// .cfi_offset 6, -16           the caller's rbp (register 6) is saved at CFA - 16
+/// mov rbp, rsp
+/// .cfi_def_cfa_register 6      CFA = rbp + 16 for the rest of the function
+/// ```
+///
+/// `frame_end` closes each function with `.cfi_endproc`. §9.6 asks for
+/// nothing at the epilogue: the debugger only stops at statement boundaries,
+/// never between `leave` and `ret`.
+pub fn frame_setup(debug: DebugMode) -> Vec<Item> {
+    let push_rbp = Item::Inst(Inst::Push(Operand::r64(Reg::Rbp)));
+    let mov_rbp_rsp = Item::Inst(Inst::Mov(Operand::r64(Reg::Rbp), Operand::r64(Reg::Rsp)));
+    match debug {
+        DebugMode::Off => vec![push_rbp, mov_rbp_rsp],
+        DebugMode::On => vec![
+            cfi_directive(".cfi_startproc"),
+            push_rbp,
+            cfi_directive(".cfi_def_cfa_offset 16"),
+            cfi_directive(".cfi_offset 6, -16"),
+            mov_rbp_rsp,
+            cfi_directive(".cfi_def_cfa_register 6"),
+        ],
+    }
+}
+
+/// Under `-g`, the `.cfi_endproc` that closes a function's call-frame notes.
+pub fn frame_end(debug: DebugMode) -> Option<Item> {
+    (debug == DebugMode::On).then(|| cfi_directive(".cfi_endproc"))
+}
+
+/// A call-frame note for the assembler, indented like an instruction.
+fn cfi_directive(text: &str) -> Item {
+    Item::Directive(format!("    {text}"))
 }

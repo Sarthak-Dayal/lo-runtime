@@ -125,10 +125,7 @@ impl Selector<'_> {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        self.out.extend(super::frame_setup(self.debug));
-        for inst in self.frame.prologue(&params)? {
-            self.emit(inst);
-        }
+        self.out.extend(self.frame.prologue(&params, self.debug)?);
         // The prologue falls through into block 0, so jump if the entry block is elsewhere.
         if self.function.entry != BlockId(0) {
             self.emit(Inst::Jmp(self.label(self.function.entry)));
